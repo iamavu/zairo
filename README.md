@@ -37,6 +37,19 @@ zairo analyze /path/to/repo --base main --target HEAD --depth 2 --llm
 
 Run `zairo --help` / `zairo analyze --help` for the full option list.
 
+### Try it on a sample repo
+
+```bash
+python examples/generate_sample_repos.py
+zairo analyze examples/sample-repos/cmd-injection-app --base HEAD~1 --target HEAD --llm
+```
+
+Generates a few small repos under `examples/sample-repos/`, each with one
+commit introducing a distinct, LLM-findable vulnerability (command
+injection, SQL injection, path traversal) — good for a first run, and for
+giving `fleet` (below) genuinely different repos to scan instead of one repo
+copied twice.
+
 ## Scanning multiple repos (`fleet`)
 
 For a security team that owns many repos, not just one: `zairo fleet` scans
