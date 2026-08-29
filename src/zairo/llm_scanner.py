@@ -466,33 +466,42 @@ def scan_graph_for_vulnerabilities(
                 }
 
             if not content.strip():
-                safe_log(f"  error scanning {_display_name(mod_node['name'])}: model returned empty content{empty_note}")
-                return mod_node['id'], prompt_hash, None, usage
+                error_message = f"model returned empty content{empty_note}"
+                safe_log(f"  error scanning {_display_name(mod_node['name'])}: {error_message}")
+                return mod_node['id'], prompt_hash, None, usage, error_message
 
             try:
                 parsed = _extract_json(content)
             except ValueError as e:
                 safe_log(f"  error scanning {_display_name(mod_node['name'])}: {e}")
-                return mod_node['id'], prompt_hash, None, usage
+                return mod_node['id'], prompt_hash, None, usage, str(e)
 
             findings = parsed.get("vulnerabilities", [])
             for finding in findings:
                 finding["severity"] = normalize_severity(finding.get("severity"))
                 finding["cwe"] = normalize_cwe(finding.get("cwe"))
             safe_log(f"  found {len(findings)} vulnerability finding(s): {_display_name(mod_node['name'])}")
-            return mod_node['id'], prompt_hash, findings, usage
+            return mod_node['id'], prompt_hash, findings, usage, None
         except Exception as e:
             safe_log(f"  error scanning {_display_name(mod_node['name'])}: {e}")
-            return mod_node['id'], prompt_hash, None, usage
+            return mod_node['id'], prompt_hash, None, usage, str(e)
 
-    token_usage = {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0, 'requests': 0, 'requests_without_usage': 0}
+    token_usage = {
+        'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0,
+        'requests': 0, 'requests_without_usage': 0,
+        # Deduplicated {error message: count of nodes that hit it} -- surfaced
+        # by the CLI *without* requiring --verbose, so a scan that silently
+        # failed on every node (e.g. a missing API key) is never
+        # indistinguishable from a clean "0 vulnerabilities found" scan.
+        'errors': {},
+    }
 
     if jobs:
         _ensure_litellm()  # deferred until there's actually a request to make
         with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
             futures = [pool.submit(run_job, job) for job in jobs]
             for future in as_completed(futures):
-                node_id, prompt_hash, findings, usage = future.result()
+                node_id, prompt_hash, findings, usage, error_message = future.result()
                 token_usage['requests'] += 1
                 if usage:
                     token_usage['prompt_tokens'] += usage['prompt_tokens']
@@ -501,6 +510,8 @@ def scan_graph_for_vulnerabilities(
                 else:
                     token_usage['requests_without_usage'] += 1
                 if findings is None:
+                    if error_message:
+                        token_usage['errors'][error_message] = token_usage['errors'].get(error_message, 0) + 1
                     continue  # request failed; don't cache a non-result
                 cache[prompt_hash] = findings
                 if findings:

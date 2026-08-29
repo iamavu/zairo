@@ -20,6 +20,27 @@ class Severity(str, enum.Enum):
     critical = "critical"
 
 
+def _print_scan_errors(token_usage: dict, indent: str = "") -> None:
+    """Surfaces per-node LLM scan failures unconditionally -- NOT gated
+    behind --verbose. A scan where every node failed (missing/invalid API
+    key, rate limiting, ...) must never look identical to a clean "0
+    vulnerabilities found" scan; that's a false sense of security for a
+    security tool specifically. Error messages are deduplicated since many
+    failed nodes typically share the same root cause (e.g. one bad API key)."""
+    errors = (token_usage or {}).get('errors') or {}
+    if not errors:
+        return
+    total_failed = sum(errors.values())
+    console.print(
+        f"{indent}[bold red]Warning:[/bold red] {total_failed}/{token_usage['requests']} node scan(s) failed "
+        f"— results may be incomplete:"
+    )
+    for message, count in sorted(errors.items(), key=lambda kv: -kv[1])[:3]:
+        console.print(f"{indent}  [red]× ({count}x)[/red] {message}")
+    if len(errors) > 3:
+        console.print(f"{indent}  [dim]... {len(errors) - 3} more distinct error(s); rerun with --verbose for full detail[/dim]")
+
+
 def _analyze_on_event(event: str, **kw) -> None:
     if event == "graph_built":
         console.print(f"[bold blue]Found {kw['num_modified']} modified/added nodes.[/bold blue]")
@@ -29,6 +50,7 @@ def _analyze_on_event(event: str, **kw) -> None:
         console.print(f"[bold yellow]Running LLM scanner using {kw['model']} (concurrency={kw['concurrency']})...[/bold yellow]")
     elif event == "llm_scan_done":
         console.print(f"[bold yellow]Found vulnerabilities in {kw['num_vulnerable_nodes']} nodes.[/bold yellow]")
+        _print_scan_errors(kw['token_usage'])
 
 
 def _print_token_usage(token_usage: dict) -> None:
@@ -174,6 +196,7 @@ def fleet(
                 console.print(f"    running LLM scan ({kw['model']})...")
             elif event == "llm_scan_done":
                 console.print(f"    {kw['num_vulnerable_nodes']} node(s) with findings")
+                _print_scan_errors(kw['token_usage'], indent="    ")
 
         cache_path = os.path.join(repo_output_dir, ".llm_cache.json") if (llm and cache) else None
         try:
