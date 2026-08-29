@@ -14,61 +14,136 @@ FLEET_HTML_TEMPLATE = """
 <head>
     <title>Zairo Fleet Report</title>
     <style>
-        body { font-family: sans-serif; margin: 0; padding: 24px; background-color: #1e1e1e; color: #fff; }
-        h1 { font-size: 1.4em; border-bottom: 1px solid #3c3c3c; padding-bottom: 10px; }
-        table { border-collapse: collapse; width: 100%; margin-top: 16px; }
-        th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #3c3c3c; }
-        th { color: #4fc1ff; font-size: 0.8em; text-transform: uppercase; }
-        tr:hover { background: #252526; }
-        a { color: #4fc1ff; text-decoration: none; }
+        /* Identical to reporter.py's HTML_TEMPLATE :root -- same source of
+           truth for the palette, so report.html and fleet.html always
+           match. See that file for why the status and severity variables
+           are kept disjoint (a node's fill and severity ring render
+           superimposed there); doesn't apply to this table, but the
+           values stay shared regardless. */
+        :root {
+            --bg: #16161e;
+            --panel: #1a1b26;
+            --panel-2: #1f2335;
+            --border: #292e42;
+            --text: #c0caf5;
+            --text-dim: #737aa2;
+            --text-faint: #565f89;
+            --accent: #7aa2f7;
+            --accent-2: #bb9af7;
+            --status-added: #9ece6a;
+            --status-modified: #7aa2f7;
+            --status-unchanged: #414868;
+            --sev-critical: #f7768e;
+            --sev-high: #ff9e64;
+            --sev-medium: #e0af68;
+            --sev-low: #565f89;
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+            margin: 0; padding: 0; background-color: var(--bg); color: var(--text);
+        }
+
+        header {
+            display: flex; align-items: center; gap: 24px;
+            padding: 10px 20px; background: var(--panel);
+            border-bottom: 1px solid var(--border);
+        }
+        header .brand { font-weight: 700; font-size: 1.05em; letter-spacing: 0.02em; }
+        header .brand span { color: var(--accent); }
+        .stats { display: flex; gap: 18px; margin-left: auto; font-size: 0.85em; color: var(--text-dim); }
+        .stats b { color: var(--text); font-weight: 600; }
+        .stats .stat-crit b { color: var(--sev-critical); }
+        .stats .stat-high b { color: var(--sev-high); }
+
+        .content { padding: 24px; }
+
+        table {
+            border-collapse: collapse; width: 100%;
+            background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+            overflow: hidden;
+        }
+        th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 0.88em; }
+        th {
+            color: var(--text-faint); font-size: 0.72em; text-transform: uppercase;
+            letter-spacing: 0.06em; font-weight: 600; background: var(--panel-2);
+        }
+        tbody tr:last-child td { border-bottom: none; }
+        tbody tr:hover { background: var(--panel-2); }
+        a { color: var(--accent); text-decoration: none; }
         a:hover { text-decoration: underline; }
-        .status-error { color: #ff6b6b; }
-        .status-ok { color: #4CAF50; }
-        .count-nonzero { font-weight: bold; }
-        .count-crit { color: #ff5252; }
-        .count-high { color: #ff9e57; }
-        .count-med { color: #ffd54f; }
-        .count-low { color: #90a4ae; }
-        .totals { margin-top: 20px; font-size: 0.9em; color: #aaa; }
+
+        .badge {
+            font-size: 0.72em; padding: 2px 8px; border-radius: 100px; font-weight: 600;
+            text-transform: uppercase; letter-spacing: 0.03em; display: inline-block;
+        }
+        .badge.status-ok { background: rgba(158,206,106,0.18); color: var(--status-added); }
+        .badge.status-error { background: rgba(247,118,142,0.18); color: var(--sev-critical); }
+
+        .count { font-variant-numeric: tabular-nums; color: var(--text-faint); }
+        .count.nonzero { font-weight: 700; }
+        .count.sev-critical.nonzero { color: var(--sev-critical); }
+        .count.sev-high.nonzero { color: var(--sev-high); }
+        .count.sev-medium.nonzero { color: var(--sev-medium); }
+        .count.sev-low.nonzero { color: var(--sev-low); }
+
+        .error-text { color: var(--sev-critical); font-size: 0.85em; }
+
+        .totals {
+            margin-top: 20px; font-size: 0.85em; color: var(--text-dim);
+            background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+            padding: 12px 16px;
+        }
+        .totals b { color: var(--text); font-weight: 600; }
     </style>
 </head>
 <body>
-    <h1>Zairo Fleet Report — {{ repos|length }} repo(s)</h1>
-    <table>
-        <thead>
-            <tr>
-                <th>Repo</th><th>Status</th><th>Modified nodes</th><th>Findings</th>
-                <th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Reports</th>
-            </tr>
-        </thead>
-        <tbody>
-        {% for r in repos %}
-            <tr>
-                <td>{{ r.repo }}</td>
-            {% if r.status == 'error' %}
-                <td class="status-error">error: {{ r.error }}</td>
-                <td colspan="7"></td>
-            {% else %}
-                <td class="status-ok">ok</td>
-                <td>{{ r.num_modified_nodes }}</td>
-                <td>{{ r.num_findings }}</td>
-                <td class="count-crit {{ 'count-nonzero' if r.severity_counts.critical else '' }}">{{ r.severity_counts.critical }}</td>
-                <td class="count-high {{ 'count-nonzero' if r.severity_counts.high else '' }}">{{ r.severity_counts.high }}</td>
-                <td class="count-med {{ 'count-nonzero' if r.severity_counts.medium else '' }}">{{ r.severity_counts.medium }}</td>
-                <td class="count-low {{ 'count-nonzero' if r.severity_counts.low else '' }}">{{ r.severity_counts.low }}</td>
-                <td>
-                    <a href="{{ r.report_html }}">html</a> ·
-                    <a href="{{ r.report_json }}">json</a>
-                    {% if r.report_sarif %} · <a href="{{ r.report_sarif }}">sarif</a>{% endif %}
-                </td>
-            {% endif %}
-            </tr>
-        {% endfor %}
-        </tbody>
-    </table>
-    <div class="totals">
-        Totals across the fleet — critical: {{ totals.critical }}, high: {{ totals.high }},
-        medium: {{ totals.medium }}, low: {{ totals.low }}
+    <header>
+        <div class="brand"><span>zairo</span> fleet report</div>
+        <div class="stats">
+            <span>Repos: <b>{{ repos|length }}</b></span>
+            <span class="stat-high">High: <b>{{ totals.high }}</b></span>
+            <span class="stat-crit">Critical: <b>{{ totals.critical }}</b></span>
+        </div>
+    </header>
+    <div class="content">
+        <table>
+            <thead>
+                <tr>
+                    <th>Repo</th><th>Status</th><th>Modified nodes</th><th>Findings</th>
+                    <th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Reports</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for r in repos %}
+                <tr>
+                    <td>{{ r.repo }}</td>
+                {% if r.status == 'error' %}
+                    <td><span class="badge status-error">error</span></td>
+                    <td colspan="6" class="error-text">{{ r.error }}</td>
+                    <td></td>
+                {% else %}
+                    <td><span class="badge status-ok">ok</span></td>
+                    <td>{{ r.num_modified_nodes }}</td>
+                    <td>{{ r.num_findings }}</td>
+                    <td class="count sev-critical {{ 'nonzero' if r.severity_counts.critical else '' }}">{{ r.severity_counts.critical }}</td>
+                    <td class="count sev-high {{ 'nonzero' if r.severity_counts.high else '' }}">{{ r.severity_counts.high }}</td>
+                    <td class="count sev-medium {{ 'nonzero' if r.severity_counts.medium else '' }}">{{ r.severity_counts.medium }}</td>
+                    <td class="count sev-low {{ 'nonzero' if r.severity_counts.low else '' }}">{{ r.severity_counts.low }}</td>
+                    <td>
+                        <a href="{{ r.report_html }}">html</a> ·
+                        <a href="{{ r.report_json }}">json</a>
+                        {% if r.report_sarif %} · <a href="{{ r.report_sarif }}">sarif</a>{% endif %}
+                    </td>
+                {% endif %}
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        <div class="totals">
+            Totals across the fleet — critical: <b>{{ totals.critical }}</b>, high: <b>{{ totals.high }}</b>,
+            medium: <b>{{ totals.medium }}</b>, low: <b>{{ totals.low }}</b>
+        </div>
     </div>
 </body>
 </html>
