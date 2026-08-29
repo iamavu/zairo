@@ -3,7 +3,7 @@ import re
 import os
 import tempfile
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import Callable, Dict, Optional
 
 
 def create_worktree(repo_path: str, ref: str) -> str:
@@ -39,7 +39,7 @@ def get_modified_lines(
     repo_path: str,
     base: str = None,
     target: str = None,
-    log: Optional[callable] = None,
+    log: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Dict[int, str]]:
     """
     Parses `git diff -U0` to find which lines have been added/modified.

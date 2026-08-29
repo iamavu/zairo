@@ -32,6 +32,23 @@ def test_generate_reports_writes_json_and_html(tmp_path: Path):
     assert "Zairo Impact Analysis" in html
 
 
+def test_html_escapes_finding_and_node_text_before_rendering(tmp_path: Path):
+    """report.html builds the node-detail panel by setting innerHTML from
+    finding/node fields that ultimately come from scanned source code and
+    LLM output -- neither is trusted. Every such interpolation must go
+    through escapeHtml(); this guards against one being reintroduced raw."""
+    graph_data = _graph_data(str(tmp_path / "x.py"))
+    vulnerabilities = {"n1": [{"title": "X", "description": "d", "impact": "i", "severity": "high"}]}
+    output_dir = tmp_path / "out"
+
+    _, html_path, _ = generate_reports(graph_data, str(output_dir), vulnerabilities, repo_root=str(tmp_path))
+    html = Path(html_path).read_text()
+
+    assert "function escapeHtml(" in html
+    for field in ("v.title", "v.impact", "v.description", "d.name", "d.id", "d.kind", "d.status", "d.file"):
+        assert f"escapeHtml({field})" in html, f"{field} is interpolated without escapeHtml()"
+
+
 def test_sarif_written_when_llm_scan_ran(tmp_path: Path):
     graph_data = _graph_data(str(tmp_path / "x.py"))
     vulnerabilities = {"n1": [{"title": "Command Injection", "description": "...", "impact": "high", "severity": "critical"}]}

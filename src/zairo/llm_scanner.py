@@ -374,10 +374,8 @@ def scan_graph_for_vulnerabilities(
     edges = graph_data['edges']
     cache = _load_cache(cache_path)
 
-    model_label = model
-
     modified_nodes = [n for n in graph_data['nodes'] if n['status'] in ['modified', 'added']]
-    log(f"Scanning {len(modified_nodes)} modified/added node(s) with {model_label}")
+    log(f"Scanning {len(modified_nodes)} modified/added node(s) with {model}")
 
     # Build prompts up front (cheap, local) so trivial/cached nodes never
     # touch the network, and only real work goes into the thread pool.
@@ -465,7 +463,7 @@ def scan_graph_for_vulnerabilities(
                 if snippet:
                     neighbor_contexts.append(snippet)
 
-        prompt_hash = _hash_prompt(model_label, mod_code, neighbor_contexts)
+        prompt_hash = _hash_prompt(model, mod_code, neighbor_contexts)
         cached = cache.get(prompt_hash)
         if cached is not None:
             log(f"  cache hit: {_display_name(mod_node['name'])} ({len(cached)} finding(s))")

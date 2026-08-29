@@ -174,7 +174,10 @@ def write_fleet_reports(
         json.dump(summary, f, indent=2)
 
     html_path = os.path.join(output_dir, "fleet.html")
-    template = Template(FLEET_HTML_TEMPLATE)
+    # autoescape=True: r.repo/r.error are user- and exception-supplied text,
+    # not safe HTML -- unlike reporter.py's template, nothing here needs raw
+    # markup through, so there's no reason not to escape everything.
+    template = Template(FLEET_HTML_TEMPLATE, autoescape=True)
     with open(html_path, 'w') as f:
         f.write(template.render(**summary))
 

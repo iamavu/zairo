@@ -47,7 +47,17 @@ HTML_TEMPLATE = """
 
     <script>
         const graphData = {{ graph_json }};
-        
+
+        // Node/finding text ultimately comes from scanned source code and
+        // LLM output -- neither is trusted input. Escape before it ever
+        // touches innerHTML, or a crafted commit (or an LLM echoing it
+        // back) can run script in whoever opens this report.
+        function escapeHtml(s) {
+            return String(s).replace(/[&<>"']/g, c => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[c]));
+        }
+
         const elements = [];
         graphData.nodes.forEach(n => {
             let color = '#808080';
@@ -136,20 +146,20 @@ HTML_TEMPLATE = """
                 d.vulnerabilities.forEach(v => {
                     vulnHtml += `
                         <div style="background:#440000; padding:10px; margin-bottom:10px; border-left: 3px solid #ff0000;">
-                            <strong>${v.title}</strong> (Impact: ${v.impact})<br>
-                            <p style="margin-top:5px; margin-bottom:0;">${v.description}</p>
+                            <strong>${escapeHtml(v.title)}</strong> (Impact: ${escapeHtml(v.impact)})<br>
+                            <p style="margin-top:5px; margin-bottom:0;">${escapeHtml(v.description)}</p>
                         </div>
                     `;
                 });
             }
-            
+
             document.getElementById('node-details').innerHTML = `
-                <p><strong>Name:</strong> ${d.name}</p>
-                <p><strong>ID:</strong> ${d.id}</p>
-                <p><strong>Kind:</strong> ${d.kind}</p>
-                <p><strong>Status:</strong> ${d.status}</p>
-                <p><strong>File:</strong> ${d.file}</p>
-                <p><strong>Lines:</strong> ${d.start_line} - ${d.end_line}</p>
+                <p><strong>Name:</strong> ${escapeHtml(d.name)}</p>
+                <p><strong>ID:</strong> ${escapeHtml(d.id)}</p>
+                <p><strong>Kind:</strong> ${escapeHtml(d.kind)}</p>
+                <p><strong>Status:</strong> ${escapeHtml(d.status)}</p>
+                <p><strong>File:</strong> ${escapeHtml(d.file)}</p>
+                <p><strong>Lines:</strong> ${escapeHtml(d.start_line)} - ${escapeHtml(d.end_line)}</p>
                 ${vulnHtml}
             `;
         });

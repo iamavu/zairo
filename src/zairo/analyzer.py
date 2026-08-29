@@ -1,8 +1,19 @@
 import os
-from typing import Callable, Dict, List, Optional, Set, Any
+from typing import Any, Callable, Dict, Optional
 from trailmark.query.api import QueryEngine
 from .git_utils import get_modified_lines
 from ._util import display_name as _display_name
+
+
+def _enum_value(x: Any, default: str = "unknown") -> str:
+    """Trailmark graph fields (node kind, edge kind, edge confidence) are
+    enums with a `.value`, except on a malformed/dangling reference where
+    the field can come through as a bare string or be missing entirely --
+    normalize either shape to a plain string instead of typing this check
+    out again at each call site."""
+    if x is None:
+        return default
+    return x.value if hasattr(x, 'value') else str(x)
 
 
 def analyze_impact(
@@ -43,7 +54,7 @@ def analyze_impact(
         node_metadata[node_id] = {
             "id": node_id,
             "name": getattr(node, 'name', node_id),
-            "kind": node.kind.value if hasattr(node, 'kind') and hasattr(node.kind, 'value') else str(getattr(node, 'kind', 'unknown')),
+            "kind": _enum_value(getattr(node, 'kind', None)),
             "file": node.location.file_path if getattr(node, 'location', None) else None,
             "start_line": node.location.start_line if getattr(node, 'location', None) else None,
             "end_line": node.location.end_line if getattr(node, 'location', None) else None,
@@ -91,8 +102,8 @@ def analyze_impact(
             final_edges.append({
                 "source": edge.source_id,
                 "target": edge.target_id,
-                "kind": edge.kind.value if hasattr(edge, 'kind') and hasattr(edge.kind, 'value') else str(getattr(edge, 'kind', 'unknown')),
-                "confidence": edge.confidence.value if hasattr(edge, 'confidence') and hasattr(edge.confidence, 'value') else "unknown"
+                "kind": _enum_value(getattr(edge, 'kind', None)),
+                "confidence": _enum_value(getattr(edge, 'confidence', None)),
             })
 
     nodes = []
