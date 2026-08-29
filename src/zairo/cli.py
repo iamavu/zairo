@@ -20,6 +20,21 @@ class Severity(str, enum.Enum):
     critical = "critical"
 
 
+def _require_llm_for_fail_on(fail_on: Optional[Severity], llm: bool) -> None:
+    if fail_on is not None and not llm:
+        console.print("[bold red]Error:[/bold red] --fail-on requires --llm.")
+        raise typer.Exit(1)
+
+
+def _severity_gate_failure(vulnerabilities: dict, fail_on: Severity) -> Optional[str]:
+    """The worst severity found, if it meets or exceeds fail_on's threshold
+    -- None if the gate passes (including when there are no findings)."""
+    worst = max_severity(vulnerabilities)
+    if worst is not None and severity_rank(worst) >= severity_rank(fail_on.value):
+        return worst
+    return None
+
+
 def _print_scan_errors(token_usage: dict, indent: str = "") -> None:
     """Surfaces per-node LLM scan failures unconditionally -- NOT gated
     behind --verbose. A scan where every node failed (missing/invalid API
@@ -27,7 +42,7 @@ def _print_scan_errors(token_usage: dict, indent: str = "") -> None:
     vulnerabilities found" scan; that's a false sense of security for a
     security tool specifically. Error messages are deduplicated since many
     failed nodes typically share the same root cause (e.g. one bad API key)."""
-    errors = (token_usage or {}).get('errors') or {}
+    errors = token_usage['errors']
     if not errors:
         return
     total_failed = sum(errors.values())
@@ -97,9 +112,7 @@ def analyze(
         if verbose:
             console.print(f"[dim]  · {msg}[/dim]")
 
-    if fail_on is not None and not llm:
-        console.print("[bold red]Error:[/bold red] --fail-on requires --llm.")
-        raise typer.Exit(1)
+    _require_llm_for_fail_on(fail_on, llm)
 
     if base and target:
         console.print(f"[bold green]Analyzing {repo_path} at depth {depth} — diff {base}..{target}[/bold green]")
@@ -121,8 +134,8 @@ def analyze(
     should_fail = False
     if llm:
         if fail_on is not None:
-            worst = max_severity(result.vulnerabilities)
-            if worst is not None and severity_rank(worst) >= severity_rank(fail_on.value):
+            worst = _severity_gate_failure(result.vulnerabilities, fail_on)
+            if worst is not None:
                 should_fail = True
                 console.print(
                     f"[bold red]Gate failed:[/bold red] found a '{worst}' severity finding "
@@ -131,7 +144,7 @@ def analyze(
         if tokens:
             _print_token_usage(result.token_usage)
 
-    console.print(f"[bold green]Success![/bold green] Reports generated:")
+    console.print("[bold green]Success![/bold green] Reports generated:")
     console.print(f"  - {result.json_path}")
     console.print(f"  - {result.html_path}")
     if result.sarif_path:
@@ -164,9 +177,7 @@ def fleet(
         if verbose:
             console.print(f"[dim]    · {msg}[/dim]")
 
-    if fail_on is not None and not llm:
-        console.print("[bold red]Error:[/bold red] --fail-on requires --llm.")
-        raise typer.Exit(1)
+    _require_llm_for_fail_on(fail_on, llm)
 
     paths = list(repo_paths or [])
     if repos_file:
@@ -233,8 +244,8 @@ def fleet(
         for r in ok_results:
             for node_id, findings in (r["result"].vulnerabilities or {}).items():
                 combined_vulns[f"{r['slug']}:{node_id}"] = findings
-        worst = max_severity(combined_vulns)
-        if worst is not None and severity_rank(worst) >= severity_rank(fail_on.value):
+        worst = _severity_gate_failure(combined_vulns, fail_on)
+        if worst is not None:
             should_fail = True
             console.print(
                 f"[bold red]Gate failed:[/bold red] found a '{worst}' severity finding across the fleet "

@@ -69,11 +69,10 @@ def test_multiline_exception_messages_are_trimmed_to_one_line(monkeypatch):
 
 
 def test_multiline_json_error_body_shows_useful_content_not_just_a_brace(monkeypatch):
-    """Reported case: litellm's Gemini errors put the actually useful text
-    several lines into a pretty-printed JSON blob, e.g. a 404 for a
-    deprecated/renamed model. A naive first-line cut showed only the
-    opening brace ('litellm.NotFoundError: GeminiException - {') and
-    nothing else -- the summary must still surface the real message."""
+    """Some providers put the actually useful text several lines into a
+    pretty-printed JSON error body (e.g. litellm on a Gemini 404) -- the
+    summary must surface that message, not just whatever precedes the
+    first newline (which can be as useless as a lone opening brace)."""
     _mock_litellm(monkeypatch, RuntimeError(
         'litellm.NotFoundError: GeminiException - {\n'
         '  "error": {\n'
