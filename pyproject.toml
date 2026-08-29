@@ -3,7 +3,7 @@ name = "zairo"
 dynamic = ["version"]
 description = "Git-diff-aware security impact analysis: builds a dependency subgraph around changed code and optionally scans it for vulnerabilities with an LLM."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [
@@ -14,8 +14,6 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Security",
     "Topic :: Software Development :: Quality Assurance",

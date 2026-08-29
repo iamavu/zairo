@@ -46,7 +46,7 @@ thousands that didn't. `zairo` instead:
 pip install zairo
 ```
 
-Requires Python 3.10+. LLM scanning (`--llm`) goes through
+Requires Python 3.12+ (a core dependency, Trailmark, requires it). LLM scanning (`--llm`) goes through
 [LiteLLM](https://docs.litellm.ai/docs/providers), so you'll also need an
 API key for whatever `--model` you use — set via the environment variable
 your provider expects (e.g. `GEMINI_API_KEY` for the default

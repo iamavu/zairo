@@ -8,15 +8,15 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          # trailmark (a core dependency) requires Python >=3.12 --
+          # matches pyproject.toml's requires-python. No matrix: there's
+          # only one supported version to test.
+          python-version: "3.12"
 
       - name: Configure git identity (required by tests that create commits)
         run: |
