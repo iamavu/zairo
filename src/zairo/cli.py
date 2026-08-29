@@ -6,7 +6,7 @@ from .reporter import generate_reports
 from .llm_scanner import scan_graph_for_vulnerabilities
 from .git_utils import create_worktree, remove_worktree
 
-app = typer.Typer()
+app = typer.Typer(add_completion=False)
 console = Console()
 
 @app.command()
