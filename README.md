@@ -27,13 +27,13 @@ pip install -e ".[dev]"
 
 ```bash
 # Analyze uncommitted changes in a repo
-zairo analyze /path/to/repo
+zairo /path/to/repo
 
 # Diff two refs, traverse 2 hops out from changed nodes, run an LLM scan
-zairo analyze /path/to/repo --base main --target HEAD --depth 2 --llm
+zairo /path/to/repo --base main --target HEAD --depth 2 --llm
 ```
 
-Run `zairo analyze --help` for the full option list.
+Run `zairo --help` for the full option list.
 
 ## Development
 
