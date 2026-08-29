@@ -1,13 +1,23 @@
+import enum
 import os
 import typer
 from rich.console import Console
+from . import __version__
 from .analyzer import analyze_impact
 from .reporter import generate_reports
 from .llm_scanner import scan_graph_for_vulnerabilities
 from .git_utils import create_worktree, remove_worktree
+from ._util import max_severity, severity_rank
 
 app = typer.Typer(add_completion=False)
 console = Console()
+
+
+class Severity(str, enum.Enum):
+    low = "low"
+    medium = "medium"
+    high = "high"
+    critical = "critical"
 
 @app.command()
 def analyze(
@@ -23,11 +33,16 @@ def analyze(
     cache: bool = typer.Option(True, "--cache/--no-cache", help="Cache LLM findings by content hash in <output>/.llm_cache.json to skip re-scanning unchanged nodes across runs"),
     max_tokens: int = typer.Option(4096, "--max-tokens", help="Max output tokens per LLM scan request. Reasoning models count internal thinking against this budget too — too low can cause empty responses"),
     tokens: bool = typer.Option(False, "--tokens", help="Show total LLM tokens used by the scan (prompt/completion/total, across real API calls -- cache hits don't count)"),
+    fail_on: Severity = typer.Option(None, "--fail-on", help="Exit with a non-zero status if any finding at or above this severity is found (requires --llm) -- for gating CI/PR checks"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Print detailed diagnostic output (git commands, worktree setup, node matching, per-node LLM scan progress)")
 ):
     def log(msg: str) -> None:
         if verbose:
             console.print(f"[dim]  · {msg}[/dim]")
+
+    if fail_on is not None and not llm:
+        console.print("[bold red]Error:[/bold red] --fail-on requires --llm.")
+        raise typer.Exit(1)
 
     if base and target:
         console.print(f"[bold green]Analyzing {repo_path} at depth {depth} — diff {base}..{target}[/bold green]")
@@ -42,6 +57,7 @@ def analyze(
     abs_repo = os.path.abspath(repo_path)
     worktree_path = None
     analysis_root = abs_repo
+    should_fail = False
     try:
         if base and target:
             log(f"Checking out '{target}' into a temporary worktree (base+target diff mode)...")
@@ -66,6 +82,15 @@ def analyze(
             )
             console.print(f"[bold yellow]Found vulnerabilities in {len(vulnerabilities)} nodes.[/bold yellow]")
 
+            if fail_on is not None:
+                worst = max_severity(vulnerabilities)
+                if worst is not None and severity_rank(worst) >= severity_rank(fail_on.value):
+                    should_fail = True
+                    console.print(
+                        f"[bold red]Gate failed:[/bold red] found a '{worst}' severity finding "
+                        f"(threshold: {fail_on.value})."
+                    )
+
             if tokens:
                 if token_usage['requests'] == 0:
                     console.print("[dim]Token usage: no LLM requests were made (all results came from cache or were skipped).[/dim]")
@@ -87,11 +112,20 @@ def analyze(
                             f"data reported by the provider — not counted above)[/dim]"
                         )
 
-        j_path, h_path = generate_reports(graph_data, output_dir, vulnerabilities)
+        # SARIF locations must be relative to wherever node['file'] paths were
+        # actually resolved from -- that's analysis_root (the worktree when
+        # diffing two commits), not abs_repo, which can be a wholly separate
+        # directory in that mode. Since a worktree mirrors abs_repo's tree
+        # structure, the resulting relative paths are the same either way.
+        j_path, h_path, sarif_path = generate_reports(
+            graph_data, output_dir, vulnerabilities, repo_root=analysis_root, tool_version=__version__,
+        )
 
         console.print(f"[bold green]Success![/bold green] Reports generated:")
         console.print(f"  - {j_path}")
         console.print(f"  - {h_path}")
+        if sarif_path:
+            console.print(f"  - {sarif_path}")
 
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
@@ -100,6 +134,9 @@ def analyze(
         if worktree_path:
             log(f"Removing temporary worktree {worktree_path}")
             remove_worktree(abs_repo, worktree_path)
+
+    if should_fail:
+        raise typer.Exit(1)
 
 def main():
     app()

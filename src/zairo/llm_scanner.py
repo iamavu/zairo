@@ -19,7 +19,7 @@ def _ensure_litellm():
         litellm = _litellm
     return litellm
 
-from ._util import display_name as _display_name
+from ._util import display_name as _display_name, normalize_severity
 
 # Comment/blank-only diffs (docs, version bumps, log messages) can't produce a
 # real vulnerability finding — skip them before spending an LLM call.
@@ -311,7 +311,7 @@ Context Functions (Callers/Callees):
 
 Base every finding strictly on the code actually shown above. Do not speculate about the contents of omitted/NOT-SHOWN function bodies, imports, or third-party libraries based on their name alone — if you haven't seen the code, don't report a vulnerability in it.
 
-Return ONLY a JSON object with a single key 'vulnerabilities' — no markdown code fence, no prose before or after it. The value should be a list of objects containing 'title', 'description', and 'impact'. Keep each field to 1-2 sentences. If no vulnerabilities are found, return {{"vulnerabilities": []}}.
+Return ONLY a JSON object with a single key 'vulnerabilities' — no markdown code fence, no prose before or after it. The value should be a list of objects containing 'title', 'description', 'impact', and 'severity'. Keep 'title'/'description'/'impact' to 1-2 sentences each. 'severity' must be exactly one of: "critical" (remote code execution, full system/data compromise), "high" (significant data exposure or privilege escalation), "medium" (real but limited impact, or requires specific conditions to exploit), "low" (minor or defense-in-depth). If no vulnerabilities are found, return {{"vulnerabilities": []}}.
 """
 
 
@@ -476,6 +476,8 @@ def scan_graph_for_vulnerabilities(
                 return mod_node['id'], prompt_hash, None, usage
 
             findings = parsed.get("vulnerabilities", [])
+            for finding in findings:
+                finding["severity"] = normalize_severity(finding.get("severity"))
             safe_log(f"  found {len(findings)} vulnerability finding(s): {_display_name(mod_node['name'])}")
             return mod_node['id'], prompt_hash, findings, usage
         except Exception as e:

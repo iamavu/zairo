@@ -1,0 +1,48 @@
+# Example workflow for a repo that wants zairo to scan every PR and block
+# merges on high/critical findings. Copy this into your own repo's
+# .github/workflows/ (this file is not run by the zairo repo itself).
+name: zairo security scan
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write  # required to upload SARIF to the Security tab
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need base branch history for `git diff` to work
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install zairo
+
+      - name: Run zairo (diff PR base..head, fail on high/critical)
+        env:
+          # Whichever API key your --model provider needs — see LiteLLM's
+          # provider docs (https://docs.litellm.ai/docs/providers).
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          zairo . \
+            --base "origin/${{ github.base_ref }}" --target HEAD \
+            --llm --fail-on high \
+            --output zairo_out
+        continue-on-error: true
+        id: scan
+
+      - name: Upload SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: zairo_out/report.sarif
+
+      - name: Fail the job if the gate failed
+        if: steps.scan.outcome == 'failure'
+        run: exit 1

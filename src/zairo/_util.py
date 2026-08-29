@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 
 def display_name(name: Any, limit: int = 60) -> str:
@@ -10,3 +10,34 @@ def display_name(name: Any, limit: int = 60) -> str:
     if len(text) > limit:
         text = text[:limit - 1] + "…"
     return text
+
+
+# Ordered low -> high; index doubles as a comparable rank.
+SEVERITY_LEVELS = ("low", "medium", "high", "critical")
+DEFAULT_SEVERITY = "medium"
+_SEVERITY_RANK = {level: i for i, level in enumerate(SEVERITY_LEVELS)}
+
+
+def normalize_severity(raw: Any) -> str:
+    """Coerces a (possibly missing/garbled, since it comes from LLM output)
+    severity value to one of SEVERITY_LEVELS, defaulting to DEFAULT_SEVERITY
+    for anything unrecognized rather than raising -- a gating decision should
+    degrade gracefully, not crash the scan over a malformed field."""
+    sev = str(raw).strip().lower() if raw else ""
+    return sev if sev in _SEVERITY_RANK else DEFAULT_SEVERITY
+
+
+def severity_rank(severity: str) -> int:
+    return _SEVERITY_RANK.get(severity, _SEVERITY_RANK[DEFAULT_SEVERITY])
+
+
+def max_severity(vulnerabilities: Dict[str, List[Dict[str, Any]]]) -> Optional[str]:
+    """Highest-ranked (already-normalized) severity across all findings, or
+    None if there are none."""
+    best = None
+    for findings in vulnerabilities.values():
+        for finding in findings:
+            sev = normalize_severity(finding.get("severity"))
+            if best is None or severity_rank(sev) > severity_rank(best):
+                best = sev
+    return best

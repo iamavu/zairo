@@ -2,6 +2,8 @@ import json
 import os
 from jinja2 import Template
 
+from .sarif import build_sarif
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -173,25 +175,42 @@ HTML_TEMPLATE = """
 </html>
 """
 
-def generate_reports(graph_data: dict, output_dir: str, vulnerabilities: dict = None):
+def generate_reports(
+    graph_data: dict,
+    output_dir: str,
+    vulnerabilities: dict = None,
+    repo_root: str = None,
+    tool_version: str = "0.0.0",
+):
+    """Returns (json_path, html_path, sarif_path). sarif_path is None unless
+    an LLM scan actually ran (vulnerabilities is not None, including when it
+    ran and found nothing) -- there's nothing meaningful to convert to SARIF
+    otherwise."""
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # Attach vulnerabilities to graph_data
     if vulnerabilities:
         for node in graph_data['nodes']:
             if node['id'] in vulnerabilities:
                 node['vulnerabilities'] = vulnerabilities[node['id']]
-                
+
     json_path = os.path.join(output_dir, "report.json")
     html_path = os.path.join(output_dir, "report.html")
-    
+
     with open(json_path, 'w') as f:
         json.dump(graph_data, f, indent=2)
-        
+
     template = Template(HTML_TEMPLATE)
     html_content = template.render(graph_json=json.dumps(graph_data))
-    
+
     with open(html_path, 'w') as f:
         f.write(html_content)
-        
-    return json_path, html_path
+
+    sarif_path = None
+    if vulnerabilities is not None:
+        sarif_data = build_sarif(graph_data, vulnerabilities, repo_root or output_dir, tool_version)
+        sarif_path = os.path.join(output_dir, "report.sarif")
+        with open(sarif_path, 'w') as f:
+            json.dump(sarif_data, f, indent=2)
+
+    return json_path, html_path, sarif_path
