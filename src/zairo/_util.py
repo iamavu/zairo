@@ -1,3 +1,4 @@
+import re
 from typing import Any, Dict, List, Optional
 
 
@@ -41,3 +42,21 @@ def max_severity(vulnerabilities: Dict[str, List[Dict[str, Any]]]) -> Optional[s
             if best is None or severity_rank(sev) > severity_rank(best):
                 best = sev
     return best
+
+
+_CWE_DIGITS_RE = re.compile(r'(\d+)')
+
+
+def normalize_cwe(raw: Any) -> Optional[str]:
+    """Extracts a canonical "CWE-<n>" identifier from whatever form the LLM
+    gave it in ("CWE-78", "cwe:78", "78", "CWE-078 - OS Command Injection"),
+    or None if it didn't give a usable one. A stable per-category id (rather
+    than a free-text title) is what lets a SARIF consumer like GitHub group
+    recurring findings of the same kind under one rule instead of a new one
+    every time the model phrases the title slightly differently."""
+    if not raw:
+        return None
+    match = _CWE_DIGITS_RE.search(str(raw))
+    if not match:
+        return None
+    return f"CWE-{int(match.group(1))}"
