@@ -143,7 +143,7 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <header>
-        <div class="brand">⚡ <span>zairo</span> impact analysis</div>
+        <div class="brand"><span>zairo</span> impact analysis</div>
         <div class="stats">
             <span>Nodes: <b id="stat-nodes">0</b></span>
             <span>Edges: <b id="stat-edges">0</b></span>
