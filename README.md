@@ -143,8 +143,11 @@ A few things unique to `fleet`:
 | Option | Default | Meaning |
 |---|---|---|
 | `--repos-file` | *(none)* | A text file, one repo path per line, merged with any positional paths. |
+| `--repo-concurrency` | `1` (sequential) | How many repos to scan in parallel. Above 1, progress prints one summary line per repo on completion (in completion order) instead of the default's live per-stage detail — concurrent repos' output can't safely interleave line-by-line. `--stop-on-error` also becomes best-effort: it cancels repos that haven't started yet, but can't interrupt one already in flight. |
 | `--continue-on-error` / `--stop-on-error` | continue | Whether one repo failing (bad path, parse error, ...) aborts the rest of the run. Either way, any failed repo still fails the overall exit code. |
 | `--fail-on` | *(none)* | Same severity gate as `analyze`, but evaluated across **all** repos combined — one `critical` finding anywhere fails the whole run. |
+
+Note `--concurrency` (shared with `analyze`) and `--repo-concurrency` control different things: `--concurrency` is LLM requests in parallel *within* one repo's scan; `--repo-concurrency` is how many repos run at once. Combined, total in-flight LLM requests can reach their product — mind your provider's rate limits.
 
 Run `zairo fleet --help` for the full list.
 

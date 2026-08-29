@@ -78,6 +78,74 @@ def test_fleet_continues_past_a_failing_repo_by_default(git_repo: Path, tmp_path
     assert "ok" in statuses.values()
 
 
+def test_fleet_repo_concurrency_scans_all_repos(make_git_repo, tmp_path: Path):
+    repos = [make_git_repo(f"repo{i}") for i in range(3)]
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app,
+        ["fleet", *[str(r) for r in repos], "--repo-concurrency", "2", "--output", str(output_dir)],
+    )
+
+    assert result.exit_code == 0, result.output
+    with open(output_dir / "fleet.json") as f:
+        summary = json.load(f)
+    # Completion order isn't submission order under real concurrency --
+    # check the set of outcomes, not positions.
+    assert len(summary["repos"]) == 3
+    assert all(r["status"] == "ok" for r in summary["repos"])
+    for r in summary["repos"]:
+        assert (output_dir / r["report_json"]).exists()
+
+
+def test_fleet_repo_concurrency_continues_past_error_by_default(make_git_repo, tmp_path: Path):
+    good_repos = [make_git_repo(f"repo{i}") for i in range(3)]
+    bad_repo = tmp_path / "not_a_repo"
+    bad_repo.mkdir()
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app,
+        ["fleet", str(bad_repo), *[str(r) for r in good_repos], "--repo-concurrency", "2", "--output", str(output_dir)],
+    )
+
+    assert result.exit_code != 0  # a repo failed -> overall failure
+    with open(output_dir / "fleet.json") as f:
+        summary = json.load(f)
+    statuses = [r["status"] for r in summary["repos"]]
+    assert len(statuses) == 4  # continue-on-error (default): every repo attempted
+    assert statuses.count("error") == 1
+    assert statuses.count("ok") == 3
+
+
+def test_fleet_repo_concurrency_stop_on_error_cancels_queued_repos(make_git_repo, tmp_path: Path):
+    """With only 2 worker slots and a repo guaranteed to fail immediately
+    (nonexistent path -> no Trailmark work at all) submitted first, the
+    repos beyond the first 2 are still queued -- not yet handed to a worker
+    -- when the failure is processed, so --stop-on-error should be able to
+    cancel them before they ever run."""
+    bad_repo = tmp_path / "not_a_repo"
+    bad_repo.mkdir()
+    good_repos = [make_git_repo(f"repo{i}") for i in range(5)]
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app,
+        [
+            "fleet", str(bad_repo), *[str(r) for r in good_repos],
+            "--repo-concurrency", "2", "--stop-on-error", "--output", str(output_dir),
+        ],
+    )
+
+    assert result.exit_code != 0
+    with open(output_dir / "fleet.json") as f:
+        summary = json.load(f)
+    # Not a precise count (real thread timing) -- but at least one queued
+    # repo must have been skipped, or this test proves nothing.
+    assert len(summary["repos"]) < 6
+    assert any(r["status"] == "error" for r in summary["repos"])
+
+
 def test_fleet_requires_at_least_one_repo(tmp_path: Path):
     result = runner.invoke(app, ["fleet", "--output", str(tmp_path / "out")])
 

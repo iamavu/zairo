@@ -1,5 +1,6 @@
 import enum
 import os
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from typing import List, Optional
 
 import typer
@@ -179,6 +180,7 @@ def fleet(
     llm: bool = typer.Option(False, "--llm", help="Run LLM vulnerability scanning on modified nodes, in every repo"),
     model: str = typer.Option("gemini/gemini-2.5-pro", "--model", help="LiteLLM model string to use for scanning"),
     concurrency: int = typer.Option(5, "--concurrency", "-c", help="Number of LLM scan requests to run in parallel, per repo"),
+    repo_concurrency: int = typer.Option(1, "--repo-concurrency", help="Number of repos to scan in parallel (default: one at a time). Above 1, progress prints one summary line per repo on completion instead of live per-stage detail, and --stop-on-error only cancels repos that haven't started yet -- it can't interrupt one already in flight"),
     cache: bool = typer.Option(True, "--cache/--no-cache", help="Cache LLM findings by content hash to skip re-scanning unchanged nodes across runs"),
     max_tokens: int = typer.Option(4096, "--max-tokens", help="Max output tokens per LLM scan request"),
     tokens: bool = typer.Option(False, "--tokens", help="Show total LLM tokens used across all repos (prompt/completion/total, across real API calls -- cache hits don't count)"),
@@ -205,45 +207,93 @@ def fleet(
         console.print("[bold red]Error:[/bold red] no repos given (pass paths as arguments or --repos-file).")
         raise typer.Exit(1)
 
-    console.print(f"[bold green]Scanning {len(paths)} repo(s)...[/bold green]")
-
-    results = []
     used_slugs: set = set()
-    for i, repo_path in enumerate(paths, 1):
-        slug = unique_slug(repo_path, used_slugs)
+    slugs = [unique_slug(p, used_slugs) for p in paths]  # computed upfront, sequentially --
+    # unique_slug mutates a shared set, so doing this per-repo inside a
+    # worker thread (the repo_concurrency > 1 path) would race.
+
+    def scan_one(repo_path: str, slug: str, on_event) -> dict:
         repo_output_dir = os.path.join(output_dir, slug)
-        console.print(f"[bold cyan][{i}/{len(paths)}][/bold cyan] {repo_path}")
-
-        def on_event(event: str, **kw) -> None:
-            if event == "graph_built":
-                console.print(f"    {kw['num_modified']} modified/added node(s); {kw['num_nodes']} node(s), {kw['num_edges']} edge(s) in subgraph")
-            elif event == "llm_scan_started":
-                console.print(f"    running LLM scan ({kw['model']})...")
-            elif event == "llm_scan_done":
-                console.print(f"    {kw['num_vulnerable_nodes']} node(s) with findings")
-                _print_scan_errors(kw['token_usage'], indent="    ")
-
         cache_path = os.path.join(repo_output_dir, ".llm_cache.json") if (llm and cache) else None
         try:
             scan_result = run_scan(
                 repo_path, repo_output_dir, depth, base, target, language, llm, model, concurrency,
                 cache_path, max_tokens, log=log, on_event=on_event,
             )
-            results.append({"repo": repo_path, "slug": slug, "status": "ok", "result": scan_result})
+            return {"repo": repo_path, "slug": slug, "status": "ok", "result": scan_result}
         except Exception as e:
-            console.print(f"    [bold red]error:[/bold red] {e}")
-            results.append({"repo": repo_path, "slug": slug, "status": "error", "error": str(e)})
-            if not continue_on_error:
-                console.print("[bold red]Aborting fleet run (--stop-on-error).[/bold red]")
-                break
+            return {"repo": repo_path, "slug": slug, "status": "error", "error": str(e)}
 
-    paths_attempted = paths[:len(results)]
+    results = []
+    if repo_concurrency <= 1:
+        console.print(f"[bold green]Scanning {len(paths)} repo(s)...[/bold green]")
+        for i, (repo_path, slug) in enumerate(zip(paths, slugs), 1):
+            console.print(f"[bold cyan][{i}/{len(paths)}][/bold cyan] {repo_path}")
+
+            def on_event(event: str, **kw) -> None:
+                if event == "graph_built":
+                    console.print(f"    {kw['num_modified']} modified/added node(s); {kw['num_nodes']} node(s), {kw['num_edges']} edge(s) in subgraph")
+                elif event == "llm_scan_started":
+                    console.print(f"    running LLM scan ({kw['model']})...")
+                elif event == "llm_scan_done":
+                    console.print(f"    {kw['num_vulnerable_nodes']} node(s) with findings")
+                    _print_scan_errors(kw['token_usage'], indent="    ")
+
+            entry = scan_one(repo_path, slug, on_event)
+            results.append(entry)
+            if entry["status"] == "error":
+                console.print(f"    [bold red]error:[/bold red] {entry['error']}")
+                if not continue_on_error:
+                    console.print("[bold red]Aborting fleet run (--stop-on-error).[/bold red]")
+                    break
+    else:
+        # Multiple repos run genuinely concurrently here, so live per-stage
+        # progress (the sequential path above) can't be printed safely --
+        # interleaved console output from different repos would garble
+        # into an unreadable mix. Every print() below happens in the main
+        # thread only, after a repo's scan_one() has fully returned, so
+        # there's nothing to interleave: one complete summary line per repo,
+        # in completion order (not necessarily submission order).
+        console.print(f"[bold green]Scanning {len(paths)} repo(s) ({repo_concurrency} at a time)...[/bold green]")
+        stop_requested = False
+        with ThreadPoolExecutor(max_workers=repo_concurrency) as pool:
+            futures = {
+                pool.submit(scan_one, repo_path, slug, None): repo_path
+                for repo_path, slug in zip(paths, slugs)
+            }
+            completed = 0
+            for future in as_completed(futures):
+                try:
+                    entry = future.result()
+                except CancelledError:
+                    continue  # never started -- not an attempt, don't count it
+                completed += 1
+                results.append(entry)
+
+                if entry["status"] == "ok":
+                    sr = entry["result"]
+                    num_modified = sum(1 for n in sr.graph_data['nodes'] if n['status'] != 'unchanged')
+                    summary = f"{num_modified} modified/added node(s)"
+                    if llm:
+                        summary += f", {len(sr.vulnerabilities or {})} node(s) with findings"
+                    console.print(f"[bold cyan][{completed}/{len(paths)}][/bold cyan] {entry['repo']} — {summary}")
+                    if llm:
+                        _print_scan_errors(sr.token_usage, indent="    ")
+                else:
+                    console.print(f"[bold cyan][{completed}/{len(paths)}][/bold cyan] {entry['repo']} — [bold red]error:[/bold red] {entry['error']}")
+
+                if entry["status"] == "error" and not continue_on_error and not stop_requested:
+                    stop_requested = True
+                    console.print("[bold red]A repo failed -- cancelling repos that haven't started yet (--stop-on-error)...[/bold red]")
+                    for f in futures:
+                        f.cancel()  # no-op for already-running/completed futures
+
     ok_results = [r for r in results if r["status"] == "ok"]
     errored_results = [r for r in results if r["status"] == "error"]
 
     reports = write_fleet_reports(results, output_dir, tool_version=__version__)
 
-    console.print(f"[bold green]Scanned {len(ok_results)}/{len(paths_attempted)} repo(s) successfully.[/bold green]")
+    console.print(f"[bold green]Scanned {len(ok_results)}/{len(results)} repo(s) successfully.[/bold green]")
     if errored_results:
         console.print(f"[bold red]{len(errored_results)} repo(s) failed:[/bold red] " + ", ".join(r["repo"] for r in errored_results))
     if llm and tokens:
