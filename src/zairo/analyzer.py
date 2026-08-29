@@ -1,19 +1,9 @@
+import json
 import os
 from typing import Any, Callable, Dict, Optional
 from trailmark.query.api import QueryEngine
 from .git_utils import get_modified_lines
 from ._util import display_name as _display_name
-
-
-def _enum_value(x: Any, default: str = "unknown") -> str:
-    """Trailmark graph fields (node kind, edge kind, edge confidence) are
-    enums with a `.value`, except on a malformed/dangling reference where
-    the field can come through as a bare string or be missing entirely --
-    normalize either shape to a plain string instead of typing this check
-    out again at each call site."""
-    if x is None:
-        return default
-    return x.value if hasattr(x, 'value') else str(x)
 
 
 def analyze_impact(
@@ -42,36 +32,45 @@ def analyze_impact(
     # Initialize Trailmark
     log(f"Indexing {analysis_root} with Trailmark (language={language})...")
     engine = QueryEngine.from_directory(analysis_root, language=language)
-    total_nodes = len(engine._store._graph.nodes)
-    total_edges = len(engine._store._graph.edges)
-    log(f"Trailmark graph: {total_nodes} node(s), {total_edges} edge(s)")
+    # engine.to_json() is Trailmark's public serialization of the graph --
+    # unlike reaching into engine._store._graph (two layers of underscore-
+    # prefixed internals with no stability contract; even Trailmark's own
+    # to_json() has to do that same reach internally, with a lint
+    # suppression acknowledging it's not meant to be public), this is the
+    # one interface Trailmark commits to keeping working. indent=None since
+    # the pretty-printing is wasted work on a string we immediately reparse.
+    graph = json.loads(engine.to_json(indent=None))
+    graph_nodes: Dict[str, Any] = graph["nodes"]  # {node_id: unit_dict}
+    graph_edges = graph["edges"]  # [{"source", "target", "kind", "confidence", ...}]
+    log(f"Trailmark graph: {len(graph_nodes)} node(s), {len(graph_edges)} edge(s)")
 
     # 1. Identify seed nodes (modified/added)
     seed_nodes = set()
     node_metadata = {}
 
-    for node_id, node in engine._store._graph.nodes.items():
+    for node_id, unit in graph_nodes.items():
+        location = unit["location"]
         node_metadata[node_id] = {
             "id": node_id,
-            "name": getattr(node, 'name', node_id),
-            "kind": _enum_value(getattr(node, 'kind', None)),
-            "file": node.location.file_path if getattr(node, 'location', None) else None,
-            "start_line": node.location.start_line if getattr(node, 'location', None) else None,
-            "end_line": node.location.end_line if getattr(node, 'location', None) else None,
-            "complexity": getattr(node, 'cyclomatic_complexity', 0),
+            "name": unit["name"],
+            "kind": unit["kind"],
+            "file": location["file_path"],
+            "start_line": location["start_line"],
+            "end_line": location["end_line"],
+            "complexity": unit["cyclomatic_complexity"],
             "status": "unchanged" # default
         }
 
-        if getattr(node, 'location', None) and node.location.file_path in modified_files_lines:
-            file_mod_lines = modified_files_lines[node.location.file_path]
-            start = node.location.start_line
-            end = node.location.end_line
+        if location["file_path"] in modified_files_lines:
+            file_mod_lines = modified_files_lines[location["file_path"]]
+            start = location["start_line"]
+            end = location["end_line"]
             changed_lines = {ln: text for ln, text in file_mod_lines.items() if start <= ln <= end}
             if changed_lines:
                 seed_nodes.add(node_id)
                 node_metadata[node_id]["status"] = "modified"
                 node_metadata[node_id]["changed_lines"] = changed_lines
-                log(f"  seed: {_display_name(node_metadata[node_id]['name'])} ({node.location.file_path}:{start}-{end}), {len(changed_lines)} line(s) changed")
+                log(f"  seed: {_display_name(node_metadata[node_id]['name'])} ({location['file_path']}:{start}-{end}), {len(changed_lines)} line(s) changed")
 
     log(f"Identified {len(seed_nodes)} seed node(s)")
 
@@ -81,9 +80,9 @@ def analyze_impact(
 
     for hop in range(depth):
         next_frontier = set()
-        for edge in engine._store._graph.edges:
-            source = edge.source_id
-            edge_target = edge.target_id
+        for edge in graph_edges:
+            source = edge["source"]
+            edge_target = edge["target"]
 
             if source in current_frontier and edge_target not in subgraph_nodes:
                 next_frontier.add(edge_target)
@@ -96,15 +95,11 @@ def analyze_impact(
         current_frontier = next_frontier
 
     # Extract edges for subgraph
-    final_edges = []
-    for edge in engine._store._graph.edges:
-        if edge.source_id in subgraph_nodes and edge.target_id in subgraph_nodes:
-            final_edges.append({
-                "source": edge.source_id,
-                "target": edge.target_id,
-                "kind": _enum_value(getattr(edge, 'kind', None)),
-                "confidence": _enum_value(getattr(edge, 'confidence', None)),
-            })
+    final_edges = [
+        {"source": edge["source"], "target": edge["target"], "kind": edge["kind"], "confidence": edge["confidence"]}
+        for edge in graph_edges
+        if edge["source"] in subgraph_nodes and edge["target"] in subgraph_nodes
+    ]
 
     nodes = []
     for n_id in subgraph_nodes:
