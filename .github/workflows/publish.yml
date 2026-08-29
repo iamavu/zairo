@@ -21,6 +21,16 @@ jobs:
       - name: Build sdist and wheel
         run: python -m build
 
+      - name: Verify built version matches the pushed tag
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          built_version=$(ls dist/*.whl | sed -E 's/.*zairo-([0-9][^-]*)-.*/\1/')
+          if [ "$tag_version" != "$built_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the built package version $built_version. The tag was likely created before the version-bump commit landed on this branch -- delete the tag, recreate it at the commit where src/zairo/__init__.py actually has this version, and push again."
+            exit 1
+          fi
+          echo "OK: tag $GITHUB_REF_NAME matches built version $built_version"
+
       - uses: actions/upload-artifact@v4
         with:
           name: dist
