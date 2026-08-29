@@ -20,10 +20,11 @@ thousands that didn't. `zairo` instead:
    [Trailmark](https://pypi.org/project/trailmark/) (supports Python,
    TypeScript/JavaScript, Java, Go, Rust, C/C++, C#, Ruby, PHP, Swift,
    Kotlin, and more, auto-detected).
-3. Sends *only that subgraph* to an LLM for a targeted vulnerability scan,
-   with enough surrounding context (callers, callees, sibling definitions)
-   for the model to judge reachability — not just the changed lines in
-   isolation.
+3. Scans each changed function/method individually: the model sees that
+   code plus real caller/callee snippets — and, when the change is at the
+   whole-file level rather than inside one function, an outline of the
+   file's other definitions too. All of it pulled from the subgraph only;
+   nothing outside it is ever sent.
 4. Writes the result as a browsable report, and optionally as SARIF for
    your existing security tooling.
 
