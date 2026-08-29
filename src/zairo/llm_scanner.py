@@ -16,6 +16,14 @@ def _ensure_litellm():
     global litellm
     if litellm is None:
         import litellm as _litellm
+        # Without this, litellm prints its own "Give Feedback"/"Provider
+        # List" banners directly to stdout on every failed call -- once per
+        # node, from inside the worker threads, ahead of and unrelated to
+        # our own error reporting. zairo already surfaces the actual error
+        # (see _print_scan_errors in cli.py); litellm's banners are just
+        # noise on top of that here. Same flag litellm's own Router and
+        # proxy server set for the same reason.
+        _litellm.suppress_debug_info = True
         litellm = _litellm
     return litellm
 
@@ -196,6 +204,16 @@ def _neighbor_snippet(n: Dict[str, Any]) -> Optional[str]:
         truncated = len(lines) - _NEIGHBOR_MAX_LINES
         code = "\n".join(lines[:_NEIGHBOR_MAX_LINES]) + f"\n... ({truncated} more line(s) truncated)"
     return f"Function: {n.get('name', '?')}\n```\n{code}\n```"
+
+
+def _summarize_error(e: Exception) -> str:
+    """First line only. Some providers (seen from litellm on a Gemini auth
+    failure) bake a full traceback into the exception's own message text --
+    fine for --verbose's full per-node log line, but not for the always-on
+    summary in cli.py, which needs a short, stable string to display and to
+    dedupe repeated failures by."""
+    text = str(e).strip()
+    return text.splitlines()[0].strip() if text else e.__class__.__name__
 
 
 def _hash_prompt(model: str, mod_code: str, neighbor_contexts: List[str]) -> str:
@@ -474,7 +492,7 @@ def scan_graph_for_vulnerabilities(
                 parsed = _extract_json(content)
             except ValueError as e:
                 safe_log(f"  error scanning {_display_name(mod_node['name'])}: {e}")
-                return mod_node['id'], prompt_hash, None, usage, str(e)
+                return mod_node['id'], prompt_hash, None, usage, _summarize_error(e)
 
             findings = parsed.get("vulnerabilities", [])
             for finding in findings:
@@ -484,7 +502,7 @@ def scan_graph_for_vulnerabilities(
             return mod_node['id'], prompt_hash, findings, usage, None
         except Exception as e:
             safe_log(f"  error scanning {_display_name(mod_node['name'])}: {e}")
-            return mod_node['id'], prompt_hash, None, usage, str(e)
+            return mod_node['id'], prompt_hash, None, usage, _summarize_error(e)
 
     token_usage = {
         'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0,

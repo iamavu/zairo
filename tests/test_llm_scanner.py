@@ -51,6 +51,23 @@ def test_scan_errors_are_deduplicated_by_message(monkeypatch):
     assert token_usage["errors"] == {"boom": 2}
 
 
+def test_multiline_exception_messages_are_trimmed_to_one_line(monkeypatch):
+    """Some providers (seen from litellm on a Gemini auth failure) bake a
+    full traceback into the exception's own message text -- the always-on
+    warning should show a short summary, not reproduce it verbatim."""
+    _mock_litellm(monkeypatch, RuntimeError(
+        "litellm.APIConnectionError: Missing Gemini API key.\n"
+        "Traceback (most recent call last):\n"
+        "  File \"litellm/main.py\", line 5702, in completion\n"
+        "ValueError: Missing Gemini API key."
+    ))
+    graph_data = {"nodes": [_node("n1", "vulnerable_fn")], "edges": []}
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=None)
+
+    assert list(token_usage["errors"].keys()) == ["litellm.APIConnectionError: Missing Gemini API key."]
+
+
 def test_no_errors_key_populated_on_a_clean_run(monkeypatch):
     fake_litellm = MagicMock()
     fake_response = MagicMock()
