@@ -13,35 +13,164 @@ HTML_TEMPLATE = """
     <script src="https://cdnjs.cloudflare.com/ajax/libs/dagre/0.8.5/dagre.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
     <style>
-        body { font-family: sans-serif; margin: 0; padding: 0; display: flex; height: 100vh; background-color: #1e1e1e; color: #fff;}
-        #cy { width: 80%; height: 100%; }
-        #sidebar { width: 20%; height: 100%; background: #252526; padding: 20px; box-sizing: border-box; overflow-y: auto; border-left: 1px solid #3c3c3c;}
-        h1 { font-size: 1.2em; border-bottom: 1px solid #3c3c3c; padding-bottom: 10px; }
-        .details { margin-top: 20px; font-size: 0.9em; }
-        .details strong { color: #4fc1ff; }
-        button { background: #0e639c; color: white; border: none; padding: 8px 12px; cursor: pointer; margin-bottom: 10px; width: 100%; }
-        button:hover { background: #1177bb; }
-        .legend { margin-top: 20px; font-size: 0.9em; border-top: 1px solid #3c3c3c; padding-top: 10px;}
-        .legend-item { display: flex; align-items: center; margin-bottom: 5px; }
-        .color-box { width: 15px; height: 15px; margin-right: 10px; }
+        :root {
+            --bg: #16161e;
+            --panel: #1a1b26;
+            --panel-2: #1f2335;
+            --border: #292e42;
+            --text: #c0caf5;
+            --text-dim: #737aa2;
+            --text-faint: #565f89;
+            --accent: #7aa2f7;
+            --accent-2: #bb9af7;
+            --green: #9ece6a;
+            --yellow: #e0af68;
+            --critical: #f7768e;
+            --high: #ff9e64;
+            --medium: #e0af68;
+            --low: #737aa2;
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+            margin: 0; padding: 0; display: flex; flex-direction: column;
+            height: 100vh; background-color: var(--bg); color: var(--text);
+        }
+        code, .mono { font-family: "SF Mono", Menlo, Consolas, monospace; }
+
+        header {
+            display: flex; align-items: center; gap: 24px;
+            padding: 10px 20px; background: var(--panel);
+            border-bottom: 1px solid var(--border); flex-shrink: 0;
+        }
+        header .brand { font-weight: 700; font-size: 1.05em; letter-spacing: 0.02em; }
+        header .brand span { color: var(--accent); }
+        .stats { display: flex; gap: 18px; margin-left: auto; font-size: 0.85em; color: var(--text-dim); }
+        .stats b { color: var(--text); font-weight: 600; }
+        .stats .stat-crit b { color: var(--critical); }
+        .stats .stat-high b { color: var(--high); }
+
+        .main { flex: 1; display: flex; min-height: 0; }
+        #cy { flex: 1; height: 100%; }
+
+        #sidebar {
+            width: 320px; flex-shrink: 0; height: 100%; background: var(--panel);
+            padding: 16px; box-sizing: border-box; overflow-y: auto;
+            border-left: 1px solid var(--border);
+        }
+        .section { margin-bottom: 20px; }
+        .section-label {
+            font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.08em;
+            color: var(--text-faint); margin-bottom: 8px; font-weight: 600;
+        }
+
+        input#search {
+            width: 100%; padding: 8px 10px; background: var(--panel-2);
+            border: 1px solid var(--border); border-radius: 6px; color: var(--text);
+            font-size: 0.85em; outline: none;
+        }
+        input#search:focus { border-color: var(--accent); }
+
+        .btn-row { display: flex; gap: 6px; }
+        button {
+            background: var(--panel-2); color: var(--text-dim); border: 1px solid var(--border);
+            padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 0.78em;
+            flex: 1; transition: all 0.15s ease;
+        }
+        button:hover { background: var(--border); color: var(--text); }
+        button.active { background: var(--accent); border-color: var(--accent); color: #16161e; font-weight: 600; }
+        button.full { width: 100%; }
+
+        .legend { display: flex; flex-direction: column; gap: 6px; font-size: 0.82em; }
+        .legend-item { display: flex; align-items: center; gap: 8px; color: var(--text-dim); }
+        .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+
+        .empty-state {
+            color: var(--text-faint); font-size: 0.85em; text-align: center;
+            padding: 30px 10px; border: 1px dashed var(--border); border-radius: 8px;
+        }
+
+        .detail-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+        .detail-card h2 { margin: 0 0 10px 0; font-size: 1em; color: var(--text); word-break: break-word; }
+        .badge-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+        .badge {
+            font-size: 0.72em; padding: 2px 8px; border-radius: 100px; font-weight: 600;
+            background: var(--border); color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em;
+        }
+        .badge.status-modified { background: rgba(224,175,104,0.18); color: var(--yellow); }
+        .badge.status-added { background: rgba(158,206,106,0.18); color: var(--green); }
+        .badge.sev-critical { background: rgba(247,118,142,0.18); color: var(--critical); }
+        .badge.sev-high { background: rgba(255,158,100,0.18); color: var(--high); }
+        .badge.sev-medium { background: rgba(224,175,104,0.18); color: var(--medium); }
+        .badge.sev-low { background: rgba(115,122,162,0.18); color: var(--low); }
+        .meta-row { font-size: 0.82em; color: var(--text-dim); margin-bottom: 4px; }
+        .meta-row .mono { color: var(--text); }
+
+        .vuln-heading {
+            font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.06em;
+            color: var(--text-faint); margin: 16px 0 8px 0; font-weight: 600;
+        }
+        .vuln-card {
+            background: var(--bg); border-radius: 6px; padding: 10px 12px; margin-bottom: 8px;
+            border-left: 3px solid var(--text-faint);
+        }
+        .vuln-card.sev-critical { border-left-color: var(--critical); }
+        .vuln-card.sev-high { border-left-color: var(--high); }
+        .vuln-card.sev-medium { border-left-color: var(--medium); }
+        .vuln-card.sev-low { border-left-color: var(--low); }
+        .vuln-card .vuln-title { font-weight: 600; font-size: 0.88em; margin-bottom: 4px; }
+        .vuln-card p { margin: 4px 0 0 0; font-size: 0.82em; color: var(--text-dim); line-height: 1.4; }
+        .vuln-card .badge-row { margin-bottom: 6px; }
     </style>
 </head>
 <body>
-    <div id="cy"></div>
-    <div id="sidebar">
-        <h1>Zairo Impact</h1>
-        <button id="btn-dagre">Layout: Hierarchical</button>
-        <button id="btn-cose">Layout: Force-Directed</button>
-        <button id="btn-toggle">Toggle Unchanged Nodes</button>
-        
-        <div class="legend">
-            <div class="legend-item"><div class="color-box" style="background: #4CAF50;"></div> Added</div>
-            <div class="legend-item"><div class="color-box" style="background: #d7ba7d;"></div> Modified</div>
-            <div class="legend-item"><div class="color-box" style="background: #808080;"></div> Unchanged</div>
+    <header>
+        <div class="brand">⚡ <span>zairo</span> impact analysis</div>
+        <div class="stats">
+            <span>Nodes: <b id="stat-nodes">0</b></span>
+            <span>Edges: <b id="stat-edges">0</b></span>
+            <span>Modified: <b id="stat-modified">0</b></span>
+            <span class="stat-high">Findings: <b id="stat-findings">0</b></span>
+            <span class="stat-crit">Critical: <b id="stat-critical">0</b></span>
         </div>
+    </header>
+    <div class="main">
+        <div id="cy"></div>
+        <div id="sidebar">
+            <div class="section">
+                <div class="section-label">Search</div>
+                <input id="search" type="text" placeholder="Filter by name..." autocomplete="off">
+            </div>
 
-        <div class="details" id="node-details">
-            <p>Click a node to see details.</p>
+            <div class="section">
+                <div class="section-label">Layout</div>
+                <div class="btn-row">
+                    <button id="btn-dagre" class="active">Hierarchical</button>
+                    <button id="btn-cose">Force-directed</button>
+                </div>
+            </div>
+
+            <div class="section">
+                <button id="btn-toggle" class="full">Toggle unchanged nodes</button>
+            </div>
+
+            <div class="section">
+                <div class="section-label">Legend</div>
+                <div class="legend">
+                    <div class="legend-item"><div class="dot" style="background: var(--green);"></div> Added</div>
+                    <div class="legend-item"><div class="dot" style="background: var(--yellow);"></div> Modified</div>
+                    <div class="legend-item"><div class="dot" style="background: var(--text-faint);"></div> Unchanged</div>
+                    <div class="legend-item"><div class="dot" style="background: var(--critical);"></div> Critical/high finding</div>
+                    <div class="legend-item"><div class="dot" style="background: var(--medium);"></div> Medium/low finding</div>
+                </div>
+            </div>
+
+            <div class="section">
+                <div class="section-label">Details</div>
+                <div id="node-details">
+                    <div class="empty-state">Click a node to see its details.</div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -58,16 +187,37 @@ HTML_TEMPLATE = """
             }[c]));
         }
 
+        const STATUS_COLOR = { added: '#9ece6a', modified: '#e0af68', unchanged: '#414868' };
+        const SEVERITY_COLOR = { critical: '#f7768e', high: '#ff9e64', medium: '#e0af68', low: '#737aa2' };
+        const SEVERITY_RANK = { critical: 3, high: 2, medium: 1, low: 0 };
+        const KIND_SHAPE = {
+            function: 'ellipse', method: 'ellipse', class: 'round-rectangle',
+            module: 'round-rectangle', proxy: 'diamond'
+        };
+
+        function worstSeverity(vulns) {
+            if (!vulns || vulns.length === 0) return null;
+            let worst = null;
+            vulns.forEach(v => {
+                const sev = (v.severity || 'medium').toLowerCase();
+                if (worst === null || (SEVERITY_RANK[sev] || 0) > (SEVERITY_RANK[worst] || 0)) worst = sev;
+            });
+            return worst;
+        }
+
+        let totalFindings = 0, totalCritical = 0, totalModified = 0;
+
         const elements = [];
         graphData.nodes.forEach(n => {
-            let color = '#808080';
-            if (n.status === 'modified') color = '#d7ba7d';
-            if (n.status === 'added') color = '#4CAF50';
-            
-            // Add red border if vulnerable
-            let borderColor = n.vulnerabilities && n.vulnerabilities.length > 0 ? '#ff0000' : 'transparent';
-            let borderWidth = n.vulnerabilities && n.vulnerabilities.length > 0 ? 3 : 0;
-            
+            const vulns = n.vulnerabilities || [];
+            const worst = worstSeverity(vulns);
+            totalFindings += vulns.length;
+            vulns.forEach(v => { if ((v.severity || '').toLowerCase() === 'critical') totalCritical++; });
+            if (n.status !== 'unchanged') totalModified++;
+
+            const complexity = n.complexity || 1;
+            const size = Math.max(26, Math.min(60, 24 + complexity * 3));
+
             elements.push({
                 data: {
                     id: n.id,
@@ -77,23 +227,32 @@ HTML_TEMPLATE = """
                     status: n.status,
                     start_line: n.start_line || '?',
                     end_line: n.end_line || '?',
-                    color: color,
-                    borderColor: borderColor,
-                    borderWidth: borderWidth,
-                    vulnerabilities: n.vulnerabilities || []
+                    color: STATUS_COLOR[n.status] || STATUS_COLOR.unchanged,
+                    shape: KIND_SHAPE[n.kind] || 'hexagon',
+                    size: size,
+                    borderColor: worst ? SEVERITY_COLOR[worst] : 'transparent',
+                    borderWidth: worst ? 3 : 0,
+                    vulnerabilities: vulns
                 }
             });
         });
-        
+
         graphData.edges.forEach(e => {
             elements.push({
                 data: {
                     source: e.source,
                     target: e.target,
-                    kind: e.kind
+                    kind: e.kind,
+                    dashed: e.confidence && e.confidence !== 'certain'
                 }
             });
         });
+
+        document.getElementById('stat-nodes').textContent = graphData.nodes.length;
+        document.getElementById('stat-edges').textContent = graphData.edges.length;
+        document.getElementById('stat-modified').textContent = totalModified;
+        document.getElementById('stat-findings').textContent = totalFindings;
+        document.getElementById('stat-critical').textContent = totalCritical;
 
         if (typeof cytoscapeDagre !== 'undefined') {
             cytoscape.use( cytoscapeDagre );
@@ -107,29 +266,48 @@ HTML_TEMPLATE = """
                     selector: 'node',
                     style: {
                         'background-color': 'data(color)',
+                        'shape': 'data(shape)',
+                        'width': 'data(size)',
+                        'height': 'data(size)',
                         'border-width': 'data(borderWidth)',
                         'border-color': 'data(borderColor)',
                         'label': 'data(name)',
-                        'color': '#fff',
-                        'text-valign': 'center',
+                        'color': '#c0caf5',
+                        'text-valign': 'bottom',
+                        'text-margin-y': 6,
                         'text-outline-width': 2,
-                        'text-outline-color': '#222',
+                        'text-outline-color': '#16161e',
                         'font-size': '10px'
                     }
                 },
                 {
+                    selector: 'node:selected',
+                    style: { 'border-width': 4, 'border-color': '#7aa2f7' }
+                },
+                {
                     selector: 'edge',
                     style: {
-                        'width': 2,
-                        'line-color': '#555',
-                        'target-arrow-color': '#555',
+                        'width': 1.6,
+                        'line-color': '#414868',
+                        'target-arrow-color': '#414868',
                         'target-arrow-shape': 'triangle',
+                        'arrow-scale': 0.8,
                         'curve-style': 'bezier',
                         'label': 'data(kind)',
                         'font-size': '8px',
                         'text-rotation': 'autorotate',
-                        'color': '#888'
+                        'color': '#565f89',
+                        'text-outline-width': 2,
+                        'text-outline-color': '#16161e'
                     }
+                },
+                {
+                    selector: 'edge[?dashed]',
+                    style: { 'line-style': 'dashed', 'line-color': '#3b4261' }
+                },
+                {
+                    selector: '.dimmed',
+                    style: { 'opacity': 0.12 }
                 }
             ],
             layout: {
@@ -137,48 +315,89 @@ HTML_TEMPLATE = """
             }
         });
 
+        function severityBadge(sev) {
+            if (!sev) return '';
+            return `<span class="badge sev-${escapeHtml(sev)}">${escapeHtml(sev)}</span>`;
+        }
+
         cy.on('tap', 'node', function(evt){
             const node = evt.target;
             const d = node.data();
+            const worst = worstSeverity(d.vulnerabilities);
+
             let vulnHtml = '';
             if (d.vulnerabilities && d.vulnerabilities.length > 0) {
-                vulnHtml = '<h3 style="color:#ff4444; margin-top:10px;">Vulnerabilities Found:</h3>';
+                vulnHtml = `<div class="vuln-heading">${d.vulnerabilities.length} finding(s)</div>`;
                 d.vulnerabilities.forEach(v => {
+                    const sev = (v.severity || 'medium').toLowerCase();
                     vulnHtml += `
-                        <div style="background:#440000; padding:10px; margin-bottom:10px; border-left: 3px solid #ff0000;">
-                            <strong>${escapeHtml(v.title)}</strong> (Impact: ${escapeHtml(v.impact)})<br>
-                            <p style="margin-top:5px; margin-bottom:0;">${escapeHtml(v.description)}</p>
+                        <div class="vuln-card sev-${escapeHtml(sev)}">
+                            <div class="badge-row">
+                                ${severityBadge(sev)}
+                                ${v.cwe ? `<span class="badge">${escapeHtml(v.cwe)}</span>` : ''}
+                            </div>
+                            <div class="vuln-title">${escapeHtml(v.title)}</div>
+                            <p>${escapeHtml(v.description)}</p>
+                            <p><strong>Impact:</strong> ${escapeHtml(v.impact)}</p>
                         </div>
                     `;
                 });
             }
 
             document.getElementById('node-details').innerHTML = `
-                <p><strong>Name:</strong> ${escapeHtml(d.name)}</p>
-                <p><strong>ID:</strong> ${escapeHtml(d.id)}</p>
-                <p><strong>Kind:</strong> ${escapeHtml(d.kind)}</p>
-                <p><strong>Status:</strong> ${escapeHtml(d.status)}</p>
-                <p><strong>File:</strong> ${escapeHtml(d.file)}</p>
-                <p><strong>Lines:</strong> ${escapeHtml(d.start_line)} - ${escapeHtml(d.end_line)}</p>
-                ${vulnHtml}
+                <div class="detail-card">
+                    <h2>${escapeHtml(d.name)}</h2>
+                    <div class="badge-row">
+                        <span class="badge">${escapeHtml(d.kind)}</span>
+                        <span class="badge status-${escapeHtml(d.status)}">${escapeHtml(d.status)}</span>
+                        ${worst ? severityBadge(worst) : ''}
+                    </div>
+                    <div class="meta-row">File: <span class="mono">${escapeHtml(d.file)}</span></div>
+                    <div class="meta-row">Lines: <span class="mono">${escapeHtml(d.start_line)}-${escapeHtml(d.end_line)}</span></div>
+                    ${vulnHtml}
+                </div>
             `;
         });
 
+        function setActiveLayoutButton(id) {
+            document.getElementById('btn-dagre').classList.toggle('active', id === 'btn-dagre');
+            document.getElementById('btn-cose').classList.toggle('active', id === 'btn-cose');
+        }
         document.getElementById('btn-dagre').addEventListener('click', () => {
             cy.layout({ name: 'dagre' }).run();
+            setActiveLayoutButton('btn-dagre');
         });
         document.getElementById('btn-cose').addEventListener('click', () => {
             cy.layout({ name: 'cose' }).run();
+            setActiveLayoutButton('btn-cose');
         });
-        
+
         let showUnchanged = true;
-        document.getElementById('btn-toggle').addEventListener('click', () => {
+        const toggleBtn = document.getElementById('btn-toggle');
+        toggleBtn.addEventListener('click', () => {
             showUnchanged = !showUnchanged;
+            toggleBtn.classList.toggle('active', !showUnchanged);
             if (showUnchanged) {
                 cy.nodes('[status = "unchanged"]').show();
             } else {
                 cy.nodes('[status = "unchanged"]').hide();
             }
+        });
+
+        document.getElementById('search').addEventListener('input', (evt) => {
+            const query = evt.target.value.trim().toLowerCase();
+            if (!query) {
+                cy.elements().removeClass('dimmed');
+                return;
+            }
+            cy.nodes().forEach(n => {
+                const match = (n.data('name') || '').toLowerCase().includes(query);
+                n.toggleClass('dimmed', !match);
+            });
+            cy.edges().forEach(e => {
+                const match = !e.source().hasClass('dimmed') && !e.target().hasClass('dimmed');
+                e.toggleClass('dimmed', !match);
+            });
         });
     </script>
 </body>

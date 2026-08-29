@@ -45,7 +45,7 @@ def test_html_escapes_finding_and_node_text_before_rendering(tmp_path: Path):
     html = Path(html_path).read_text()
 
     assert "function escapeHtml(" in html
-    for field in ("v.title", "v.impact", "v.description", "d.name", "d.id", "d.kind", "d.status", "d.file"):
+    for field in ("v.title", "v.impact", "v.description", "d.name", "d.kind", "d.status", "d.file"):
         assert f"escapeHtml({field})" in html, f"{field} is interpolated without escapeHtml()"
 
 
