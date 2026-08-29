@@ -68,6 +68,30 @@ def test_multiline_exception_messages_are_trimmed_to_one_line(monkeypatch):
     assert list(token_usage["errors"].keys()) == ["litellm.APIConnectionError: Missing Gemini API key."]
 
 
+def test_multiline_json_error_body_shows_useful_content_not_just_a_brace(monkeypatch):
+    """Reported case: litellm's Gemini errors put the actually useful text
+    several lines into a pretty-printed JSON blob, e.g. a 404 for a
+    deprecated/renamed model. A naive first-line cut showed only the
+    opening brace ('litellm.NotFoundError: GeminiException - {') and
+    nothing else -- the summary must still surface the real message."""
+    _mock_litellm(monkeypatch, RuntimeError(
+        'litellm.NotFoundError: GeminiException - {\n'
+        '  "error": {\n'
+        '    "code": 404,\n'
+        '    "message": "models/gemini-1.5-pro is not found for API version v1beta.",\n'
+        '    "status": "NOT_FOUND"\n'
+        '  }\n'
+        '}\n'
+    ))
+    graph_data = {"nodes": [_node("n1", "vulnerable_fn")], "edges": []}
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=None)
+
+    summary = next(iter(token_usage["errors"]))
+    assert "models/gemini-1.5-pro is not found" in summary
+    assert "\n" not in summary
+
+
 def test_no_errors_key_populated_on_a_clean_run(monkeypatch):
     fake_litellm = MagicMock()
     fake_response = MagicMock()

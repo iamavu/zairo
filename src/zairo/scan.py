@@ -28,7 +28,7 @@ def run_scan(
     target: Optional[str] = None,
     language: str = "auto",
     llm: bool = False,
-    model: str = "gemini/gemini-1.5-pro",
+    model: str = "gemini/gemini-2.5-pro",
     concurrency: int = 5,
     cache_path: Optional[str] = None,
     max_tokens: int = 4096,

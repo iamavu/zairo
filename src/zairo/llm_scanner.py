@@ -206,14 +206,30 @@ def _neighbor_snippet(n: Dict[str, Any]) -> Optional[str]:
     return f"Function: {n.get('name', '?')}\n```\n{code}\n```"
 
 
+_TRACEBACK_MARKER = "Traceback (most recent call last):"
+_MAX_ERROR_SUMMARY_LEN = 300
+
+
 def _summarize_error(e: Exception) -> str:
-    """First line only. Some providers (seen from litellm on a Gemini auth
-    failure) bake a full traceback into the exception's own message text --
-    fine for --verbose's full per-node log line, but not for the always-on
-    summary in cli.py, which needs a short, stable string to display and to
-    dedupe repeated failures by."""
+    """A short, single-line, stable summary of an exception for the always-on
+    CLI warning and its dedup key -- --verbose still logs the untrimmed
+    exception via the existing log() callback, so nothing is lost, just not
+    dumped into the summary. Some providers embed either a full Python
+    traceback (cut it off at the marker -- everything past it is stack
+    frames, not message) or a raw multi-line JSON error body (collapse
+    whitespace and cap the length, rather than taking just the first
+    "line" -- litellm's Gemini errors put the actually useful text, e.g.
+    "model X is not found", several lines into a pretty-printed JSON blob,
+    so a naive first-line cut showed nothing but an opening brace)."""
     text = str(e).strip()
-    return text.splitlines()[0].strip() if text else e.__class__.__name__
+    if not text:
+        return e.__class__.__name__
+    if _TRACEBACK_MARKER in text:
+        text = text.split(_TRACEBACK_MARKER, 1)[0]
+    text = " ".join(text.split())
+    if len(text) > _MAX_ERROR_SUMMARY_LEN:
+        text = text[:_MAX_ERROR_SUMMARY_LEN - 1] + "…"
+    return text or e.__class__.__name__
 
 
 def _hash_prompt(model: str, mod_code: str, neighbor_contexts: List[str]) -> str:
