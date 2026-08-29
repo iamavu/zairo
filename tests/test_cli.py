@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -11,7 +12,7 @@ def test_analyze_end_to_end(git_repo: Path, tmp_path: Path):
     output_dir = tmp_path / "out"
     result = runner.invoke(
         app,
-        [str(git_repo), "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir)],
+        ["analyze", str(git_repo), "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir)],
     )
 
     assert result.exit_code == 0, result.output
@@ -21,11 +22,72 @@ def test_analyze_end_to_end(git_repo: Path, tmp_path: Path):
     assert "Success!" in result.output
 
 
-def test_fail_on_without_llm_is_rejected(git_repo: Path, tmp_path: Path):
+def test_analyze_fail_on_without_llm_is_rejected(git_repo: Path, tmp_path: Path):
     output_dir = tmp_path / "out"
     result = runner.invoke(
         app,
-        [str(git_repo), "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir), "--fail-on", "high"],
+        ["analyze", str(git_repo), "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir), "--fail-on", "high"],
+    )
+
+    assert result.exit_code != 0
+    assert "--fail-on requires --llm" in result.output
+
+
+def test_fleet_scans_multiple_repos(git_repo: Path, tmp_path: Path):
+    output_dir = tmp_path / "out"
+    result = runner.invoke(
+        app,
+        [
+            "fleet", str(git_repo), str(git_repo),
+            "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (output_dir / "fleet.json").exists()
+    assert (output_dir / "fleet.html").exists()
+    assert not (output_dir / "fleet.sarif").exists()  # no --llm, nothing to convert
+
+    with open(output_dir / "fleet.json") as f:
+        summary = json.load(f)
+    assert len(summary["repos"]) == 2
+    assert summary["repos"][0]["slug"] != summary["repos"][1]["slug"]  # de-duplicated
+    for r in summary["repos"]:
+        assert r["status"] == "ok"
+        assert (output_dir / r["report_json"]).exists()
+        assert (output_dir / r["report_html"]).exists()
+
+
+def test_fleet_continues_past_a_failing_repo_by_default(git_repo: Path, tmp_path: Path):
+    output_dir = tmp_path / "out"
+    bad_repo = tmp_path / "not_a_repo"
+    bad_repo.mkdir()
+
+    result = runner.invoke(
+        app,
+        ["fleet", str(bad_repo), str(git_repo), "--output", str(output_dir)],
+    )
+
+    assert result.exit_code != 0  # a repo failed -> overall failure
+    with open(output_dir / "fleet.json") as f:
+        summary = json.load(f)
+    statuses = {r["slug"]: r["status"] for r in summary["repos"]}
+    assert len(statuses) == 2
+    assert "error" in statuses.values()
+    assert "ok" in statuses.values()
+
+
+def test_fleet_requires_at_least_one_repo(tmp_path: Path):
+    result = runner.invoke(app, ["fleet", "--output", str(tmp_path / "out")])
+
+    assert result.exit_code != 0
+    assert "no repos given" in result.output
+
+
+def test_fleet_fail_on_without_llm_is_rejected(git_repo: Path, tmp_path: Path):
+    result = runner.invoke(
+        app,
+        ["fleet", str(git_repo), "--output", str(tmp_path / "out"), "--fail-on", "high"],
     )
 
     assert result.exit_code != 0

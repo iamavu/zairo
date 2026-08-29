@@ -1,12 +1,12 @@
 import enum
 import os
+from typing import List, Optional
+
 import typer
 from rich.console import Console
 from . import __version__
-from .analyzer import analyze_impact
-from .reporter import generate_reports
-from .llm_scanner import scan_graph_for_vulnerabilities
-from .git_utils import create_worktree, remove_worktree
+from .fleet import unique_slug, write_fleet_reports
+from .scan import run_scan
 from ._util import max_severity, severity_rank
 
 app = typer.Typer(add_completion=False)
@@ -18,6 +18,40 @@ class Severity(str, enum.Enum):
     medium = "medium"
     high = "high"
     critical = "critical"
+
+
+def _analyze_on_event(event: str, **kw) -> None:
+    if event == "graph_built":
+        console.print(f"[bold blue]Found {kw['num_modified']} modified/added nodes.[/bold blue]")
+        console.print(f"[bold blue]Total nodes in subgraph: {kw['num_nodes']}[/bold blue]")
+        console.print(f"[bold blue]Total edges in subgraph: {kw['num_edges']}[/bold blue]")
+    elif event == "llm_scan_started":
+        console.print(f"[bold yellow]Running LLM scanner using {kw['model']} (concurrency={kw['concurrency']})...[/bold yellow]")
+    elif event == "llm_scan_done":
+        console.print(f"[bold yellow]Found vulnerabilities in {kw['num_vulnerable_nodes']} nodes.[/bold yellow]")
+
+
+def _print_token_usage(token_usage: dict) -> None:
+    if token_usage['requests'] == 0:
+        console.print("[dim]Token usage: no LLM requests were made (all results came from cache or were skipped).[/dim]")
+    elif token_usage['requests'] == token_usage['requests_without_usage']:
+        console.print(
+            f"[dim]Token usage: unavailable for all {token_usage['requests']} request(s) "
+            f"(provider/backend did not report it).[/dim]"
+        )
+    else:
+        counted = token_usage['requests'] - token_usage['requests_without_usage']
+        console.print(
+            f"[bold magenta]Tokens used:[/bold magenta] "
+            f"{token_usage['prompt_tokens']:,} prompt + {token_usage['completion_tokens']:,} completion "
+            f"= {token_usage['total_tokens']:,} total across {counted} request(s)"
+        )
+        if token_usage['requests_without_usage']:
+            console.print(
+                f"[dim]  ({token_usage['requests_without_usage']} additional request(s) had no usage "
+                f"data reported by the provider — not counted above)[/dim]"
+            )
+
 
 @app.command()
 def analyze(
@@ -50,93 +84,144 @@ def analyze(
         console.print(f"[bold green]Analyzing {repo_path} at depth {depth} — diff {base}..working tree[/bold green]")
     else:
         console.print(f"[bold green]Analyzing {repo_path} at depth {depth} — uncommitted changes[/bold green]")
-    # When diffing two commits, all downstream steps (graph analysis AND the
-    # LLM scan, which re-reads source files from disk) need to see `target`'s
-    # tree — not whatever happens to be checked out in repo_path already.
-    # The worktree must stay alive until every step that reads files is done.
-    abs_repo = os.path.abspath(repo_path)
-    worktree_path = None
-    analysis_root = abs_repo
-    should_fail = False
+
+    cache_path = os.path.join(output_dir, ".llm_cache.json") if (llm and cache) else None
     try:
-        if base and target:
-            log(f"Checking out '{target}' into a temporary worktree (base+target diff mode)...")
-            worktree_path = create_worktree(abs_repo, target)
-            analysis_root = worktree_path
-            log(f"Worktree ready at {worktree_path}")
-
-        graph_data = analyze_impact(analysis_root, depth, base, target, language, log=log)
-
-        num_modified = sum(1 for n in graph_data['nodes'] if n['status'] != 'unchanged')
-        console.print(f"[bold blue]Found {num_modified} modified/added nodes.[/bold blue]")
-        console.print(f"[bold blue]Total nodes in subgraph: {len(graph_data['nodes'])}[/bold blue]")
-        console.print(f"[bold blue]Total edges in subgraph: {len(graph_data['edges'])}[/bold blue]")
-
-        vulnerabilities = None
-        if llm:
-            console.print(f"[bold yellow]Running LLM scanner using {model} (concurrency={concurrency})...[/bold yellow]")
-            cache_path = os.path.join(output_dir, ".llm_cache.json") if cache else None
-            vulnerabilities, token_usage = scan_graph_for_vulnerabilities(
-                graph_data, model, log=log, concurrency=concurrency, cache_path=cache_path,
-                max_tokens=max_tokens,
-            )
-            console.print(f"[bold yellow]Found vulnerabilities in {len(vulnerabilities)} nodes.[/bold yellow]")
-
-            if fail_on is not None:
-                worst = max_severity(vulnerabilities)
-                if worst is not None and severity_rank(worst) >= severity_rank(fail_on.value):
-                    should_fail = True
-                    console.print(
-                        f"[bold red]Gate failed:[/bold red] found a '{worst}' severity finding "
-                        f"(threshold: {fail_on.value})."
-                    )
-
-            if tokens:
-                if token_usage['requests'] == 0:
-                    console.print("[dim]Token usage: no LLM requests were made (all results came from cache or were skipped).[/dim]")
-                elif token_usage['requests'] == token_usage['requests_without_usage']:
-                    console.print(
-                        f"[dim]Token usage: unavailable for all {token_usage['requests']} request(s) "
-                        f"(provider/backend did not report it).[/dim]"
-                    )
-                else:
-                    counted = token_usage['requests'] - token_usage['requests_without_usage']
-                    console.print(
-                        f"[bold magenta]Tokens used:[/bold magenta] "
-                        f"{token_usage['prompt_tokens']:,} prompt + {token_usage['completion_tokens']:,} completion "
-                        f"= {token_usage['total_tokens']:,} total across {counted} request(s)"
-                    )
-                    if token_usage['requests_without_usage']:
-                        console.print(
-                            f"[dim]  ({token_usage['requests_without_usage']} additional request(s) had no usage "
-                            f"data reported by the provider — not counted above)[/dim]"
-                        )
-
-        # SARIF locations must be relative to wherever node['file'] paths were
-        # actually resolved from -- that's analysis_root (the worktree when
-        # diffing two commits), not abs_repo, which can be a wholly separate
-        # directory in that mode. Since a worktree mirrors abs_repo's tree
-        # structure, the resulting relative paths are the same either way.
-        j_path, h_path, sarif_path = generate_reports(
-            graph_data, output_dir, vulnerabilities, repo_root=analysis_root, tool_version=__version__,
+        result = run_scan(
+            repo_path, output_dir, depth, base, target, language, llm, model, concurrency,
+            cache_path, max_tokens, log=log, on_event=_analyze_on_event,
         )
-
-        console.print(f"[bold green]Success![/bold green] Reports generated:")
-        console.print(f"  - {j_path}")
-        console.print(f"  - {h_path}")
-        if sarif_path:
-            console.print(f"  - {sarif_path}")
-
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
         raise typer.Exit(1)
-    finally:
-        if worktree_path:
-            log(f"Removing temporary worktree {worktree_path}")
-            remove_worktree(abs_repo, worktree_path)
+
+    should_fail = False
+    if llm:
+        if fail_on is not None:
+            worst = max_severity(result.vulnerabilities)
+            if worst is not None and severity_rank(worst) >= severity_rank(fail_on.value):
+                should_fail = True
+                console.print(
+                    f"[bold red]Gate failed:[/bold red] found a '{worst}' severity finding "
+                    f"(threshold: {fail_on.value})."
+                )
+        if tokens:
+            _print_token_usage(result.token_usage)
+
+    console.print(f"[bold green]Success![/bold green] Reports generated:")
+    console.print(f"  - {result.json_path}")
+    console.print(f"  - {result.html_path}")
+    if result.sarif_path:
+        console.print(f"  - {result.sarif_path}")
 
     if should_fail:
         raise typer.Exit(1)
+
+
+@app.command()
+def fleet(
+    repo_paths: Optional[List[str]] = typer.Argument(None, help="Paths to git repositories to scan"),
+    repos_file: str = typer.Option(None, "--repos-file", help="Text file with one repo path per line (blank lines and '#' comments ignored); merged with any positional repo paths"),
+    depth: int = typer.Option(1, "--depth", "-d", help="Depth of connections to traverse from changed nodes"),
+    output_dir: str = typer.Option("zairo_fleet_out", "--output", "-o", help="Output directory -- each repo gets its own subdirectory, plus an aggregate fleet.json/fleet.html/fleet.sarif"),
+    base: str = typer.Option(None, "--base", "-b", help="Base commit/ref to diff from, applied to every repo (e.g. main)"),
+    target: str = typer.Option(None, "--target", "-t", help="Target commit/ref to diff to, applied to every repo. Requires --base."),
+    language: str = typer.Option("auto", "--language", "-l", help="Language for Trailmark parsing (auto, python, typescript, rust, etc.)"),
+    llm: bool = typer.Option(False, "--llm", help="Run LLM vulnerability scanning on modified nodes, in every repo"),
+    model: str = typer.Option("gemini/gemini-1.5-pro", "--model", help="LiteLLM model string to use for scanning"),
+    concurrency: int = typer.Option(5, "--concurrency", "-c", help="Number of LLM scan requests to run in parallel, per repo"),
+    cache: bool = typer.Option(True, "--cache/--no-cache", help="Cache LLM findings by content hash to skip re-scanning unchanged nodes across runs"),
+    max_tokens: int = typer.Option(4096, "--max-tokens", help="Max output tokens per LLM scan request"),
+    fail_on: Severity = typer.Option(None, "--fail-on", help="Exit with a non-zero status if any finding across ANY repo is at or above this severity (requires --llm)"),
+    continue_on_error: bool = typer.Option(True, "--continue-on-error/--stop-on-error", help="Keep scanning remaining repos if one fails (default), instead of aborting the whole fleet run"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Print detailed diagnostic output for every repo"),
+):
+    """Scans multiple repos with the same settings and produces one
+    aggregate fleet.json/fleet.html/fleet.sarif alongside each repo's own
+    reports -- for a security team that owns many repos, not just one."""
+    def log(msg: str) -> None:
+        if verbose:
+            console.print(f"[dim]    · {msg}[/dim]")
+
+    if fail_on is not None and not llm:
+        console.print("[bold red]Error:[/bold red] --fail-on requires --llm.")
+        raise typer.Exit(1)
+
+    paths = list(repo_paths or [])
+    if repos_file:
+        with open(repos_file) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    paths.append(line)
+
+    if not paths:
+        console.print("[bold red]Error:[/bold red] no repos given (pass paths as arguments or --repos-file).")
+        raise typer.Exit(1)
+
+    console.print(f"[bold green]Scanning {len(paths)} repo(s)...[/bold green]")
+
+    results = []
+    used_slugs: set = set()
+    for i, repo_path in enumerate(paths, 1):
+        slug = unique_slug(repo_path, used_slugs)
+        repo_output_dir = os.path.join(output_dir, slug)
+        console.print(f"[bold cyan][{i}/{len(paths)}][/bold cyan] {repo_path}")
+
+        def on_event(event: str, **kw) -> None:
+            if event == "graph_built":
+                console.print(f"    {kw['num_modified']} modified/added node(s); {kw['num_nodes']} node(s), {kw['num_edges']} edge(s) in subgraph")
+            elif event == "llm_scan_started":
+                console.print(f"    running LLM scan ({kw['model']})...")
+            elif event == "llm_scan_done":
+                console.print(f"    {kw['num_vulnerable_nodes']} node(s) with findings")
+
+        cache_path = os.path.join(repo_output_dir, ".llm_cache.json") if (llm and cache) else None
+        try:
+            scan_result = run_scan(
+                repo_path, repo_output_dir, depth, base, target, language, llm, model, concurrency,
+                cache_path, max_tokens, log=log, on_event=on_event,
+            )
+            results.append({"repo": repo_path, "slug": slug, "status": "ok", "result": scan_result})
+        except Exception as e:
+            console.print(f"    [bold red]error:[/bold red] {e}")
+            results.append({"repo": repo_path, "slug": slug, "status": "error", "error": str(e)})
+            if not continue_on_error:
+                console.print("[bold red]Aborting fleet run (--stop-on-error).[/bold red]")
+                break
+
+    paths_attempted = paths[:len(results)]
+    ok_results = [r for r in results if r["status"] == "ok"]
+    errored_results = [r for r in results if r["status"] == "error"]
+
+    reports = write_fleet_reports(results, output_dir, tool_version=__version__)
+
+    console.print(f"[bold green]Scanned {len(ok_results)}/{len(paths_attempted)} repo(s) successfully.[/bold green]")
+    if errored_results:
+        console.print(f"[bold red]{len(errored_results)} repo(s) failed:[/bold red] " + ", ".join(r["repo"] for r in errored_results))
+    console.print("Fleet reports generated:")
+    console.print(f"  - {reports['json']}")
+    console.print(f"  - {reports['html']}")
+    if reports['sarif']:
+        console.print(f"  - {reports['sarif']}")
+
+    should_fail = bool(errored_results)
+    if llm and fail_on is not None:
+        combined_vulns = {}
+        for r in ok_results:
+            for node_id, findings in (r["result"].vulnerabilities or {}).items():
+                combined_vulns[f"{r['slug']}:{node_id}"] = findings
+        worst = max_severity(combined_vulns)
+        if worst is not None and severity_rank(worst) >= severity_rank(fail_on.value):
+            should_fail = True
+            console.print(
+                f"[bold red]Gate failed:[/bold red] found a '{worst}' severity finding across the fleet "
+                f"(threshold: {fail_on.value})."
+            )
+
+    if should_fail:
+        raise typer.Exit(1)
+
 
 def main():
     app()
