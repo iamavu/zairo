@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+
+# Default zairo output dir and LLM finding cache
+zairo_out/
+.llm_cache.json
+
+# Manual demo fixture (has its own nested .git; not part of the package)
+examples/dummy_repo/
