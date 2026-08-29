@@ -37,6 +37,9 @@ dev = [
 [project.scripts]
 zairo = "zairo.cli:main"
 
+[project.urls]
+Repository = "https://github.com/iamavu/zairo"
+
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
