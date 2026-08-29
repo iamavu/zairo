@@ -23,12 +23,28 @@ HTML_TEMPLATE = """
             --text-faint: #565f89;
             --accent: #7aa2f7;
             --accent-2: #bb9af7;
-            --green: #9ece6a;
-            --yellow: #e0af68;
-            --critical: #f7768e;
-            --high: #ff9e64;
-            --medium: #e0af68;
-            --low: #737aa2;
+
+            /* Node fill by change status. Deliberately disjoint from the
+               severity ramp below -- these two scales render superimposed
+               (fill + border ring on the same node) whenever a modified or
+               added node has a finding, so any shared hex between the two
+               scales makes that node's severity ring invisible against its
+               own fill. (That's not hypothetical: an earlier version of
+               this palette reused the same yellow for "modified" and
+               "medium", and a modified node with only a medium-severity
+               finding rendered as a plain filled circle, no ring at all.) */
+            --status-added: #9ece6a;
+            --status-modified: #7aa2f7;
+            --status-unchanged: #414868;
+
+            /* Finding severity, shown as a node's border ring and in badges.
+               Only "added"/"modified" nodes can ever carry a finding (only
+               they get LLM-scanned), so this only needs to avoid those two
+               status colors, not --status-unchanged. */
+            --sev-critical: #f7768e;
+            --sev-high: #ff9e64;
+            --sev-medium: #e0af68;
+            --sev-low: #565f89;
         }
         * { box-sizing: border-box; }
         body {
@@ -47,8 +63,8 @@ HTML_TEMPLATE = """
         header .brand span { color: var(--accent); }
         .stats { display: flex; gap: 18px; margin-left: auto; font-size: 0.85em; color: var(--text-dim); }
         .stats b { color: var(--text); font-weight: 600; }
-        .stats .stat-crit b { color: var(--critical); }
-        .stats .stat-high b { color: var(--high); }
+        .stats .stat-crit b { color: var(--sev-critical); }
+        .stats .stat-high b { color: var(--sev-high); }
 
         .main { flex: 1; display: flex; min-height: 0; }
         #cy { flex: 1; height: 100%; }
@@ -81,9 +97,11 @@ HTML_TEMPLATE = """
         button.active { background: var(--accent); border-color: var(--accent); color: #16161e; font-weight: 600; }
         button.full { width: 100%; }
 
-        .legend { display: flex; flex-direction: column; gap: 6px; font-size: 0.82em; }
+        .legend { display: flex; flex-direction: column; gap: 6px; font-size: 0.82em; margin-bottom: 10px; }
         .legend-item { display: flex; align-items: center; gap: 8px; color: var(--text-dim); }
+        .legend-group-label { font-size: 0.72em; color: var(--text-faint); margin-bottom: 4px; }
         .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+        .dot.ring { background: transparent; border: 2px solid; box-sizing: content-box; width: 6px; height: 6px; }
 
         .empty-state {
             color: var(--text-faint); font-size: 0.85em; text-align: center;
@@ -97,12 +115,12 @@ HTML_TEMPLATE = """
             font-size: 0.72em; padding: 2px 8px; border-radius: 100px; font-weight: 600;
             background: var(--border); color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em;
         }
-        .badge.status-modified { background: rgba(224,175,104,0.18); color: var(--yellow); }
-        .badge.status-added { background: rgba(158,206,106,0.18); color: var(--green); }
-        .badge.sev-critical { background: rgba(247,118,142,0.18); color: var(--critical); }
-        .badge.sev-high { background: rgba(255,158,100,0.18); color: var(--high); }
-        .badge.sev-medium { background: rgba(224,175,104,0.18); color: var(--medium); }
-        .badge.sev-low { background: rgba(115,122,162,0.18); color: var(--low); }
+        .badge.status-modified { background: rgba(122,162,247,0.18); color: var(--status-modified); }
+        .badge.status-added { background: rgba(158,206,106,0.18); color: var(--status-added); }
+        .badge.sev-critical { background: rgba(247,118,142,0.18); color: var(--sev-critical); }
+        .badge.sev-high { background: rgba(255,158,100,0.18); color: var(--sev-high); }
+        .badge.sev-medium { background: rgba(224,175,104,0.18); color: var(--sev-medium); }
+        .badge.sev-low { background: rgba(115,122,162,0.18); color: var(--sev-low); }
         .meta-row { font-size: 0.82em; color: var(--text-dim); margin-bottom: 4px; }
         .meta-row .mono { color: var(--text); }
 
@@ -114,10 +132,10 @@ HTML_TEMPLATE = """
             background: var(--bg); border-radius: 6px; padding: 10px 12px; margin-bottom: 8px;
             border-left: 3px solid var(--text-faint);
         }
-        .vuln-card.sev-critical { border-left-color: var(--critical); }
-        .vuln-card.sev-high { border-left-color: var(--high); }
-        .vuln-card.sev-medium { border-left-color: var(--medium); }
-        .vuln-card.sev-low { border-left-color: var(--low); }
+        .vuln-card.sev-critical { border-left-color: var(--sev-critical); }
+        .vuln-card.sev-high { border-left-color: var(--sev-high); }
+        .vuln-card.sev-medium { border-left-color: var(--sev-medium); }
+        .vuln-card.sev-low { border-left-color: var(--sev-low); }
         .vuln-card .vuln-title { font-weight: 600; font-size: 0.88em; margin-bottom: 4px; }
         .vuln-card p { margin: 4px 0 0 0; font-size: 0.82em; color: var(--text-dim); line-height: 1.4; }
         .vuln-card .badge-row { margin-bottom: 6px; }
@@ -156,12 +174,18 @@ HTML_TEMPLATE = """
 
             <div class="section">
                 <div class="section-label">Legend</div>
+                <div class="legend-group-label">Node fill = change status</div>
                 <div class="legend">
-                    <div class="legend-item"><div class="dot" style="background: var(--green);"></div> Added</div>
-                    <div class="legend-item"><div class="dot" style="background: var(--yellow);"></div> Modified</div>
-                    <div class="legend-item"><div class="dot" style="background: var(--text-faint);"></div> Unchanged</div>
-                    <div class="legend-item"><div class="dot" style="background: var(--critical);"></div> Critical/high finding</div>
-                    <div class="legend-item"><div class="dot" style="background: var(--medium);"></div> Medium/low finding</div>
+                    <div class="legend-item"><div class="dot" style="background: var(--status-added);"></div> Added</div>
+                    <div class="legend-item"><div class="dot" style="background: var(--status-modified);"></div> Modified</div>
+                    <div class="legend-item"><div class="dot" style="background: var(--status-unchanged);"></div> Unchanged</div>
+                </div>
+                <div class="legend-group-label">Border ring = worst finding severity</div>
+                <div class="legend">
+                    <div class="legend-item"><div class="dot ring" style="border-color: var(--sev-critical);"></div> Critical</div>
+                    <div class="legend-item"><div class="dot ring" style="border-color: var(--sev-high);"></div> High</div>
+                    <div class="legend-item"><div class="dot ring" style="border-color: var(--sev-medium);"></div> Medium</div>
+                    <div class="legend-item"><div class="dot ring" style="border-color: var(--sev-low);"></div> Low</div>
                 </div>
             </div>
 
@@ -187,8 +211,12 @@ HTML_TEMPLATE = """
             }[c]));
         }
 
-        const STATUS_COLOR = { added: '#9ece6a', modified: '#e0af68', unchanged: '#414868' };
-        const SEVERITY_COLOR = { critical: '#f7768e', high: '#ff9e64', medium: '#e0af68', low: '#737aa2' };
+        // Kept in exact sync with the --status-*/--sev-* CSS variables above
+        // (Cytoscape's canvas renderer can't resolve CSS custom properties,
+        // so these have to be literal hex here) -- the two scales must stay
+        // disjoint, see the comment on --status-added in <style> for why.
+        const STATUS_COLOR = { added: '#9ece6a', modified: '#7aa2f7', unchanged: '#414868' };
+        const SEVERITY_COLOR = { critical: '#f7768e', high: '#ff9e64', medium: '#e0af68', low: '#565f89' };
         const SEVERITY_RANK = { critical: 3, high: 2, medium: 1, low: 0 };
         const KIND_SHAPE = {
             function: 'ellipse', method: 'ellipse', class: 'round-rectangle',
@@ -281,8 +309,15 @@ HTML_TEMPLATE = """
                     }
                 },
                 {
+                    // A third instance of the same collision class as the
+                    // status/severity palette: reusing border-color here
+                    // (even a different color) would still fight with the
+                    // per-node severity ring on click. overlay-* draws a
+                    // separate glow outside the border instead, so
+                    // selection and severity never compete for the same
+                    // pixels.
                     selector: 'node:selected',
-                    style: { 'border-width': 4, 'border-color': '#7aa2f7' }
+                    style: { 'overlay-color': '#7aa2f7', 'overlay-opacity': 0.3, 'overlay-padding': 6 }
                 },
                 {
                     selector: 'edge',
@@ -314,6 +349,7 @@ HTML_TEMPLATE = """
                 name: 'dagre'
             }
         });
+        window.cy = cy; // inspectable from devtools/automation
 
         function severityBadge(sev) {
             if (!sev) return '';
