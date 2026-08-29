@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from typer.testing import CliRunner
 
@@ -92,3 +93,39 @@ def test_fleet_fail_on_without_llm_is_rejected(git_repo: Path, tmp_path: Path):
 
     assert result.exit_code != 0
     assert "--fail-on requires --llm" in result.output
+
+
+def test_fleet_tokens_without_llm_is_silent(git_repo: Path, tmp_path: Path):
+    """--tokens has nothing to report without --llm -- unlike --fail-on,
+    there's no invalid combination here, it should just print nothing."""
+    result = runner.invoke(
+        app,
+        ["fleet", str(git_repo), "--output", str(tmp_path / "out"), "--tokens"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Token usage" not in result.output
+    assert "Tokens used" not in result.output
+
+
+def test_fleet_tokens_sums_usage_across_repos(make_git_repo, tmp_path: Path):
+    repo_a = make_git_repo("repo_a")
+    repo_b = make_git_repo("repo_b")
+
+    fake_usage = {
+        "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
+        "requests": 1, "requests_without_usage": 0, "errors": {},
+    }
+
+    with patch("zairo.scan.scan_graph_for_vulnerabilities", return_value=({}, fake_usage)):
+        result = runner.invoke(
+            app,
+            ["fleet", str(repo_a), str(repo_b), "--llm", "--tokens", "--output", str(tmp_path / "out")],
+        )
+
+    assert result.exit_code == 0, result.output
+    # 2 repos x fake_usage each -> summed totals
+    assert "200 prompt" in result.output
+    assert "40 completion" in result.output
+    assert "240 total" in result.output
+    assert "2 request(s)" in result.output

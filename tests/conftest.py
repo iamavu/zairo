@@ -40,3 +40,21 @@ def git_repo(tmp_path: Path) -> Path:
     _run_git(repo, "commit", "-q", "-m", "add vulnerability")
 
     return repo
+
+
+@pytest.fixture
+def make_git_repo(tmp_path: Path):
+    """Factory for a throwaway single-commit git repo with trivial content,
+    for tests that need more than one independent repo (git_repo above
+    gives exactly one, with specific vulnerable content)."""
+    def _make(name: str) -> Path:
+        repo = tmp_path / name
+        repo.mkdir()
+        _run_git(repo, "init", "-q")
+        _run_git(repo, "config", "user.email", "test@example.com")
+        _run_git(repo, "config", "user.name", "Test")
+        (repo / "app.py").write_text("def f():\n    return 1\n")
+        _run_git(repo, "add", "app.py")
+        _run_git(repo, "commit", "-q", "-m", "initial")
+        return repo
+    return _make

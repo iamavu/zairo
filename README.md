@@ -129,11 +129,14 @@ zairo fleet --repos-file repos.txt --base main --target HEAD --llm --fail-on hig
 
 It accepts almost all the same options as `analyze` (see the tables above —
 `--depth`, `--language`, `--llm`, `--model`, `--concurrency`, `--cache`,
-`--max-tokens`, `--fail-on`, `--verbose`), applied identically to every repo.
-That means `--base`/`--target` need to mean the same thing across all of
-them — this fits best when your repos share a diffing convention (e.g. all
-diffing against `main`). Repos with different conventions need separate
-`fleet` invocations.
+`--max-tokens`, `--tokens`, `--fail-on`, `--verbose`), applied identically to
+every repo. That means `--base`/`--target` need to mean the same thing
+across all of them — this fits best when your repos share a diffing
+convention (e.g. all diffing against `main`). Repos with different
+conventions need separate `fleet` invocations.
+
+`--tokens` reports one combined total across every repo scanned, not a
+per-repo breakdown.
 
 A few things unique to `fleet`:
 

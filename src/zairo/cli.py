@@ -90,6 +90,19 @@ def _print_token_usage(token_usage: dict) -> None:
             )
 
 
+def _sum_token_usage(token_usages: List[dict]) -> dict:
+    """Combines every repo's token_usage in a fleet run into one totals dict
+    with the same shape _print_token_usage expects, so the fleet-wide number
+    is printed the exact same way a single `analyze` run's is."""
+    total = {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0, 'requests': 0, 'requests_without_usage': 0}
+    for usage in token_usages:
+        if not usage:
+            continue
+        for key in total:
+            total[key] += usage.get(key, 0)
+    return total
+
+
 @app.command()
 def analyze(
     repo_path: str = typer.Argument(..., help="Path to the git repository"),
@@ -168,6 +181,7 @@ def fleet(
     concurrency: int = typer.Option(5, "--concurrency", "-c", help="Number of LLM scan requests to run in parallel, per repo"),
     cache: bool = typer.Option(True, "--cache/--no-cache", help="Cache LLM findings by content hash to skip re-scanning unchanged nodes across runs"),
     max_tokens: int = typer.Option(4096, "--max-tokens", help="Max output tokens per LLM scan request"),
+    tokens: bool = typer.Option(False, "--tokens", help="Show total LLM tokens used across all repos (prompt/completion/total, across real API calls -- cache hits don't count)"),
     fail_on: Severity = typer.Option(None, "--fail-on", help="Exit with a non-zero status if any finding across ANY repo is at or above this severity (requires --llm)"),
     continue_on_error: bool = typer.Option(True, "--continue-on-error/--stop-on-error", help="Keep scanning remaining repos if one fails (default), instead of aborting the whole fleet run"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Print detailed diagnostic output for every repo"),
@@ -232,6 +246,8 @@ def fleet(
     console.print(f"[bold green]Scanned {len(ok_results)}/{len(paths_attempted)} repo(s) successfully.[/bold green]")
     if errored_results:
         console.print(f"[bold red]{len(errored_results)} repo(s) failed:[/bold red] " + ", ".join(r["repo"] for r in errored_results))
+    if llm and tokens:
+        _print_token_usage(_sum_token_usage([r["result"].token_usage for r in ok_results]))
     console.print("Fleet reports generated:")
     console.print(f"  - {reports['json']}")
     console.print(f"  - {reports['html']}")
