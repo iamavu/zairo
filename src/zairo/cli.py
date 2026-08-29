@@ -70,6 +70,7 @@ def analyze(
     fail_on: Severity = typer.Option(None, "--fail-on", help="Exit with a non-zero status if any finding at or above this severity is found (requires --llm) -- for gating CI/PR checks"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Print detailed diagnostic output (git commands, worktree setup, node matching, per-node LLM scan progress)")
 ):
+    """Diffs a single repo, builds the impact graph around what changed, and optionally runs an LLM vulnerability scan on it -- writing report.json/report.html (and report.sarif when --llm is used)."""
     def log(msg: str) -> None:
         if verbose:
             console.print(f"[dim]  · {msg}[/dim]")
@@ -136,9 +137,7 @@ def fleet(
     continue_on_error: bool = typer.Option(True, "--continue-on-error/--stop-on-error", help="Keep scanning remaining repos if one fails (default), instead of aborting the whole fleet run"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Print detailed diagnostic output for every repo"),
 ):
-    """Scans multiple repos with the same settings and produces one
-    aggregate fleet.json/fleet.html/fleet.sarif alongside each repo's own
-    reports -- for a security team that owns many repos, not just one."""
+    """Scans multiple repos with the same settings and produces one aggregate fleet.json/fleet.html/fleet.sarif alongside each repo's own reports -- for a security team that owns many repos, not just one."""
     def log(msg: str) -> None:
         if verbose:
             console.print(f"[dim]    · {msg}[/dim]")
