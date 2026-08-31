@@ -457,8 +457,29 @@ HTML_TEMPLATE = """
         // not what changed, and on a large diff they'd otherwise dominate
         // the node count before the user ever gets to the toggles. The
         // checkboxes above start unchecked to match.
-        cy.nodes('[status = "unchanged"]').hide();
-        cy.nodes('[?deleted]').hide();
+        //
+        // .not(':parent') matters: a compound container (a module) can
+        // itself be status "unchanged" while holding a child that's
+        // "modified" (only that one nested function actually changed).
+        // Hiding the container directly would cascade-hide that modified
+        // child too -- Cytoscape always hides a parent's descendants along
+        // with it -- silently dropping real changes from view. Hiding only
+        // leaf nodes by their own status, then separately collapsing a
+        // container once ALL of its children are hidden (never based on
+        // the container's own status), keeps modified content visible
+        // regardless of what its container happens to be classified as.
+        function hideUnchangedAndDeleted() {
+            cy.nodes('[status = "unchanged"]').not(':parent').hide();
+            cy.nodes('[?deleted]').not(':parent').hide();
+            syncParentVisibility();
+        }
+        function syncParentVisibility() {
+            cy.nodes(':parent').forEach(p => {
+                if (p.children(':visible').length > 0) p.show();
+                else p.hide();
+            });
+        }
+        hideUnchangedAndDeleted();
 
         // fit:true (the default) zooms out until every node is on screen no
         // matter how many there are -- on a large diff (a thousand-plus
@@ -549,14 +570,16 @@ HTML_TEMPLATE = """
         const relayout = () => runLayout(cy.elements(':visible'), 'dagre');
 
         document.getElementById('toggle-unchanged').addEventListener('change', (evt) => {
-            const nodes = cy.nodes('[status = "unchanged"]');
+            const nodes = cy.nodes('[status = "unchanged"]').not(':parent');
             if (evt.target.checked) nodes.show(); else nodes.hide();
+            syncParentVisibility();
             relayout();
         });
 
         document.getElementById('toggle-deleted').addEventListener('change', (evt) => {
-            const nodes = cy.nodes('[?deleted]');
+            const nodes = cy.nodes('[?deleted]').not(':parent');
             if (evt.target.checked) nodes.show(); else nodes.hide();
+            syncParentVisibility();
             relayout();
         });
 
