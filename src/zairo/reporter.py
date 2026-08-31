@@ -56,66 +56,90 @@ HTML_TEMPLATE = """
         code, .mono { font-family: "SF Mono", Menlo, Consolas, monospace; }
 
         header {
-            display: flex; align-items: center; gap: 24px;
+            display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
             padding: 10px 20px; background: var(--panel);
             border-bottom: 1px solid var(--border); flex-shrink: 0;
         }
-        header .brand { font-weight: 700; font-size: 1.05em; letter-spacing: 0.02em; }
+        header .brand { font-weight: 700; font-size: 1.05em; letter-spacing: 0.02em; flex-shrink: 0; }
         header .brand span { color: var(--accent); }
-        .stats { display: flex; gap: 18px; margin-left: auto; font-size: 0.85em; color: var(--text-dim); }
+
+        /* Global controls (search, layout/visibility toggles) live in the
+           header -- they act on the whole graph, not on whatever's
+           currently selected, so they don't belong in the sidebar. */
+        .header-controls { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+
+        input#search {
+            width: 170px; padding: 7px 10px; background: var(--panel-2);
+            border: 1px solid var(--border); border-radius: 6px; color: var(--text);
+            font-size: 0.82em; outline: none;
+        }
+        input#search:focus { border-color: var(--accent); }
+
+        .toggle-group { display: flex; align-items: center; gap: 12px; }
+        .toggle {
+            display: flex; align-items: center; gap: 7px; font-size: 0.8em;
+            color: var(--text-dim); cursor: pointer; user-select: none;
+        }
+        .toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+        .toggle .track {
+            width: 30px; height: 16px; border-radius: 100px; flex-shrink: 0;
+            background: var(--panel-2); border: 1px solid var(--border);
+            position: relative; transition: background 0.15s ease, border-color 0.15s ease;
+        }
+        .toggle .track::after {
+            content: ''; position: absolute; top: 1px; left: 1px;
+            width: 12px; height: 12px; border-radius: 50%; background: var(--text-faint);
+            transition: transform 0.15s ease, background 0.15s ease;
+        }
+        .toggle input:checked + .track { background: rgba(122,162,247,0.25); border-color: var(--accent); }
+        .toggle input:checked + .track::after { transform: translateX(14px); background: var(--accent); }
+        .toggle input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+        .stats { display: flex; gap: 18px; margin-left: auto; font-size: 0.85em; color: var(--text-dim); flex-shrink: 0; }
         .stats b { color: var(--text); font-weight: 600; }
         .stats .stat-crit b { color: var(--sev-critical); }
         .stats .stat-high b { color: var(--sev-high); }
 
-        .main { flex: 1; display: flex; min-height: 0; }
+        .main { flex: 1; display: flex; min-height: 0; position: relative; }
         #cy { flex: 1; height: 100%; }
 
-        #sidebar {
-            width: 320px; flex-shrink: 0; height: 100%; background: var(--panel);
-            padding: 16px; box-sizing: border-box; overflow-y: auto;
-            border-left: 1px solid var(--border);
+        /* Floats over the bottom-left of the graph canvas instead of
+           taking up permanent sidebar space -- it's reference material for
+           reading the graph, not something that needs to always be visible
+           at full size. */
+        .legend-panel {
+            position: absolute; bottom: 16px; left: 16px; z-index: 5;
+            background: rgba(26,27,38,0.94); border: 1px solid var(--border);
+            border-radius: 8px; padding: 12px 14px; max-width: 220px;
         }
-        .section { margin-bottom: 20px; }
-        .section-label {
-            font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.08em;
-            color: var(--text-faint); margin-bottom: 8px; font-weight: 600;
-        }
-
-        input#search {
-            width: 100%; padding: 8px 10px; background: var(--panel-2);
-            border: 1px solid var(--border); border-radius: 6px; color: var(--text);
-            font-size: 0.85em; outline: none;
-        }
-        input#search:focus { border-color: var(--accent); }
-
-        .btn-row { display: flex; gap: 6px; }
-        button {
-            background: var(--panel-2); color: var(--text-dim); border: 1px solid var(--border);
-            padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 0.78em;
-            flex: 1; transition: all 0.15s ease;
-        }
-        button:hover { background: var(--border); color: var(--text); }
-        button.active { background: var(--accent); border-color: var(--accent); color: #16161e; font-weight: 600; }
-        button.full { width: 100%; }
-
-        .legend { display: flex; flex-direction: column; gap: 6px; font-size: 0.82em; margin-bottom: 10px; }
+        .legend { display: flex; flex-direction: column; gap: 6px; font-size: 0.8em; margin-bottom: 10px; }
+        .legend:last-child { margin-bottom: 0; }
         .legend-item { display: flex; align-items: center; gap: 8px; color: var(--text-dim); }
-        .legend-group-label { font-size: 0.72em; color: var(--text-faint); margin-bottom: 4px; }
+        .legend-group-label { font-size: 0.7em; color: var(--text-faint); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
         .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
         .dot.ring { background: transparent; border: 2px solid; box-sizing: content-box; width: 6px; height: 6px; }
         .dot.deleted { background: transparent; border: 2px dashed; box-sizing: content-box; width: 6px; height: 6px; opacity: 0.75; }
 
-        .empty-state {
-            color: var(--text-faint); font-size: 0.85em; text-align: center;
-            padding: 30px 10px; border: 1px dashed var(--border); border-radius: 8px;
+        #sidebar {
+            width: 320px; flex-shrink: 0; height: 100%; background: var(--panel);
+            padding: 16px; box-sizing: border-box; overflow-y: auto; overflow-wrap: anywhere;
+            border-left: 1px solid var(--border);
         }
 
+        .empty-state {
+            display: flex; flex-direction: column; align-items: center; gap: 8px;
+            color: var(--text-faint); font-size: 0.85em; text-align: center;
+            padding: 40px 16px; border: 1px dashed var(--border); border-radius: 8px;
+        }
+        .empty-state .icon { font-size: 1.6em; opacity: 0.5; }
+
         .detail-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
-        .detail-card h2 { margin: 0 0 10px 0; font-size: 1em; color: var(--text); word-break: break-word; }
+        .detail-card h2 { margin: 0 0 10px 0; font-size: 1em; color: var(--text); overflow-wrap: anywhere; }
         .badge-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
         .badge {
             font-size: 0.72em; padding: 2px 8px; border-radius: 100px; font-weight: 600;
             background: var(--border); color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em;
+            white-space: nowrap;
         }
         .badge.status-modified { background: rgba(122,162,247,0.18); color: var(--status-modified); }
         .badge.status-added { background: rgba(158,206,106,0.18); color: var(--status-added); }
@@ -124,8 +148,8 @@ HTML_TEMPLATE = """
         .badge.sev-high { background: rgba(255,158,100,0.18); color: var(--sev-high); }
         .badge.sev-medium { background: rgba(224,175,104,0.18); color: var(--sev-medium); }
         .badge.sev-low { background: rgba(115,122,162,0.18); color: var(--sev-low); }
-        .meta-row { font-size: 0.82em; color: var(--text-dim); margin-bottom: 4px; }
-        .meta-row .mono { color: var(--text); }
+        .meta-row { font-size: 0.82em; color: var(--text-dim); margin-bottom: 4px; overflow-wrap: anywhere; }
+        .meta-row .mono { color: var(--text); overflow-wrap: anywhere; }
 
         .vuln-heading {
             font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.06em;
@@ -133,7 +157,7 @@ HTML_TEMPLATE = """
         }
         .vuln-card {
             background: var(--bg); border-radius: 6px; padding: 10px 12px; margin-bottom: 8px;
-            border-left: 3px solid var(--text-faint);
+            border-left: 3px solid var(--text-faint); overflow-wrap: anywhere;
         }
         .vuln-card.sev-critical { border-left-color: var(--sev-critical); }
         .vuln-card.sev-high { border-left-color: var(--sev-high); }
@@ -147,6 +171,26 @@ HTML_TEMPLATE = """
 <body>
     <header>
         <div class="brand"><span>zairo</span> impact analysis</div>
+        <div class="header-controls">
+            <input id="search" type="text" placeholder="Filter by name..." autocomplete="off">
+            <div class="toggle-group">
+                <label class="toggle">
+                    <input type="checkbox" id="toggle-layout">
+                    <span class="track"></span>
+                    Force-directed
+                </label>
+                <label class="toggle">
+                    <input type="checkbox" id="toggle-unchanged" checked>
+                    <span class="track"></span>
+                    Unchanged
+                </label>
+                <label class="toggle">
+                    <input type="checkbox" id="toggle-deleted" checked>
+                    <span class="track"></span>
+                    Deleted
+                </label>
+            </div>
+        </div>
         <div class="stats">
             <span>Nodes: <b id="stat-nodes">0</b></span>
             <span>Edges: <b id="stat-edges">0</b></span>
@@ -158,46 +202,27 @@ HTML_TEMPLATE = """
     </header>
     <div class="main">
         <div id="cy"></div>
+        <div class="legend-panel">
+            <div class="legend-group-label">Node fill = change status</div>
+            <div class="legend">
+                <div class="legend-item"><div class="dot" style="background: var(--status-added);"></div> Added</div>
+                <div class="legend-item"><div class="dot" style="background: var(--status-modified);"></div> Modified</div>
+                <div class="legend-item"><div class="dot" style="background: var(--status-unchanged);"></div> Unchanged</div>
+                <div class="legend-item"><div class="dot deleted" style="border-color: var(--status-deleted);"></div> Deleted</div>
+            </div>
+            <div class="legend-group-label">Border ring = worst finding severity</div>
+            <div class="legend">
+                <div class="legend-item"><div class="dot ring" style="border-color: var(--sev-critical);"></div> Critical</div>
+                <div class="legend-item"><div class="dot ring" style="border-color: var(--sev-high);"></div> High</div>
+                <div class="legend-item"><div class="dot ring" style="border-color: var(--sev-medium);"></div> Medium</div>
+                <div class="legend-item"><div class="dot ring" style="border-color: var(--sev-low);"></div> Low</div>
+            </div>
+        </div>
         <div id="sidebar">
-            <div class="section">
-                <div class="section-label">Search</div>
-                <input id="search" type="text" placeholder="Filter by name..." autocomplete="off">
-            </div>
-
-            <div class="section">
-                <div class="section-label">Layout</div>
-                <div class="btn-row">
-                    <button id="btn-dagre" class="active">Hierarchical</button>
-                    <button id="btn-cose">Force-directed</button>
-                </div>
-            </div>
-
-            <div class="section">
-                <button id="btn-toggle" class="full">Toggle unchanged nodes</button>
-            </div>
-
-            <div class="section">
-                <div class="section-label">Legend</div>
-                <div class="legend-group-label">Node fill = change status</div>
-                <div class="legend">
-                    <div class="legend-item"><div class="dot" style="background: var(--status-added);"></div> Added</div>
-                    <div class="legend-item"><div class="dot" style="background: var(--status-modified);"></div> Modified</div>
-                    <div class="legend-item"><div class="dot" style="background: var(--status-unchanged);"></div> Unchanged</div>
-                    <div class="legend-item"><div class="dot deleted" style="border-color: var(--status-deleted);"></div> Deleted (dashed, faded)</div>
-                </div>
-                <div class="legend-group-label">Border ring = worst finding severity</div>
-                <div class="legend">
-                    <div class="legend-item"><div class="dot ring" style="border-color: var(--sev-critical);"></div> Critical</div>
-                    <div class="legend-item"><div class="dot ring" style="border-color: var(--sev-high);"></div> High</div>
-                    <div class="legend-item"><div class="dot ring" style="border-color: var(--sev-medium);"></div> Medium</div>
-                    <div class="legend-item"><div class="dot ring" style="border-color: var(--sev-low);"></div> Low</div>
-                </div>
-            </div>
-
-            <div class="section">
-                <div class="section-label">Details</div>
-                <div id="node-details">
-                    <div class="empty-state">Click a node to see its details.</div>
+            <div id="node-details">
+                <div class="empty-state">
+                    <div class="icon">◇</div>
+                    <div>Select a node to see its details</div>
                 </div>
             </div>
         </div>
@@ -382,7 +407,6 @@ HTML_TEMPLATE = """
         cy.on('tap', 'node', function(evt){
             const node = evt.target;
             const d = node.data();
-            const worst = worstSeverity(d.vulnerabilities);
 
             let vulnHtml = '';
             if (d.vulnerabilities && d.vulnerabilities.length > 0) {
@@ -413,7 +437,6 @@ HTML_TEMPLATE = """
                     <div class="badge-row">
                         <span class="badge">${escapeHtml(d.kind)}</span>
                         <span class="badge status-${escapeHtml(d.status)}">${escapeHtml(d.status)}</span>
-                        ${worst ? severityBadge(worst) : ''}
                     </div>
                     ${deletedNote}
                     <div class="meta-row">${d.deleted ? 'Was at' : 'File'}: <span class="mono">${escapeHtml(d.file)}</span></div>
@@ -423,29 +446,18 @@ HTML_TEMPLATE = """
             `;
         });
 
-        function setActiveLayoutButton(id) {
-            document.getElementById('btn-dagre').classList.toggle('active', id === 'btn-dagre');
-            document.getElementById('btn-cose').classList.toggle('active', id === 'btn-cose');
-        }
-        document.getElementById('btn-dagre').addEventListener('click', () => {
-            cy.layout({ name: 'dagre' }).run();
-            setActiveLayoutButton('btn-dagre');
-        });
-        document.getElementById('btn-cose').addEventListener('click', () => {
-            cy.layout({ name: 'cose' }).run();
-            setActiveLayoutButton('btn-cose');
+        document.getElementById('toggle-layout').addEventListener('change', (evt) => {
+            cy.layout({ name: evt.target.checked ? 'cose' : 'dagre' }).run();
         });
 
-        let showUnchanged = true;
-        const toggleBtn = document.getElementById('btn-toggle');
-        toggleBtn.addEventListener('click', () => {
-            showUnchanged = !showUnchanged;
-            toggleBtn.classList.toggle('active', !showUnchanged);
-            if (showUnchanged) {
-                cy.nodes('[status = "unchanged"]').show();
-            } else {
-                cy.nodes('[status = "unchanged"]').hide();
-            }
+        document.getElementById('toggle-unchanged').addEventListener('change', (evt) => {
+            const nodes = cy.nodes('[status = "unchanged"]');
+            if (evt.target.checked) nodes.show(); else nodes.hide();
+        });
+
+        document.getElementById('toggle-deleted').addEventListener('change', (evt) => {
+            const nodes = cy.nodes('[?deleted]');
+            if (evt.target.checked) nodes.show(); else nodes.hide();
         });
 
         document.getElementById('search').addEventListener('input', (evt) => {
