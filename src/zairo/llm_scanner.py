@@ -9,7 +9,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Any
 
 # `litellm` transitively imports the openai/anthropic SDKs and their full
 # Pydantic type trees (~3s). Import it lazily, only once actual scanning
-# happens, so `--help` and non-`--llm` runs don't pay that cost.
+# happens, so `--help` and `--graph-only` runs don't pay that cost.
 litellm = None
 
 def _ensure_litellm():

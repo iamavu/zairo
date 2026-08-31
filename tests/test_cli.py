@@ -13,26 +13,26 @@ def test_single_repo_writes_a_direct_report(git_repo: Path, tmp_path: Path):
     output_dir = tmp_path / "out"
     result = runner.invoke(
         app,
-        [str(git_repo), "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir)],
+        [str(git_repo), "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir), "--graph-only"],
     )
 
     assert result.exit_code == 0, result.output
     assert (output_dir / "report.json").exists()
     assert (output_dir / "report.html").exists()
-    assert not (output_dir / "report.sarif").exists()  # no --llm, nothing to convert
+    assert not (output_dir / "report.sarif").exists()  # --graph-only, nothing to convert
     assert not (output_dir / "rollup.json").exists()  # single repo -> no rollup
     assert "Success!" in result.output
 
 
-def test_single_repo_fail_on_without_llm_is_rejected(git_repo: Path, tmp_path: Path):
+def test_single_repo_fail_on_with_graph_only_is_rejected(git_repo: Path, tmp_path: Path):
     output_dir = tmp_path / "out"
     result = runner.invoke(
         app,
-        [str(git_repo), "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir), "--fail-on", "high"],
+        [str(git_repo), "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir), "--graph-only", "--fail-on", "high"],
     )
 
     assert result.exit_code != 0
-    assert "--fail-on requires --llm" in result.output
+    assert "--fail-on requires LLM scanning" in result.output
 
 
 def test_multiple_positional_paths_trigger_multi_repo_mode(git_repo: Path, tmp_path: Path):
@@ -41,14 +41,14 @@ def test_multiple_positional_paths_trigger_multi_repo_mode(git_repo: Path, tmp_p
         app,
         [
             str(git_repo), str(git_repo),
-            "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir),
+            "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir), "--graph-only",
         ],
     )
 
     assert result.exit_code == 0, result.output
     assert (output_dir / "rollup.json").exists()
     assert (output_dir / "rollup.html").exists()
-    assert not (output_dir / "rollup.sarif").exists()  # no --llm, nothing to convert
+    assert not (output_dir / "rollup.sarif").exists()  # --graph-only, nothing to convert
     assert not (output_dir / "report.json").exists()  # multi-repo mode -> no direct single-repo report
 
     with open(output_dir / "rollup.json") as f:
@@ -68,7 +68,7 @@ def test_repos_file_with_one_entry_triggers_single_repo_mode(git_repo: Path, tmp
     repos_file.write_text(f"{git_repo}\n")
     output_dir = tmp_path / "out"
 
-    result = runner.invoke(app, ["--repos-file", str(repos_file), "--output", str(output_dir)])
+    result = runner.invoke(app, ["--repos-file", str(repos_file), "--output", str(output_dir), "--graph-only"])
 
     assert result.exit_code == 0, result.output
     assert (output_dir / "report.json").exists()
@@ -80,7 +80,7 @@ def test_repos_file_with_multiple_entries_triggers_multi_repo_mode(git_repo: Pat
     repos_file.write_text(f"{git_repo}\n# a comment\n\n{git_repo}\n")
     output_dir = tmp_path / "out"
 
-    result = runner.invoke(app, ["--repos-file", str(repos_file), "--output", str(output_dir)])
+    result = runner.invoke(app, ["--repos-file", str(repos_file), "--output", str(output_dir), "--graph-only"])
 
     assert result.exit_code == 0, result.output
     assert (output_dir / "rollup.json").exists()
@@ -96,7 +96,7 @@ def test_positional_paths_and_repos_file_combine(git_repo: Path, tmp_path: Path)
     repos_file.write_text(f"{git_repo}\n")
     output_dir = tmp_path / "out"
 
-    result = runner.invoke(app, [str(git_repo), "--repos-file", str(repos_file), "--output", str(output_dir)])
+    result = runner.invoke(app, [str(git_repo), "--repos-file", str(repos_file), "--output", str(output_dir), "--graph-only"])
 
     assert result.exit_code == 0, result.output
     assert (output_dir / "rollup.json").exists()
@@ -112,7 +112,7 @@ def test_multi_repo_continues_past_a_failing_repo_by_default(git_repo: Path, tmp
 
     result = runner.invoke(
         app,
-        [str(bad_repo), str(git_repo), "--output", str(output_dir)],
+        [str(bad_repo), str(git_repo), "--output", str(output_dir), "--graph-only"],
     )
 
     assert result.exit_code != 0  # a repo failed -> overall failure
@@ -130,7 +130,7 @@ def test_multi_repo_repo_concurrency_scans_all_repos(make_git_repo, tmp_path: Pa
 
     result = runner.invoke(
         app,
-        [*[str(r) for r in repos], "--repo-concurrency", "2", "--output", str(output_dir)],
+        [*[str(r) for r in repos], "--repo-concurrency", "2", "--output", str(output_dir), "--graph-only"],
     )
 
     assert result.exit_code == 0, result.output
@@ -152,7 +152,7 @@ def test_multi_repo_repo_concurrency_continues_past_error_by_default(make_git_re
 
     result = runner.invoke(
         app,
-        [str(bad_repo), *[str(r) for r in good_repos], "--repo-concurrency", "2", "--output", str(output_dir)],
+        [str(bad_repo), *[str(r) for r in good_repos], "--repo-concurrency", "2", "--output", str(output_dir), "--graph-only"],
     )
 
     assert result.exit_code != 0  # a repo failed -> overall failure
@@ -179,7 +179,7 @@ def test_multi_repo_repo_concurrency_stop_on_error_cancels_queued_repos(make_git
         app,
         [
             str(bad_repo), *[str(r) for r in good_repos],
-            "--repo-concurrency", "2", "--stop-on-error", "--output", str(output_dir),
+            "--repo-concurrency", "2", "--stop-on-error", "--output", str(output_dir), "--graph-only",
         ],
     )
 
@@ -199,22 +199,22 @@ def test_no_repos_given_is_rejected(tmp_path: Path):
     assert "no repos given" in result.output
 
 
-def test_multi_repo_fail_on_without_llm_is_rejected(git_repo: Path, tmp_path: Path):
+def test_multi_repo_fail_on_with_graph_only_is_rejected(git_repo: Path, tmp_path: Path):
     result = runner.invoke(
         app,
-        [str(git_repo), str(git_repo), "--output", str(tmp_path / "out"), "--fail-on", "high"],
+        [str(git_repo), str(git_repo), "--output", str(tmp_path / "out"), "--graph-only", "--fail-on", "high"],
     )
 
     assert result.exit_code != 0
-    assert "--fail-on requires --llm" in result.output
+    assert "--fail-on requires LLM scanning" in result.output
 
 
-def test_multi_repo_tokens_without_llm_is_silent(git_repo: Path, tmp_path: Path):
-    """--tokens has nothing to report without --llm -- unlike --fail-on,
+def test_multi_repo_tokens_with_graph_only_is_silent(git_repo: Path, tmp_path: Path):
+    """--tokens has nothing to report with --graph-only -- unlike --fail-on,
     there's no invalid combination here, it should just print nothing."""
     result = runner.invoke(
         app,
-        [str(git_repo), str(git_repo), "--output", str(tmp_path / "out"), "--tokens"],
+        [str(git_repo), str(git_repo), "--output", str(tmp_path / "out"), "--graph-only", "--tokens"],
     )
 
     assert result.exit_code == 0, result.output
@@ -234,7 +234,7 @@ def test_multi_repo_tokens_sums_usage_across_repos(make_git_repo, tmp_path: Path
     with patch("zairo.scan.scan_graph_for_vulnerabilities", return_value=({}, fake_usage)):
         result = runner.invoke(
             app,
-            [str(repo_a), str(repo_b), "--llm", "--tokens", "--output", str(tmp_path / "out")],
+            [str(repo_a), str(repo_b), "--tokens", "--output", str(tmp_path / "out")],
         )
 
     assert result.exit_code == 0, result.output

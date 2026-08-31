@@ -44,21 +44,25 @@ pip install zairo
 ```
 
 - Needs **Python 3.12+** (Trailmark, a core dependency, requires it).
-- `--llm` scanning goes through [LiteLLM](https://docs.litellm.ai/docs/providers),
-  so you'll need an API key for whatever `--model` you use, set via the
-  environment variable your provider expects: `GEMINI_API_KEY` for the
-  default `gemini/gemini-2.5-pro`, `ANTHROPIC_API_KEY` for Claude,
-  `OPENAI_API_KEY` for GPT, and so on. Full list in
-  [LiteLLM's provider docs](https://docs.litellm.ai/docs/providers).
+- LLM scanning runs by default and goes through
+  [LiteLLM](https://docs.litellm.ai/docs/providers), so you'll need an API
+  key for whatever `--model` you use, set via the environment variable your
+  provider expects: `GEMINI_API_KEY` for the default `gemini/gemini-2.5-pro`,
+  `ANTHROPIC_API_KEY` for Claude, `OPENAI_API_KEY` for GPT, and so on. Full
+  list in [LiteLLM's provider docs](https://docs.litellm.ai/docs/providers).
+  No key handy? Pass `--graph-only` to skip the scan entirely.
 
 ## Quickstart
 
 ```bash
-# Analyze uncommitted changes in a repo
+# Analyze uncommitted changes in a repo -- runs the LLM vulnerability scan by default
 zairo /path/to/repo
 
-# Diff two refs, and run an LLM scan on what changed
-zairo /path/to/repo --base main --target HEAD --llm
+# Diff two refs instead of the working tree
+zairo /path/to/repo --base main --target HEAD
+
+# Just want the impact graph? Skip the LLM scan (no API key needed)
+zairo /path/to/repo --graph-only
 ```
 
 ## Usage
@@ -67,11 +71,11 @@ zairo /path/to/repo --base main --target HEAD --llm
 # Scan whatever you haven't committed yet
 zairo .
 
-# Scan a PR/branch diff with the LLM vulnerability scanner
-zairo . --base main --target HEAD --llm
+# Scan a PR/branch diff
+zairo . --base main --target HEAD
 
-# Same, but fail the build if anything high-severity turns up
-zairo . --base main --target HEAD --llm --fail-on high
+# Fail the build if anything high-severity turns up
+zairo . --base main --target HEAD --fail-on high
 ```
 
 Give it more than one repo, as extra arguments or one per line in a
@@ -80,7 +84,7 @@ Give it more than one repo, as extra arguments or one per line in a
 combined summary.
 
 ```bash
-zairo backend frontend infra --base main --llm --fail-on high -o zairo_multi_out
+zairo backend frontend infra --base main --fail-on high -o zairo_multi_out
 ```
 
 `--base`/`--target` (and every other option) apply the same way to every
@@ -97,9 +101,9 @@ need separate runs.
 - `--depth`, `-d` *(1)*: how many hops of callers/callees to pull into the impact graph around each change.
 - `--language`, `-l` *(auto)*: force a language instead of letting Trailmark auto-detect it.
 
-**LLM scanning**
+**LLM scanning (runs by default)**
 
-- `--llm` *(off)*: turn on the vulnerability scan. Without it you just get the impact graph, no findings.
+- `--graph-only` *(off)*: skip the vulnerability scan and only build the impact graph -- no findings, no `report.sarif`.
 - `--model` *(`gemini/gemini-2.5-pro`)*: any [LiteLLM model string](https://docs.litellm.ai/docs/providers).
 - `--concurrency`, `-c` *(5)*: parallel LLM requests, within one repo's scan.
 - `--max-tokens` *(4096)*: output budget per request. Reasoning models burn this on internal thinking too, so raise it if you see empty responses.
@@ -109,7 +113,7 @@ need separate runs.
 **Output & gating**
 
 - `--output`, `-o` *(`zairo_out`)*: where the reports go. Multi-repo mode: each repo gets its own `<output>/<repo-slug>/`, plus a combined `rollup.*` here too.
-- `--fail-on` *(none)*: exit non-zero if a finding at or above this severity turns up (`low`/`medium`/`high`/`critical`). Needs `--llm`. Multi-repo mode: checked across all repos combined. See [CI / PR gating](#ci--pr-gating).
+- `--fail-on` *(none)*: exit non-zero if a finding at or above this severity turns up (`low`/`medium`/`high`/`critical`). Errors if combined with `--graph-only` (nothing to gate on). Multi-repo mode: checked across all repos combined. See [CI / PR gating](#ci--pr-gating).
 - `--verbose`, `-v` *(off)*: print what's happening step by step (git commands, worktree setup, per-node scan progress).
 
 **Multi-repo mode only**
@@ -124,7 +128,7 @@ Run `zairo --help` any time for this same list from the CLI.
 
 - **`report.json`** *(always)*: the raw impact graph (nodes, edges, and any attached findings), as data.
 - **`report.html`** *(always)*: a self-contained, interactive dependency-graph viewer (Cytoscape.js). Click a node to see its findings.
-- **`report.sarif`** *(when `--llm` is used)*: findings in [SARIF 2.1.0](https://sarifweb.azurewebsites.net/), for GitHub code scanning or any other SARIF consumer. Always written, even for a clean scan (an empty-but-valid log), so a scanning UI can mark previously reported alerts resolved. Findings are grouped into rules by CWE when the model tagged one, so recurring issues of the same kind collapse into one rule instead of a new one per wording variant.
+- **`report.sarif`** *(unless `--graph-only` is used)*: findings in [SARIF 2.1.0](https://sarifweb.azurewebsites.net/), for GitHub code scanning or any other SARIF consumer. Always written, even for a clean scan (an empty-but-valid log), so a scanning UI can mark previously reported alerts resolved. Findings are grouped into rules by CWE when the model tagged one, so recurring issues of the same kind collapse into one rule instead of a new one per wording variant.
 
 Multi-repo mode produces the same three files per repo, plus `rollup.json` /
 `rollup.html` / `rollup.sarif`: per-repo status and severity
@@ -150,12 +154,12 @@ above that severity is found (across all repos combined, in multi-repo
 mode), so a CI step can block a merge on it. A couple of things worth
 knowing:
 
-- It requires `--llm`.
+- It errors if combined with `--graph-only` (there'd be nothing to gate on).
 - It never suppresses the SARIF output: that's still written even on a
   failed gate, so a scanning UI reflects the current state either way.
 
 ```bash
-zairo . --base "$BASE_REF" --target HEAD --llm --fail-on high -o zairo_out
+zairo . --base "$BASE_REF" --target HEAD --fail-on high -o zairo_out
 ```
 
 See [examples/github-actions/zairo-pr-scan.yml](examples/github-actions/zairo-pr-scan.yml)
