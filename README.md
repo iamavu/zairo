@@ -61,20 +61,6 @@ zairo /path/to/repo
 zairo /path/to/repo --base main --target HEAD --llm
 ```
 
-No repo handy? Generate a few small ones with known, distinct
-vulnerabilities to try it on:
-
-```bash
-python examples/generate_sample_repos.py
-zairo examples/sample-repos/cmd-injection-app --base HEAD~1 --target HEAD --llm
-```
-
-That creates `examples/sample-repos/{cmd-injection-app,sql-injection-app,path-traversal-app}`,
-each a 2-commit repo where the second commit introduces one specific,
-LLM-findable vulnerability. They're generated on demand rather than
-committed, since a usable git history can't live nested inside another
-repo's `.git`.
-
 ## Usage
 
 ```bash
