@@ -34,6 +34,7 @@ def run_scan(
     max_tokens: int = 4096,
     log: Optional[Callable[[str], None]] = None,
     on_event: Optional[Callable[..., None]] = None,
+    debug_log: Optional[Callable[[str], None]] = None,
 ) -> ScanResult:
     """Runs the full single-repo pipeline: diff -> impact graph -> optional
     LLM scan -> reports on disk. Shared by the single-repo and multi-repo
@@ -48,6 +49,11 @@ def run_scan(
     `analyze` used to print inline ("graph_built", "llm_scan_started",
     "llm_scan_done") so callers can render live progress however suits them,
     without this function needing to know about console styling.
+
+    `debug_log`, if given, receives the exact prompt sent to the LLM and its
+    raw response for every node scanned -- kept separate from `log` since
+    that content is far too large for a normal --verbose console stream and
+    is meant to go straight to a file instead (see -vv/--debug in cli.py).
     """
     log = log or (lambda msg: None)
     on_event = on_event or (lambda event, **kwargs: None)
@@ -79,7 +85,7 @@ def run_scan(
             on_event("llm_scan_started", model=model, concurrency=concurrency)
             vulnerabilities, token_usage = scan_graph_for_vulnerabilities(
                 graph_data, model, log=log, concurrency=concurrency, cache_path=cache_path,
-                max_tokens=max_tokens,
+                max_tokens=max_tokens, debug_log=debug_log,
             )
             num_vulnerabilities = sum(len(findings) for findings in vulnerabilities.values())
             on_event(

@@ -356,12 +356,19 @@ def scan_graph_for_vulnerabilities(
     concurrency: int = 5,
     cache_path: Optional[str] = None,
     max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
+    debug_log: Optional[Callable[[str], None]] = None,
 ) -> Tuple[Dict[str, List[Dict]], Dict[str, int]]:
     """Returns (vulnerabilities, token_usage). token_usage has
     prompt_tokens/completion_tokens/total_tokens summed across every real
     LLM call made (cache hits don't count -- they made no call), plus
     requests/requests_without_usage so a caller can tell whether the token
-    totals are complete or partial (e.g. some providers don't report it)."""
+    totals are complete or partial (e.g. some providers don't report it).
+
+    `debug_log`, if given, receives the exact prompt sent for every node
+    actually scanned (a cache hit never calls the LLM, so there's nothing to
+    log for it) plus its raw response or error -- the caller is expected to
+    make it thread-safe itself, since run_job below calls it from worker
+    threads."""
     log = log or (lambda msg: None)
     log_lock = threading.Lock()
 
@@ -475,6 +482,9 @@ def scan_graph_for_vulnerabilities(
 
     def run_job(job):
         mod_node, prompt_hash, prompt = job
+        node_label = f"{_display_name(mod_node['name'])} ({mod_node['id']})"
+        if debug_log:
+            debug_log(f"\n{'='*80}\nPROMPT -- {node_label}\n{'='*80}\n{prompt}\n")
         usage = None  # unavailable if the provider doesn't report it
         try:
             response = litellm.completion(
@@ -485,6 +495,8 @@ def scan_graph_for_vulnerabilities(
             choice = response.choices[0]
             content = choice.message.content or ""
             finish_reason = getattr(choice, 'finish_reason', 'unknown')
+            if debug_log:
+                debug_log(f"\n{'-'*80}\nRESPONSE -- {node_label} (finish_reason={finish_reason})\n{'-'*80}\n{content}\n")
             empty_note = (
                 f" (finish_reason={finish_reason}) — likely exhausted max_tokens={max_tokens} "
                 f"on internal reasoning before writing an answer; try --max-tokens with a higher value"
@@ -515,6 +527,8 @@ def scan_graph_for_vulnerabilities(
             safe_log(f"  found {len(findings)} vulnerability finding(s): {_display_name(mod_node['name'])}")
             return mod_node['id'], prompt_hash, findings, usage, None
         except Exception as e:
+            if debug_log:
+                debug_log(f"\n{'-'*80}\nERROR -- {node_label}\n{'-'*80}\n{e}\n")
             safe_log(f"  error scanning {_display_name(mod_node['name'])}: {e}")
             return mod_node['id'], prompt_hash, None, usage, _summarize_error(e)
 

@@ -104,3 +104,61 @@ def test_no_errors_key_populated_on_a_clean_run(monkeypatch):
     _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=None)
 
     assert token_usage["errors"] == {}
+
+
+def test_debug_log_receives_prompt_and_response_on_success(monkeypatch):
+    fake_litellm = MagicMock()
+    fake_response = MagicMock()
+    fake_response.choices[0].message.content = '{"vulnerabilities": []}'
+    fake_response.choices[0].finish_reason = "stop"
+    fake_response.usage = None
+    fake_litellm.completion.return_value = fake_response
+    monkeypatch.setattr(llm_scanner, "litellm", fake_litellm)
+    monkeypatch.setattr(llm_scanner, "_ensure_litellm", lambda: fake_litellm)
+
+    graph_data = {"nodes": [_node("n1", "fn_one")], "edges": []}
+    entries = []
+    llm_scanner.scan_graph_for_vulnerabilities(
+        graph_data, "fake-model", cache_path=None, debug_log=entries.append,
+    )
+
+    combined = "\n".join(entries)
+    assert "PROMPT" in combined and "fn_one" in combined
+    assert "RESPONSE" in combined and '"vulnerabilities": []' in combined
+
+
+def test_debug_log_receives_prompt_and_error_on_failure(monkeypatch):
+    _mock_litellm(monkeypatch, RuntimeError("boom"))
+    graph_data = {"nodes": [_node("n1", "fn_one")], "edges": []}
+    entries = []
+
+    llm_scanner.scan_graph_for_vulnerabilities(
+        graph_data, "fake-model", cache_path=None, debug_log=entries.append,
+    )
+
+    combined = "\n".join(entries)
+    assert "PROMPT" in combined and "fn_one" in combined
+    assert "ERROR" in combined and "boom" in combined
+
+
+def test_debug_log_not_called_for_a_cache_hit(monkeypatch, tmp_path):
+    """A cache hit never touches the LLM -- nothing to log for it."""
+    fake_litellm = MagicMock()
+    fake_response = MagicMock()
+    fake_response.choices[0].message.content = '{"vulnerabilities": []}'
+    fake_response.choices[0].finish_reason = "stop"
+    fake_response.usage = None
+    fake_litellm.completion.return_value = fake_response
+    monkeypatch.setattr(llm_scanner, "litellm", fake_litellm)
+    monkeypatch.setattr(llm_scanner, "_ensure_litellm", lambda: fake_litellm)
+
+    graph_data = {"nodes": [_node("n1", "fn_one")], "edges": []}
+    cache_path = str(tmp_path / "cache.json")
+    llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=cache_path)
+
+    entries = []
+    llm_scanner.scan_graph_for_vulnerabilities(
+        graph_data, "fake-model", cache_path=cache_path, debug_log=entries.append,
+    )
+
+    assert entries == []

@@ -1,5 +1,6 @@
 import enum
 import os
+import threading
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from typing import List, Optional
 
@@ -97,6 +98,40 @@ def _print_token_usage(token_usage: dict) -> None:
             )
 
 
+def _make_loggers(output_dir: str, verbose: bool, debug: bool, indent: str):
+    """Builds the (log, debug_log, close) triple for one repo's scan.
+    `log` prints to the console when --verbose/-vv is on, and under -vv also
+    mirrors every message into <output_dir>/debug.log; `debug_log` writes
+    ONLY to that file, never the console -- for the LLM prompt/response
+    dumps, which are far too large to ever print inline even under plain
+    --verbose. Both are safe to call from worker threads, since LLM scans
+    for different nodes run concurrently."""
+    debug_file = None
+    if debug:
+        os.makedirs(output_dir, exist_ok=True)
+        debug_file = open(os.path.join(output_dir, "debug.log"), "w")
+    file_lock = threading.Lock()
+
+    def log(msg: str) -> None:
+        if verbose:
+            console.print(f"[dim]{indent}{msg}[/dim]")
+        if debug_file:
+            with file_lock:
+                debug_file.write(msg + "\n")
+                debug_file.flush()
+
+    def debug_log(msg: str) -> None:
+        with file_lock:
+            debug_file.write(msg + "\n")
+            debug_file.flush()
+
+    def close() -> None:
+        if debug_file:
+            debug_file.close()
+
+    return log, (debug_log if debug else None), close
+
+
 def _sum_token_usage(token_usages: List[dict]) -> dict:
     """Combines every repo's token_usage in a multi-repo run into one totals
     dict with the same shape _print_token_usage expects, so the combined
@@ -113,13 +148,11 @@ def _sum_token_usage(token_usages: List[dict]) -> dict:
 def _run_single_repo(
     repo_path: str, output_dir: str, depth: int, base: Optional[str], target: Optional[str],
     language: str, llm: bool, model: str, concurrency: int, cache: bool, max_tokens: int,
-    tokens: bool, fail_on: Optional[Severity], verbose: bool,
+    tokens: bool, fail_on: Optional[Severity], verbose: bool, debug: bool,
 ) -> bool:
     """Runs the one-repo path: live per-stage progress, reports written
     directly to output_dir. Returns whether a --fail-on gate failed."""
-    def log(msg: str) -> None:
-        if verbose:
-            console.print(f"[dim]  · {msg}[/dim]")
+    log, debug_log, close_debug_log = _make_loggers(output_dir, verbose, debug, indent="  · ")
 
     if base and target:
         console.print(f"[bold green]Analyzing {repo_path} at depth {depth} — diff {base}..{target}[/bold green]")
@@ -132,11 +165,13 @@ def _run_single_repo(
     try:
         result = run_scan(
             repo_path, output_dir, depth, base, target, language, llm, model, concurrency,
-            cache_path, max_tokens, log=log, on_event=_single_repo_on_event,
+            cache_path, max_tokens, log=log, on_event=_single_repo_on_event, debug_log=debug_log,
         )
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
         raise typer.Exit(1)
+    finally:
+        close_debug_log()
 
     should_fail = False
     if llm:
@@ -156,6 +191,8 @@ def _run_single_repo(
     console.print(f"  - {result.html_path}")
     if result.sarif_path:
         console.print(f"  - {result.sarif_path}")
+    if debug:
+        console.print(f"  - {os.path.join(output_dir, 'debug.log')}")
 
     return should_fail
 
@@ -164,14 +201,11 @@ def _run_multi_repo(
     paths: List[str], output_dir: str, depth: int, base: Optional[str], target: Optional[str],
     language: str, llm: bool, model: str, concurrency: int, repo_concurrency: int, cache: bool,
     max_tokens: int, tokens: bool, fail_on: Optional[Severity], continue_on_error: bool, verbose: bool,
+    debug: bool,
 ) -> bool:
     """Runs the multi-repo path: per-repo subdirectories plus an aggregate
     rollup.json/.html/.sarif. Returns whether the run should fail
     (a repo errored, or a --fail-on gate failed across all repos)."""
-    def log(msg: str) -> None:
-        if verbose:
-            console.print(f"[dim]    · {msg}[/dim]")
-
     used_slugs: set = set()
     slugs = [unique_slug(p, used_slugs) for p in paths]  # computed upfront, sequentially --
     # unique_slug mutates a shared set, so doing this per-repo inside a
@@ -180,14 +214,21 @@ def _run_multi_repo(
     def scan_one(repo_path: str, slug: str, on_event) -> dict:
         repo_output_dir = os.path.join(output_dir, slug)
         cache_path = os.path.join(repo_output_dir, ".llm_cache.json") if (llm and cache) else None
+        # -vv's debug.log is per-repo (alongside that repo's own
+        # report.json/.html), not one shared file -- built fresh per repo so
+        # concurrent repos (repo_concurrency > 1) never interleave writes
+        # into the same file.
+        log, debug_log, close_debug_log = _make_loggers(repo_output_dir, verbose, debug, indent="    · ")
         try:
             scan_result = run_scan(
                 repo_path, repo_output_dir, depth, base, target, language, llm, model, concurrency,
-                cache_path, max_tokens, log=log, on_event=on_event,
+                cache_path, max_tokens, log=log, on_event=on_event, debug_log=debug_log,
             )
             return {"repo": repo_path, "slug": slug, "status": "ok", "result": scan_result}
         except Exception as e:
             return {"repo": repo_path, "slug": slug, "status": "error", "error": str(e)}
+        finally:
+            close_debug_log()
 
     results = []
     if repo_concurrency <= 1:
@@ -273,6 +314,8 @@ def _run_multi_repo(
     console.print(f"  - {reports['html']}")
     if reports['sarif']:
         console.print(f"  - {reports['sarif']}")
+    if debug:
+        console.print("[dim]Debug logs: <output>/<repo-slug>/debug.log, one per repo.[/dim]")
 
     should_fail = bool(errored_results)
     if llm and fail_on is not None:
@@ -309,12 +352,14 @@ def analyze(
     tokens: bool = typer.Option(False, "--tokens", help="Show total LLM tokens used across real API calls (cache hits don't count)"),
     fail_on: Severity = typer.Option(None, "--fail-on", help="Exit with a non-zero status if any finding at or above this severity is found -- for gating CI/PR checks. Errors if combined with --graph-only."),
     continue_on_error: bool = typer.Option(True, "--continue-on-error/--stop-on-error", help="Multi-repo mode: keep scanning remaining repos if one fails (default), instead of aborting the run"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Print detailed diagnostic output (git commands, worktree setup, node matching, per-node LLM scan progress)")
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Print detailed diagnostic output (git commands, worktree setup, node matching, per-node LLM scan progress)"),
+    debug: bool = typer.Option(False, "-vv", "--debug", help="Maximum verbosity: everything --verbose prints, plus the exact prompt sent to the LLM and its raw response for every node -- written to <output>/debug.log (too much to print to the console). Implies --verbose."),
 ):
     """Diffs one or more repos, builds the impact graph around what changed, and runs an LLM vulnerability scan on it. Pass --graph-only to skip the scan and only build the graph.
 
     One repo produces a direct report; more than one (given positionally, via --repos-file, or both combined) switches to multi-repo mode -- each repo gets its own report plus an aggregate rollup."""
     llm = not graph_only
+    verbose = verbose or debug
     _require_llm_for_fail_on(fail_on, llm)
 
     paths = list(repo_paths or [])
@@ -332,12 +377,12 @@ def analyze(
     if len(paths) == 1:
         should_fail = _run_single_repo(
             paths[0], output_dir, depth, base, target, language, llm, model, concurrency,
-            cache, max_tokens, tokens, fail_on, verbose,
+            cache, max_tokens, tokens, fail_on, verbose, debug,
         )
     else:
         should_fail = _run_multi_repo(
             paths, output_dir, depth, base, target, language, llm, model, concurrency,
-            repo_concurrency, cache, max_tokens, tokens, fail_on, continue_on_error, verbose,
+            repo_concurrency, cache, max_tokens, tokens, fail_on, continue_on_error, verbose, debug,
         )
 
     if should_fail:
