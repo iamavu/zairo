@@ -66,10 +66,10 @@ def _single_repo_on_event(event: str, **kw) -> None:
         console.print(f"[bold yellow]Running LLM scanner using {kw['model']} (concurrency={kw['concurrency']})...[/bold yellow]")
     elif event == "llm_scan_done":
         if kw['num_vulnerabilities'] == 0:
-            console.print("[bold yellow]Found 0 vulns.[/bold yellow]")
+            console.print("[bold yellow]Found 0 vulnerabilities.[/bold yellow]")
         else:
             console.print(
-                f"[bold yellow]Found {kw['num_vulnerabilities']} vuln(s) "
+                f"[bold yellow]Found {kw['num_vulnerabilities']} vulnerability(s) "
                 f"in {kw['num_vulnerable_nodes']} node(s).[/bold yellow]"
             )
         _print_scan_errors(kw['token_usage'])
@@ -202,9 +202,9 @@ def _run_fleet(
                     console.print(f"    running LLM scan ({kw['model']})...")
                 elif event == "llm_scan_done":
                     if kw['num_vulnerabilities'] == 0:
-                        console.print("    found 0 vulns")
+                        console.print("    found 0 vulnerabilities")
                     else:
-                        console.print(f"    found {kw['num_vulnerabilities']} vuln(s) in {kw['num_vulnerable_nodes']} node(s)")
+                        console.print(f"    found {kw['num_vulnerabilities']} vulnerability(s) in {kw['num_vulnerable_nodes']} node(s)")
                     _print_scan_errors(kw['token_usage'], indent="    ")
 
             entry = scan_one(repo_path, slug, on_event)
@@ -245,7 +245,7 @@ def _run_fleet(
                     summary = f"{num_modified} modified/added node(s), {num_deleted} deleted node(s)"
                     if llm:
                         num_vulns = sum(len(findings) for findings in (sr.vulnerabilities or {}).values())
-                        summary += f", found {num_vulns} vuln(s) in {len(sr.vulnerabilities or {})} node(s)"
+                        summary += f", found {num_vulns} vulnerability(s) in {len(sr.vulnerabilities or {})} node(s)"
                     console.print(f"[bold cyan][{completed}/{len(paths)}][/bold cyan] {entry['repo']} — {summary}")
                     if llm:
                         _print_scan_errors(sr.token_usage, indent="    ")
