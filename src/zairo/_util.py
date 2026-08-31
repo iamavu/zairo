@@ -15,15 +15,24 @@ def display_name(name: Any, limit: int = 60) -> str:
 
 # Ordered low -> high; index doubles as a comparable rank.
 SEVERITY_LEVELS = ("low", "medium", "high", "critical")
-DEFAULT_SEVERITY = "medium"
+# Fail-safe, not "typical": this is what an ungradeable finding gets treated
+# as, including by --fail-on. Defaulting to something in the middle would
+# mean a malformed/unparseable severity from the LLM -- which says nothing
+# about how bad the underlying finding actually is -- could silently slip
+# under a --fail-on high/critical gate. Worst-case is the only default that
+# can't cause a real vulnerability to pass CI unnoticed; it costs a
+# possible false alarm in the report instead, which a human reviewing it
+# can still discount.
+DEFAULT_SEVERITY = "critical"
 _SEVERITY_RANK = {level: i for i, level in enumerate(SEVERITY_LEVELS)}
 
 
 def normalize_severity(raw: Any) -> str:
     """Coerces a (possibly missing/garbled, since it comes from LLM output)
     severity value to one of SEVERITY_LEVELS, defaulting to DEFAULT_SEVERITY
-    for anything unrecognized rather than raising -- a gating decision should
-    degrade gracefully, not crash the scan over a malformed field."""
+    (the worst level, not a crash) for anything unrecognized -- a gating
+    decision should degrade to fail-safe, not raise over a malformed field
+    or silently downgrade a finding whose real severity is simply unknown."""
     sev = str(raw).strip().lower() if raw else ""
     return sev if sev in _SEVERITY_RANK else DEFAULT_SEVERITY
 

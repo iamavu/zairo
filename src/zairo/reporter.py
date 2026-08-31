@@ -9,9 +9,9 @@ HTML_TEMPLATE = """
 <html>
 <head>
     <title>Zairo Impact Analysis</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/dagre/0.8.5/dagre.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js" integrity="sha512-RcuA+PEnJcg1caTn53YLhZ3bYVFXphzcPL1BjBoAwFiA3bErav+AndZz1xrqpAtv/8Waep2X+9zn8KWpwacUSA==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dagre/0.8.5/dagre.min.js" integrity="sha512-psLUZfcgPmi012lcpVHkWoOqyztollwCGu4w/mXijFMK/YcdUdP06voJNVOJ7f/dUIlO2tGlDLuypRyXX2lcvQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js" integrity="sha384-EHCdyFVbhtbpgI+4x7ETlZUvJwOkxJublmhTpH114NSk3fqfiUgcLl6pQm8JQwg9" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
     <style>
         :root {
             --bg: #16161e;
@@ -468,6 +468,25 @@ HTML_TEMPLATE = """
 </html>
 """
 
+def _json_for_script(data: dict) -> str:
+    """json.dumps() doesn't escape "</script>", and graph_data can carry
+    attacker-influenced text (a repo file path -- '<', '>', '"' are all
+    valid filename characters on Linux/macOS -- or an LLM-generated finding
+    title/description). Embedding that raw inside <script>...</script>
+    lets it close the tag early and inject arbitrary HTML/script, which
+    then runs in whoever opens the report. Escaping <, >, and & as their
+    \\u escapes keeps the JSON semantically identical (they're meaningless
+    outside of strings, and inside a JSON string \\u escapes decode back to
+    the same character) while making it impossible to spell a literal
+    "</script" anywhere in the output."""
+    return (
+        json.dumps(data)
+        .replace('<', '\\u003c')
+        .replace('>', '\\u003e')
+        .replace('&', '\\u0026')
+    )
+
+
 def generate_reports(
     graph_data: dict,
     output_dir: str,
@@ -494,7 +513,7 @@ def generate_reports(
         json.dump(graph_data, f, indent=2)
 
     template = Template(HTML_TEMPLATE)
-    html_content = template.render(graph_json=json.dumps(graph_data))
+    html_content = template.render(graph_json=_json_for_script(graph_data))
 
     with open(html_path, 'w') as f:
         f.write(html_content)

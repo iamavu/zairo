@@ -1,6 +1,7 @@
 import subprocess
 import re
 import os
+import shutil
 import tempfile
 from collections import defaultdict
 from typing import Callable, Dict, List, Optional
@@ -23,6 +24,10 @@ def create_worktree(repo_path: str, ref: str) -> str:
         text=True,
     )
     if result.returncode != 0:
+        # `git worktree add` never took ownership of worktree_path (it
+        # failed before/while doing so), so it's still just an empty
+        # mkdtemp() dir -- nothing else will ever clean it up.
+        shutil.rmtree(worktree_path, ignore_errors=True)
         raise RuntimeError(f"Failed to check out '{ref}' into a worktree: {result.stderr.strip()}")
     return worktree_path
 

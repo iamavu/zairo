@@ -46,12 +46,15 @@ def test_missing_file_omits_location_but_keeps_result():
     assert "locations" not in result
 
 
-def test_defaults_missing_severity_to_medium_warning():
+def test_defaults_missing_severity_to_critical_error():
+    """Fail-safe default (see _util.DEFAULT_SEVERITY): an ungradeable
+    finding must surface as loudly as a real critical one, not blend into
+    "warning" where a --fail-on high/critical gate could miss it."""
     graph_data = _graph("/repo/src/app.py")
     vulnerabilities = {"n1": [{"title": "X", "description": "d"}]}
     sarif = build_sarif(graph_data, vulnerabilities, repo_root="/repo")
 
-    assert sarif["runs"][0]["results"][0]["level"] == "warning"
+    assert sarif["runs"][0]["results"][0]["level"] == "error"
 
 
 def test_empty_vulnerabilities_produce_valid_empty_log():

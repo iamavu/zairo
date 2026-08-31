@@ -8,10 +8,13 @@ def test_normalize_severity_passes_through_known_values():
         assert normalize_severity(f"  {level}  ") == level
 
 
-def test_normalize_severity_defaults_unrecognized_to_medium():
-    assert normalize_severity(None) == "medium"
-    assert normalize_severity("") == "medium"
-    assert normalize_severity("catastrophic") == "medium"
+def test_normalize_severity_defaults_unrecognized_to_critical():
+    """Fail-safe, not "typical": an unparseable severity must never rank
+    below a real one, or a malformed LLM response could slip a genuine
+    finding under a --fail-on high/critical gate unnoticed."""
+    assert normalize_severity(None) == "critical"
+    assert normalize_severity("") == "critical"
+    assert normalize_severity("catastrophic") == "critical"
 
 
 def test_severity_rank_is_ordered_low_to_critical():
