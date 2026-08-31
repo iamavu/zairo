@@ -293,25 +293,27 @@ def _run_fleet(
 
 @app.command()
 def analyze(
-    repo_paths: Optional[List[str]] = typer.Argument(None, help="Path(s) to git repositories to scan. One path: a direct report.json/.html/.sarif. More than one (here or via --repos-file): fleet mode, with a per-repo subdirectory plus an aggregate rollup."),
-    repos_file: str = typer.Option(None, "--repos-file", help="Text file with one repo path per line (blank lines and '#' comments ignored); merged with any positional repo paths. The combined total repo count decides single vs. fleet mode."),
+    repo_paths: Optional[List[str]] = typer.Argument(None, help="Path(s) to git repositories to scan. More than one switches to fleet mode -- see below."),
+    repos_file: str = typer.Option(None, "--repos-file", help="Text file with one repo path per line ('#' comments allowed), combined with any positional paths."),
     depth: int = typer.Option(1, "--depth", "-d", help="Depth of connections to traverse from changed nodes"),
-    output_dir: str = typer.Option("zairo_out", "--output", "-o", help="Output directory. Single repo: report.json/.html/.sarif written directly here. Multiple repos: each gets its own <output>/<repo-slug>/, plus an aggregate fleet.json/.html/.sarif."),
-    base: str = typer.Option(None, "--base", "-b", help="Base commit/ref to diff from (e.g. HEAD~3, main, a1b2c3d), applied to every repo"),
-    target: str = typer.Option(None, "--target", "-t", help="Target commit/ref to diff to (e.g. HEAD, feature-branch), applied to every repo. Requires --base."),
+    output_dir: str = typer.Option("zairo_out", "--output", "-o", help="Output directory (fleet mode: a subdirectory per repo, plus an aggregate rollup here)"),
+    base: str = typer.Option(None, "--base", "-b", help="Base commit/ref to diff from (e.g. HEAD~3, main, a1b2c3d)"),
+    target: str = typer.Option(None, "--target", "-t", help="Target commit/ref to diff to (e.g. HEAD, feature-branch). Requires --base."),
     language: str = typer.Option("auto", "--language", "-l", help="Language for Trailmark parsing (auto, python, typescript, rust, etc.)"),
-    llm: bool = typer.Option(False, "--llm", help="Run LLM vulnerability scanning on modified nodes, in every repo"),
+    llm: bool = typer.Option(False, "--llm", help="Run LLM vulnerability scanning on modified nodes"),
     model: str = typer.Option("gemini/gemini-2.5-pro", "--model", help="LiteLLM model string to use for scanning"),
     concurrency: int = typer.Option(5, "--concurrency", "-c", help="Number of LLM scan requests to run in parallel, per repo"),
-    repo_concurrency: int = typer.Option(1, "--repo-concurrency", help="Fleet mode only (ignored for a single repo): how many repos to scan in parallel (default: one at a time). Above 1, progress prints one summary line per repo on completion instead of live per-stage detail, and --stop-on-error only cancels repos that haven't started yet -- it can't interrupt one already in flight"),
+    repo_concurrency: int = typer.Option(1, "--repo-concurrency", help="Fleet mode: how many repos to scan in parallel"),
     cache: bool = typer.Option(True, "--cache/--no-cache", help="Cache LLM findings by content hash to skip re-scanning unchanged nodes across runs"),
     max_tokens: int = typer.Option(4096, "--max-tokens", help="Max output tokens per LLM scan request. Reasoning models count internal thinking against this budget too — too low can cause empty responses"),
-    tokens: bool = typer.Option(False, "--tokens", help="Show total LLM tokens used (summed across all repos in fleet mode), across real API calls -- cache hits don't count"),
-    fail_on: Severity = typer.Option(None, "--fail-on", help="Exit with a non-zero status if any finding at or above this severity is found (requires --llm) -- for gating CI/PR checks. In fleet mode, evaluated across all repos combined"),
-    continue_on_error: bool = typer.Option(True, "--continue-on-error/--stop-on-error", help="Fleet mode only (ignored for a single repo): keep scanning remaining repos if one fails (default), instead of aborting the whole run"),
+    tokens: bool = typer.Option(False, "--tokens", help="Show total LLM tokens used across real API calls (cache hits don't count)"),
+    fail_on: Severity = typer.Option(None, "--fail-on", help="Exit with a non-zero status if any finding at or above this severity is found (requires --llm) -- for gating CI/PR checks"),
+    continue_on_error: bool = typer.Option(True, "--continue-on-error/--stop-on-error", help="Fleet mode: keep scanning remaining repos if one fails (default), instead of aborting the run"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Print detailed diagnostic output (git commands, worktree setup, node matching, per-node LLM scan progress)")
 ):
-    """Diffs one or more repos and builds the impact graph around what changed, optionally running an LLM vulnerability scan -- one repo gets a direct report, more than one gets fleet mode (a per-repo subdirectory each, plus an aggregate rollup). Which mode runs is decided purely by how many repos end up in the list, however they were given."""
+    """Diffs one or more repos and builds the impact graph around what changed, optionally running an LLM vulnerability scan.
+
+    One repo produces a direct report; more than one (given positionally, via --repos-file, or both combined) switches to fleet mode -- each repo gets its own report plus an aggregate rollup."""
     _require_llm_for_fail_on(fail_on, llm)
 
     paths = list(repo_paths or [])
