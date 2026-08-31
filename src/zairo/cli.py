@@ -148,7 +148,7 @@ def _sum_token_usage(token_usages: List[dict]) -> dict:
 def _run_single_repo(
     repo_path: str, output_dir: str, depth: int, base: Optional[str], target: Optional[str],
     language: str, llm: bool, model: str, concurrency: int, cache: bool, max_tokens: int,
-    tokens: bool, fail_on: Optional[Severity], verbose: bool, debug: bool,
+    tokens: bool, fail_on: Optional[Severity], verbose: bool, debug: bool, batch_size: int,
 ) -> bool:
     """Runs the one-repo path: live per-stage progress, reports written
     directly to output_dir. Returns whether a --fail-on gate failed."""
@@ -166,6 +166,7 @@ def _run_single_repo(
         result = run_scan(
             repo_path, output_dir, depth, base, target, language, llm, model, concurrency,
             cache_path, max_tokens, log=log, on_event=_single_repo_on_event, debug_log=debug_log,
+            batch_size=batch_size,
         )
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
@@ -201,7 +202,7 @@ def _run_multi_repo(
     paths: List[str], output_dir: str, depth: int, base: Optional[str], target: Optional[str],
     language: str, llm: bool, model: str, concurrency: int, repo_concurrency: int, cache: bool,
     max_tokens: int, tokens: bool, fail_on: Optional[Severity], continue_on_error: bool, verbose: bool,
-    debug: bool,
+    debug: bool, batch_size: int,
 ) -> bool:
     """Runs the multi-repo path: per-repo subdirectories plus an aggregate
     rollup.json/.html/.sarif. Returns whether the run should fail
@@ -223,6 +224,7 @@ def _run_multi_repo(
             scan_result = run_scan(
                 repo_path, repo_output_dir, depth, base, target, language, llm, model, concurrency,
                 cache_path, max_tokens, log=log, on_event=on_event, debug_log=debug_log,
+                batch_size=batch_size,
             )
             return {"repo": repo_path, "slug": slug, "status": "ok", "result": scan_result}
         except Exception as e:
@@ -345,7 +347,8 @@ def analyze(
     language: str = typer.Option("auto", "--language", "-l", help="Language for Trailmark parsing (auto, python, typescript, rust, etc.)"),
     graph_only: bool = typer.Option(False, "--graph-only", help="Skip the LLM vulnerability scan and only build the impact graph -- report.json/.html only, no report.sarif or findings"),
     model: str = typer.Option("gemini/gemini-2.5-pro", "--model", help="LiteLLM model string to use for scanning"),
-    concurrency: int = typer.Option(5, "--concurrency", "-c", help="Number of LLM scan requests to run in parallel, per repo"),
+    concurrency: int = typer.Option(5, "--concurrency", "-c", help="Number of LLM requests to run in parallel, per repo"),
+    batch_size: int = typer.Option(1, "--batch-size", help="Group this many nodes into a single LLM request instead of one call per node -- fewer requests (helps with provider rate limits), at the cost of shared fault isolation: a bad/malformed response fails every node in that batch, not just one. Caching stays per-node either way."),
     repo_concurrency: int = typer.Option(1, "--repo-concurrency", help="Multi-repo mode: how many repos to scan in parallel"),
     cache: bool = typer.Option(True, "--cache/--no-cache", help="Cache LLM findings by content hash to skip re-scanning unchanged nodes across runs"),
     max_tokens: int = typer.Option(4096, "--max-tokens", help="Max output tokens per LLM scan request. Reasoning models count internal thinking against this budget too — too low can cause empty responses"),
@@ -377,12 +380,13 @@ def analyze(
     if len(paths) == 1:
         should_fail = _run_single_repo(
             paths[0], output_dir, depth, base, target, language, llm, model, concurrency,
-            cache, max_tokens, tokens, fail_on, verbose, debug,
+            cache, max_tokens, tokens, fail_on, verbose, debug, batch_size,
         )
     else:
         should_fail = _run_multi_repo(
             paths, output_dir, depth, base, target, language, llm, model, concurrency,
             repo_concurrency, cache, max_tokens, tokens, fail_on, continue_on_error, verbose, debug,
+            batch_size,
         )
 
     if should_fail:

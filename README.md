@@ -41,6 +41,7 @@ zairo backend frontend infra --base main --fail-on high -o zairo_multi_out
 - `--graph-only` *(off)*: skip the vulnerability scan and only build the impact graph -- no findings, no `report.sarif`.
 - `--model` *(`gemini/gemini-2.5-pro`)*: any [LiteLLM model string](https://docs.litellm.ai/docs/providers).
 - `--concurrency`, `-c` *(5)*: parallel LLM requests, within one repo's scan.
+- `--batch-size` *(1)*: group this many nodes into a single LLM request instead of one call per node -- fewer requests (helps with provider rate limits), at the cost of shared fault isolation: a bad/malformed response fails every node in that batch, not just one. Caching stays per-node either way.
 - `--max-tokens` *(4096)*: output budget per request. Reasoning models burn this on internal thinking too, so raise it if you see empty responses.
 - `--cache` / `--no-cache` *(cache on)*: skip re-scanning code that's unchanged since the last run (cached by content hash in `<output>/.llm_cache.json`).
 - `--tokens` *(off)*: print how many tokens the scan actually used (cache hits don't count, since they made no call).

@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock
 
 import zairo
@@ -162,3 +163,106 @@ def test_debug_log_not_called_for_a_cache_hit(monkeypatch, tmp_path):
     )
 
     assert entries == []
+
+
+def test_batch_size_one_uses_original_single_node_prompt_shape(monkeypatch):
+    """batch_size defaults to (and here is explicitly) 1 -- the prompt sent
+    must be byte-identical in shape to what zairo has always sent, not the
+    multi-node batch format, so existing cache entries and expectations
+    about model behavior aren't disturbed for anyone who never opts in."""
+    fake_litellm = MagicMock()
+    fake_response = MagicMock()
+    fake_response.choices[0].message.content = '{"vulnerabilities": []}'
+    fake_response.choices[0].finish_reason = "stop"
+    fake_response.usage = None
+    fake_litellm.completion.return_value = fake_response
+    monkeypatch.setattr(llm_scanner, "litellm", fake_litellm)
+    monkeypatch.setattr(llm_scanner, "_ensure_litellm", lambda: fake_litellm)
+
+    graph_data = {"nodes": [_node("n1", "fn_one")], "edges": []}
+    entries = []
+    llm_scanner.scan_graph_for_vulnerabilities(
+        graph_data, "fake-model", cache_path=None, debug_log=entries.append, batch_size=1,
+    )
+
+    combined = "\n".join(entries)
+    assert "Node id:" not in combined  # the batch-format marker, absent at batch_size=1
+
+
+def test_batch_size_groups_nodes_and_reduces_request_count(monkeypatch):
+    fake_litellm = MagicMock()
+    fake_response = MagicMock()
+    fake_response.choices[0].message.content = json.dumps({f"n{i}": [] for i in range(1, 5)})
+    fake_response.choices[0].finish_reason = "stop"
+    fake_response.usage = None
+    fake_litellm.completion.return_value = fake_response
+    monkeypatch.setattr(llm_scanner, "litellm", fake_litellm)
+    monkeypatch.setattr(llm_scanner, "_ensure_litellm", lambda: fake_litellm)
+
+    graph_data = {"nodes": [_node(f"n{i}", f"fn_{i}") for i in range(1, 5)], "edges": []}
+
+    vulnerabilities, token_usage = llm_scanner.scan_graph_for_vulnerabilities(
+        graph_data, "fake-model", cache_path=None, batch_size=2,
+    )
+
+    assert fake_litellm.completion.call_count == 2  # 4 nodes / batch_size 2 -> 2 real calls
+    assert token_usage["requests"] == 2
+    assert vulnerabilities == {}
+
+
+def test_batch_findings_are_attributed_to_the_correct_node(monkeypatch):
+    fake_litellm = MagicMock()
+    fake_response = MagicMock()
+    fake_response.choices[0].message.content = json.dumps({
+        "n1": [{"title": "Command injection", "severity": "high"}],
+        "n2": [],
+    })
+    fake_response.choices[0].finish_reason = "stop"
+    fake_response.usage = None
+    fake_litellm.completion.return_value = fake_response
+    monkeypatch.setattr(llm_scanner, "litellm", fake_litellm)
+    monkeypatch.setattr(llm_scanner, "_ensure_litellm", lambda: fake_litellm)
+
+    graph_data = {"nodes": [_node("n1", "fn_one"), _node("n2", "fn_two")], "edges": []}
+
+    vulnerabilities, _ = llm_scanner.scan_graph_for_vulnerabilities(
+        graph_data, "fake-model", cache_path=None, batch_size=2,
+    )
+
+    assert set(vulnerabilities.keys()) == {"n1"}
+    assert vulnerabilities["n1"][0]["title"] == "Command injection"
+
+
+def test_batch_response_missing_a_node_key_errors_only_that_node(monkeypatch):
+    fake_litellm = MagicMock()
+    fake_response = MagicMock()
+    fake_response.choices[0].message.content = '{"n1": []}'  # n2's key omitted
+    fake_response.choices[0].finish_reason = "stop"
+    fake_response.usage = None
+    fake_litellm.completion.return_value = fake_response
+    monkeypatch.setattr(llm_scanner, "litellm", fake_litellm)
+    monkeypatch.setattr(llm_scanner, "_ensure_litellm", lambda: fake_litellm)
+
+    graph_data = {"nodes": [_node("n1", "fn_one"), _node("n2", "fn_two")], "edges": []}
+
+    vulnerabilities, token_usage = llm_scanner.scan_graph_for_vulnerabilities(
+        graph_data, "fake-model", cache_path=None, batch_size=2,
+    )
+
+    assert vulnerabilities == {}
+    assert sum(token_usage["errors"].values()) == 1  # only n2 (missing) counted as failed
+
+
+def test_batch_call_failure_errors_every_node_in_the_batch(monkeypatch):
+    """A whole-batch failure (exception, malformed response) fails every
+    node in that batch -- the blast radius is the batch, not one node."""
+    _mock_litellm(monkeypatch, RuntimeError("boom"))
+    graph_data = {"nodes": [_node("n1", "fn_one"), _node("n2", "fn_two")], "edges": []}
+
+    vulnerabilities, token_usage = llm_scanner.scan_graph_for_vulnerabilities(
+        graph_data, "fake-model", cache_path=None, batch_size=2,
+    )
+
+    assert vulnerabilities == {}
+    assert token_usage["errors"] == {"boom": 2}
+    assert token_usage["requests"] == 1  # one call covers both nodes, not one call each

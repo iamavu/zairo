@@ -35,6 +35,7 @@ def run_scan(
     log: Optional[Callable[[str], None]] = None,
     on_event: Optional[Callable[..., None]] = None,
     debug_log: Optional[Callable[[str], None]] = None,
+    batch_size: int = 1,
 ) -> ScanResult:
     """Runs the full single-repo pipeline: diff -> impact graph -> optional
     LLM scan -> reports on disk. Shared by the single-repo and multi-repo
@@ -85,7 +86,7 @@ def run_scan(
             on_event("llm_scan_started", model=model, concurrency=concurrency)
             vulnerabilities, token_usage = scan_graph_for_vulnerabilities(
                 graph_data, model, log=log, concurrency=concurrency, cache_path=cache_path,
-                max_tokens=max_tokens, debug_log=debug_log,
+                max_tokens=max_tokens, debug_log=debug_log, batch_size=batch_size,
             )
             num_vulnerabilities = sum(len(findings) for findings in vulnerabilities.values())
             on_event(

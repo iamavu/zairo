@@ -349,6 +349,37 @@ Return ONLY a JSON object with a single key 'vulnerabilities' — no markdown co
 """
 
 
+def _build_batch_prompt(jobs: List[Tuple[Dict[str, Any], str, str, List[str]]]) -> str:
+    """Same content and instructions as _build_prompt, but covering several
+    nodes in one request -- each node's section is labeled with its graph
+    node id, and the model is asked to return one JSON object keyed by
+    those same ids, so per-node attribution survives being batched
+    together. Used only for --batch-size > 1; a batch of 1 uses
+    _build_prompt instead so the default, unbatched path sends the exact
+    prompt shape it always has."""
+    sections = []
+    for mod_node, _prompt_hash, mod_code, neighbor_contexts in jobs:
+        kind_label = mod_node.get('kind') or 'function'
+        sections.append(f"""=== Node id: {mod_node['id']} ===
+Modified {kind_label.capitalize()}: {mod_node['name']}
+```
+{mod_code}
+```
+Context Functions (Callers/Callees):
+{chr(10).join(neighbor_contexts)}""")
+
+    ids = ", ".join(f'"{job[0]["id"]}"' for job in jobs)
+    return f"""
+You are an expert security auditor. Analyze each of the following {len(jobs)} modified code units for vulnerabilities. Assess each one independently -- a finding in one must not be influenced by, or attributed to, another.
+
+{chr(10).join(sections)}
+
+Base every finding strictly on the code actually shown for its own node above. Do not speculate about the contents of omitted/NOT-SHOWN function bodies, imports, or third-party libraries based on their name alone — if you haven't seen the code, don't report a vulnerability in it.
+
+Return ONLY a JSON object with exactly one key per node id listed above ({ids}) — no markdown code fence, no prose before or after it. Each key's value is a list of finding objects with 'title', 'description', 'impact', 'severity', and 'cwe', using the same rules as before: 'severity' must be exactly one of: "critical" (remote code execution, full system/data compromise), "high" (significant data exposure or privilege escalation), "medium" (real but limited impact, or requires specific conditions to exploit), "low" (minor or defense-in-depth). 'cwe' is the single most applicable CWE identifier in the form "CWE-<number>", or null if none clearly applies. A node with no vulnerabilities still needs its key present, mapped to an empty list. Example shape for two nodes: {{"<id1>": [], "<id2>": [...]}}
+"""
+
+
 def scan_graph_for_vulnerabilities(
     graph_data: Dict[str, Any],
     model: str,
@@ -357,18 +388,32 @@ def scan_graph_for_vulnerabilities(
     cache_path: Optional[str] = None,
     max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
     debug_log: Optional[Callable[[str], None]] = None,
+    batch_size: int = 1,
 ) -> Tuple[Dict[str, List[Dict]], Dict[str, int]]:
     """Returns (vulnerabilities, token_usage). token_usage has
     prompt_tokens/completion_tokens/total_tokens summed across every real
     LLM call made (cache hits don't count -- they made no call), plus
     requests/requests_without_usage so a caller can tell whether the token
     totals are complete or partial (e.g. some providers don't report it).
+    With batch_size > 1, 'requests' counts actual API calls, not nodes --
+    that's the whole point of batching, so it's the number that should drop.
 
     `debug_log`, if given, receives the exact prompt sent for every node
     actually scanned (a cache hit never calls the LLM, so there's nothing to
     log for it) plus its raw response or error -- the caller is expected to
-    make it thread-safe itself, since run_job below calls it from worker
-    threads."""
+    make it thread-safe itself, since run_group below calls it from worker
+    threads.
+
+    `batch_size` groups this many cache-miss nodes into a single LLM
+    request instead of one request each -- fewer requests (helps with
+    provider rate limits and cuts the repeated-instructions overhead), at
+    the cost of shared fault isolation: a malformed/failed batch response
+    fails every node in that batch, not just one. Caching stays per-node
+    regardless of batch_size (each node's cache key only depends on its own
+    code + context), so a batch only ever groups nodes that all need a
+    fresh call anyway. batch_size=1 (the default) sends the exact same
+    single-node prompt this always has -- batching only changes the prompt
+    shape when actually requested."""
     log = log or (lambda msg: None)
     log_lock = threading.Lock()
 
@@ -478,11 +523,16 @@ def scan_graph_for_vulnerabilities(
                 vulnerabilities[mod_node['id']] = cached
             continue
 
-        jobs.append((mod_node, prompt_hash, _build_prompt(mod_node, mod_code, neighbor_contexts)))
+        jobs.append((mod_node, prompt_hash, mod_code, neighbor_contexts))
 
-    def run_job(job):
-        mod_node, prompt_hash, prompt = job
+    def run_single(job):
+        """The original one-node-per-call path -- used whenever a group has
+        exactly one job, so batch_size=1 (the default) sends the exact same
+        prompt shape this has always sent. Returns a one-element list so
+        callers can treat every group's result uniformly."""
+        mod_node, prompt_hash, mod_code, neighbor_contexts = job
         node_label = f"{_display_name(mod_node['name'])} ({mod_node['id']})"
+        prompt = _build_prompt(mod_node, mod_code, neighbor_contexts)
         if debug_log:
             debug_log(f"\n{'='*80}\nPROMPT -- {node_label}\n{'='*80}\n{prompt}\n")
         usage = None  # unavailable if the provider doesn't report it
@@ -512,25 +562,94 @@ def scan_graph_for_vulnerabilities(
             if not content.strip():
                 error_message = f"model returned empty content{empty_note}"
                 safe_log(f"  error scanning {_display_name(mod_node['name'])}: {error_message}")
-                return mod_node['id'], prompt_hash, None, usage, error_message
+                return [(mod_node['id'], prompt_hash, None, usage, error_message)]
 
             try:
                 parsed = _extract_json(content)
             except ValueError as e:
                 safe_log(f"  error scanning {_display_name(mod_node['name'])}: {e}")
-                return mod_node['id'], prompt_hash, None, usage, _summarize_error(e)
+                return [(mod_node['id'], prompt_hash, None, usage, _summarize_error(e))]
 
             findings = parsed.get("vulnerabilities", [])
             for finding in findings:
                 finding["severity"] = normalize_severity(finding.get("severity"))
                 finding["cwe"] = normalize_cwe(finding.get("cwe"))
             safe_log(f"  found {len(findings)} vulnerability finding(s): {_display_name(mod_node['name'])}")
-            return mod_node['id'], prompt_hash, findings, usage, None
+            return [(mod_node['id'], prompt_hash, findings, usage, None)]
         except Exception as e:
             if debug_log:
                 debug_log(f"\n{'-'*80}\nERROR -- {node_label}\n{'-'*80}\n{e}\n")
             safe_log(f"  error scanning {_display_name(mod_node['name'])}: {e}")
-            return mod_node['id'], prompt_hash, None, usage, _summarize_error(e)
+            return [(mod_node['id'], prompt_hash, None, usage, _summarize_error(e))]
+
+    def run_batch(group):
+        """--batch-size > 1: several nodes in one call. A failure here (bad
+        response, exception) fails every node in this group, not the whole
+        run -- the blast radius is the batch, same tradeoff as any batching
+        scheme."""
+        labels = ", ".join(f"{_display_name(j[0]['name'])} ({j[0]['id']})" for j in group)
+        batch_label = f"batch of {len(group)}: {labels}"
+        prompt = _build_batch_prompt(group)
+        if debug_log:
+            debug_log(f"\n{'='*80}\nPROMPT -- {batch_label}\n{'='*80}\n{prompt}\n")
+        usage = None
+        try:
+            response = litellm.completion(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+            )
+            choice = response.choices[0]
+            content = choice.message.content or ""
+            finish_reason = getattr(choice, 'finish_reason', 'unknown')
+            if debug_log:
+                debug_log(f"\n{'-'*80}\nRESPONSE -- {batch_label} (finish_reason={finish_reason})\n{'-'*80}\n{content}\n")
+            empty_note = (
+                f" (finish_reason={finish_reason}) — likely exhausted max_tokens={max_tokens} "
+                f"on internal reasoning before writing an answer; try --max-tokens with a higher value, "
+                f"or a smaller --batch-size"
+            )
+            resp_usage = getattr(response, 'usage', None)
+            if resp_usage is not None:
+                usage = {
+                    'prompt_tokens': getattr(resp_usage, 'prompt_tokens', 0) or 0,
+                    'completion_tokens': getattr(resp_usage, 'completion_tokens', 0) or 0,
+                    'total_tokens': getattr(resp_usage, 'total_tokens', 0) or 0,
+                }
+
+            if not content.strip():
+                error_message = f"model returned empty content{empty_note}"
+                safe_log(f"  error scanning {batch_label}: {error_message}")
+                return [(j[0]['id'], j[1], None, usage, error_message) for j in group]
+
+            try:
+                parsed = _extract_json(content)
+            except ValueError as e:
+                safe_log(f"  error scanning {batch_label}: {e}")
+                return [(j[0]['id'], j[1], None, usage, _summarize_error(e)) for j in group]
+
+            results = []
+            for mod_node, prompt_hash, _mod_code, _neighbor_contexts in group:
+                findings = parsed.get(mod_node['id'])
+                if findings is None or not isinstance(findings, list):
+                    error_message = "model response omitted this node's key (batch response incomplete or malformed)"
+                    safe_log(f"  error scanning {_display_name(mod_node['name'])}: {error_message}")
+                    results.append((mod_node['id'], prompt_hash, None, usage, error_message))
+                    continue
+                for finding in findings:
+                    finding["severity"] = normalize_severity(finding.get("severity"))
+                    finding["cwe"] = normalize_cwe(finding.get("cwe"))
+                safe_log(f"  found {len(findings)} vulnerability finding(s): {_display_name(mod_node['name'])}")
+                results.append((mod_node['id'], prompt_hash, findings, usage, None))
+            return results
+        except Exception as e:
+            if debug_log:
+                debug_log(f"\n{'-'*80}\nERROR -- {batch_label}\n{'-'*80}\n{e}\n")
+            safe_log(f"  error scanning {batch_label}: {e}")
+            return [(j[0]['id'], j[1], None, usage, _summarize_error(e)) for j in group]
+
+    def run_group(group):
+        return run_single(group[0]) if len(group) == 1 else run_batch(group)
 
     token_usage = {
         'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0,
@@ -544,24 +663,30 @@ def scan_graph_for_vulnerabilities(
 
     if jobs:
         _ensure_litellm()  # deferred until there's actually a request to make
+        batch_size = max(1, batch_size)
+        groups = [jobs[i:i + batch_size] for i in range(0, len(jobs), batch_size)]
         with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
-            futures = [pool.submit(run_job, job) for job in jobs]
+            futures = [pool.submit(run_group, group) for group in groups]
             for future in as_completed(futures):
-                node_id, prompt_hash, findings, usage, error_message = future.result()
+                results = future.result()  # one entry per node in the group
+                # One real LLM call produced every result in this group --
+                # count it, and its usage, exactly once, not once per node.
                 token_usage['requests'] += 1
+                usage = results[0][3] if results else None
                 if usage:
                     token_usage['prompt_tokens'] += usage['prompt_tokens']
                     token_usage['completion_tokens'] += usage['completion_tokens']
                     token_usage['total_tokens'] += usage['total_tokens']
                 else:
                     token_usage['requests_without_usage'] += 1
-                if findings is None:
-                    if error_message:
-                        token_usage['errors'][error_message] = token_usage['errors'].get(error_message, 0) + 1
-                    continue  # request failed; don't cache a non-result
-                cache[prompt_hash] = findings
-                if findings:
-                    vulnerabilities[node_id] = findings
+                for node_id, prompt_hash, findings, _usage, error_message in results:
+                    if findings is None:
+                        if error_message:
+                            token_usage['errors'][error_message] = token_usage['errors'].get(error_message, 0) + 1
+                        continue  # request failed; don't cache a non-result
+                    cache[prompt_hash] = findings
+                    if findings:
+                        vulnerabilities[node_id] = findings
 
     _save_cache(cache_path, cache)
     return vulnerabilities, token_usage
