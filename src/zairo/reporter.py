@@ -157,12 +157,8 @@ HTML_TEMPLATE = """
         }
         .vuln-card {
             background: var(--bg); border-radius: 6px; padding: 10px 12px; margin-bottom: 8px;
-            border-left: 3px solid var(--text-faint); overflow-wrap: anywhere;
+            overflow-wrap: anywhere;
         }
-        .vuln-card.sev-critical { border-left-color: var(--sev-critical); }
-        .vuln-card.sev-high { border-left-color: var(--sev-high); }
-        .vuln-card.sev-medium { border-left-color: var(--sev-medium); }
-        .vuln-card.sev-low { border-left-color: var(--sev-low); }
         .vuln-card .vuln-title { font-weight: 600; font-size: 0.88em; margin-bottom: 4px; }
         .vuln-card p { margin: 4px 0 0 0; font-size: 0.82em; color: var(--text-dim); line-height: 1.4; }
         .vuln-card .badge-row { margin-bottom: 6px; }
@@ -265,11 +261,24 @@ HTML_TEMPLATE = """
 
         let totalFindings = 0, totalCritical = 0, totalModified = 0, totalDeleted = 0;
 
+        // "contains" edges (module -> the functions/classes it defines) are
+        // rendered as Cytoscape compound nesting -- a subtle box drawn
+        // around a node's children -- instead of arrows. An arrow for every
+        // single definition in a file added a lot of visual noise for a
+        // relationship a containing box already shows more simply, and
+        // reads more like the file/folder structure it actually is.
+        const parentOf = {};
+        graphData.edges.forEach(e => {
+            if (e.kind === 'contains') parentOf[e.target] = e.source;
+        });
+        const parentIds = new Set(Object.values(parentOf));
+
         const elements = [];
         graphData.nodes.forEach(n => {
             const vulns = n.vulnerabilities || [];
             const worst = worstSeverity(vulns);
             const isDeleted = n.status === 'deleted';
+            const isParent = parentIds.has(n.id);
             totalFindings += vulns.length;
             vulns.forEach(v => { if ((v.severity || '').toLowerCase() === 'critical') totalCritical++; });
             if (isDeleted) totalDeleted++;
@@ -277,33 +286,43 @@ HTML_TEMPLATE = """
 
             const complexity = n.complexity || 1;
             const size = Math.max(26, Math.min(60, 24 + complexity * 3));
+            const color = STATUS_COLOR[n.status] || STATUS_COLOR.unchanged;
 
-            elements.push({
-                data: {
-                    id: n.id,
-                    name: n.name,
-                    kind: n.kind || 'unknown',
-                    file: n.file || 'unknown',
-                    status: n.status,
-                    start_line: n.start_line || '?',
-                    end_line: n.end_line || '?',
-                    color: STATUS_COLOR[n.status] || STATUS_COLOR.unchanged,
-                    shape: KIND_SHAPE[n.kind] || 'hexagon',
-                    size: size,
-                    // A deleted node never has findings (it's never sent to
-                    // the LLM scanner -- there's no live source left to
-                    // scan), so it always falls to its own status color as
-                    // a baseline ring; a real severity ring still wins where
-                    // both could apply.
-                    borderColor: worst ? SEVERITY_COLOR[worst] : (isDeleted ? STATUS_COLOR.deleted : 'transparent'),
-                    borderWidth: worst ? 3 : (isDeleted ? 2 : 0),
-                    deleted: isDeleted,
-                    vulnerabilities: vulns
-                }
-            });
+            const data = {
+                id: n.id,
+                name: n.name,
+                kind: n.kind || 'unknown',
+                file: n.file || 'unknown',
+                status: n.status,
+                start_line: n.start_line || '?',
+                end_line: n.end_line || '?',
+                color: color,
+                shape: KIND_SHAPE[n.kind] || 'hexagon',
+                size: size,
+                // A deleted node never has findings (it's never sent to
+                // the LLM scanner -- there's no live source left to
+                // scan), so it always falls to its own status color as
+                // a baseline ring; a real severity ring still wins where
+                // both could apply. A container with neither still gets a
+                // faint 1px outline in its own color -- barely-there, but
+                // enough that its boundary reads as intentional rather than
+                // like a rendering glitch.
+                borderColor: worst ? SEVERITY_COLOR[worst] : (isDeleted ? STATUS_COLOR.deleted : (isParent ? color : 'transparent')),
+                borderWidth: worst ? 3 : (isDeleted ? 2 : (isParent ? 1 : 0)),
+                deleted: isDeleted,
+                vulnerabilities: vulns
+            };
+            // Cytoscape treats an explicit parent:undefined the same as a
+            // dangling reference to a nonexistent node -- omit the key
+            // entirely for a top-level (unparented) node instead.
+            if (parentOf[n.id]) data.parent = parentOf[n.id];
+            elements.push({ data });
         });
 
+        let renderedEdgeCount = 0;
         graphData.edges.forEach(e => {
+            if (e.kind === 'contains') return; // expressed as compound nesting above, not an arrow
+            renderedEdgeCount++;
             elements.push({
                 data: {
                     source: e.source,
@@ -315,7 +334,7 @@ HTML_TEMPLATE = """
         });
 
         document.getElementById('stat-nodes').textContent = graphData.nodes.length;
-        document.getElementById('stat-edges').textContent = graphData.edges.length;
+        document.getElementById('stat-edges').textContent = renderedEdgeCount;
         document.getElementById('stat-modified').textContent = totalModified;
         document.getElementById('stat-deleted').textContent = totalDeleted;
         document.getElementById('stat-findings').textContent = totalFindings;
@@ -345,6 +364,37 @@ HTML_TEMPLATE = """
                         'text-outline-width': 2,
                         'text-outline-color': '#16161e',
                         'font-size': '10px'
+                    }
+                },
+                {
+                    // :parent matches a compound node (one with children --
+                    // see parentOf above). Cytoscape auto-sizes these to fit
+                    // their children regardless of the width/height mapped
+                    // above (verified: compound bounds come from layout, not
+                    // style), so this only needs to override the *look* --
+                    // a subtle translucent box instead of a small filled
+                    // shape, label on top like a heading rather than below
+                    // like a leaf node's. border-color/-width stay data-
+                    // driven so a module with its own finding still shows
+                    // a real severity ring, not just the subtle default.
+                    selector: ':parent',
+                    style: {
+                        'background-color': 'data(color)',
+                        'background-opacity': 0.10,
+                        'border-width': 'data(borderWidth)',
+                        'border-color': 'data(borderColor)',
+                        'border-opacity': 0.6,
+                        'shape': 'round-rectangle',
+                        'label': 'data(name)',
+                        'color': '#c0caf5',
+                        'text-valign': 'top',
+                        'text-halign': 'center',
+                        'text-margin-y': -6,
+                        'font-size': '10px',
+                        'font-weight': '600',
+                        'text-outline-width': 2,
+                        'text-outline-color': '#16161e',
+                        'padding': '18px'
                     }
                 },
                 {
