@@ -497,21 +497,26 @@ HTML_TEMPLATE = """
         });
 
         const currentLayoutName = () => document.getElementById('toggle-layout').checked ? 'cose' : 'dagre';
+        // Layout must run on cy.elements(':visible'), not the whole graph --
+        // a layout run over hidden elements still reserves their space (a
+        // dagre rank, a cose repulsion slot, ...) even though nothing is
+        // drawn there, so the visible nodes never actually close the gap.
+        // Restricting the collection is what makes them redistribute into
+        // the freed-up space instead of just holding their old positions.
+        const relayout = () => cy.elements(':visible').layout({ name: currentLayoutName() }).run();
 
-        document.getElementById('toggle-layout').addEventListener('change', (evt) => {
-            cy.layout({ name: currentLayoutName() }).run();
-        });
+        document.getElementById('toggle-layout').addEventListener('change', relayout);
 
         document.getElementById('toggle-unchanged').addEventListener('change', (evt) => {
             const nodes = cy.nodes('[status = "unchanged"]');
             if (evt.target.checked) nodes.show(); else nodes.hide();
-            cy.layout({ name: currentLayoutName() }).run();
+            relayout();
         });
 
         document.getElementById('toggle-deleted').addEventListener('change', (evt) => {
             const nodes = cy.nodes('[?deleted]');
             if (evt.target.checked) nodes.show(); else nodes.hide();
-            cy.layout({ name: currentLayoutName() }).run();
+            relayout();
         });
 
         document.getElementById('search').addEventListener('input', (evt) => {
