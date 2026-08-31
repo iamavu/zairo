@@ -81,7 +81,13 @@ def run_scan(
                 graph_data, model, log=log, concurrency=concurrency, cache_path=cache_path,
                 max_tokens=max_tokens,
             )
-            on_event("llm_scan_done", num_vulnerable_nodes=len(vulnerabilities), token_usage=token_usage)
+            num_vulnerabilities = sum(len(findings) for findings in vulnerabilities.values())
+            on_event(
+                "llm_scan_done",
+                num_vulnerable_nodes=len(vulnerabilities),
+                num_vulnerabilities=num_vulnerabilities,
+                token_usage=token_usage,
+            )
 
         # SARIF locations must be relative to wherever node['file'] paths were
         # actually resolved from -- that's analysis_root (the worktree when

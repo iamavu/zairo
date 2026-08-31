@@ -496,18 +496,22 @@ HTML_TEMPLATE = """
             `;
         });
 
+        const currentLayoutName = () => document.getElementById('toggle-layout').checked ? 'cose' : 'dagre';
+
         document.getElementById('toggle-layout').addEventListener('change', (evt) => {
-            cy.layout({ name: evt.target.checked ? 'cose' : 'dagre' }).run();
+            cy.layout({ name: currentLayoutName() }).run();
         });
 
         document.getElementById('toggle-unchanged').addEventListener('change', (evt) => {
             const nodes = cy.nodes('[status = "unchanged"]');
             if (evt.target.checked) nodes.show(); else nodes.hide();
+            cy.layout({ name: currentLayoutName() }).run();
         });
 
         document.getElementById('toggle-deleted').addEventListener('change', (evt) => {
             const nodes = cy.nodes('[?deleted]');
             if (evt.target.checked) nodes.show(); else nodes.hide();
+            cy.layout({ name: currentLayoutName() }).run();
         });
 
         document.getElementById('search').addEventListener('input', (evt) => {
