@@ -431,10 +431,28 @@ HTML_TEMPLATE = """
                 }
             ],
             layout: {
-                name: 'dagre'
+                name: 'dagre',
+                fit: false
             }
         });
         window.cy = cy; // inspectable from devtools/automation
+
+        // fit:true (the default) zooms out until every node is on screen no
+        // matter how many there are -- on a large diff (a thousand-plus
+        // changed nodes) that shrinks nodes to sub-pixel dust, which reads
+        // as a blank/broken page rather than a graph. Floor the zoom instead:
+        // still fit when it reasonably can, but past MIN_ZOOM stop shrinking
+        // further and let the graph extend beyond the viewport -- pan/zoom/
+        // search remain the way to reach the rest, same as any large canvas.
+        const MIN_ZOOM = 0.35;
+        function fitGraph() {
+            cy.fit(undefined, 30);
+            if (cy.zoom() < MIN_ZOOM) {
+                cy.zoom(MIN_ZOOM);
+                cy.center();
+            }
+        }
+        fitGraph();
 
         function severityBadge(sev) {
             if (!sev) return '';
@@ -484,7 +502,10 @@ HTML_TEMPLATE = """
         // there, so the visible nodes never actually close the gap.
         // Restricting the collection is what makes them redistribute into
         // the freed-up space instead of just holding their old positions.
-        const relayout = () => cy.elements(':visible').layout({ name: 'dagre' }).run();
+        const relayout = () => {
+            cy.elements(':visible').layout({ name: 'dagre', fit: false }).run();
+            fitGraph();
+        };
 
         document.getElementById('toggle-unchanged').addEventListener('change', (evt) => {
             const nodes = cy.nodes('[status = "unchanged"]');
