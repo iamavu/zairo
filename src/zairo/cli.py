@@ -59,7 +59,7 @@ def _print_scan_errors(token_usage: dict, indent: str = "") -> None:
 
 def _analyze_on_event(event: str, **kw) -> None:
     if event == "graph_built":
-        console.print(f"[bold blue]Found {kw['num_modified']} modified/added nodes.[/bold blue]")
+        console.print(f"[bold blue]Found {kw['num_modified']} modified/added node(s), {kw['num_deleted']} deleted node(s).[/bold blue]")
         console.print(f"[bold blue]Total nodes in subgraph: {kw['num_nodes']}[/bold blue]")
         console.print(f"[bold blue]Total edges in subgraph: {kw['num_edges']}[/bold blue]")
     elif event == "llm_scan_started":
@@ -232,7 +232,7 @@ def fleet(
 
             def on_event(event: str, **kw) -> None:
                 if event == "graph_built":
-                    console.print(f"    {kw['num_modified']} modified/added node(s); {kw['num_nodes']} node(s), {kw['num_edges']} edge(s) in subgraph")
+                    console.print(f"    {kw['num_modified']} modified/added node(s), {kw['num_deleted']} deleted node(s); {kw['num_nodes']} node(s), {kw['num_edges']} edge(s) in subgraph")
                 elif event == "llm_scan_started":
                     console.print(f"    running LLM scan ({kw['model']})...")
                 elif event == "llm_scan_done":
@@ -272,8 +272,9 @@ def fleet(
 
                 if entry["status"] == "ok":
                     sr = entry["result"]
-                    num_modified = sum(1 for n in sr.graph_data['nodes'] if n['status'] != 'unchanged')
-                    summary = f"{num_modified} modified/added node(s)"
+                    num_modified = sum(1 for n in sr.graph_data['nodes'] if n['status'] in ('modified', 'added'))
+                    num_deleted = sum(1 for n in sr.graph_data['nodes'] if n['status'] == 'deleted')
+                    summary = f"{num_modified} modified/added node(s), {num_deleted} deleted node(s)"
                     if llm:
                         summary += f", {len(sr.vulnerabilities or {})} node(s) with findings"
                     console.print(f"[bold cyan][{completed}/{len(paths)}][/bold cyan] {entry['repo']} — {summary}")

@@ -63,10 +63,12 @@ def run_scan(
             log(f"Worktree ready at {worktree_path}")
 
         graph_data = analyze_impact(analysis_root, depth, base, target, language, log=log)
-        num_modified = sum(1 for n in graph_data['nodes'] if n['status'] != 'unchanged')
+        num_modified = sum(1 for n in graph_data['nodes'] if n['status'] in ('modified', 'added'))
+        num_deleted = sum(1 for n in graph_data['nodes'] if n['status'] == 'deleted')
         on_event(
             "graph_built",
             num_modified=num_modified,
+            num_deleted=num_deleted,
             num_nodes=len(graph_data['nodes']),
             num_edges=len(graph_data['edges']),
         )

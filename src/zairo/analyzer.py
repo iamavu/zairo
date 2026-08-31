@@ -1,9 +1,93 @@
 import json
 import os
-from typing import Any, Callable, Dict, Optional
+import subprocess
+import tempfile
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from trailmark import parse_directory
 from trailmark.query.api import QueryEngine
-from .git_utils import get_modified_lines
+from .git_utils import get_changed_file_paths, get_modified_lines
 from ._util import display_name as _display_name
+
+
+def _find_deleted_nodes(
+    repo_path: str,
+    changed_files: List[str],
+    base_ref: str,
+    target_node_ids: Set[str],
+    language: str,
+    log: Callable[[str], None],
+) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+    """Detects functions/classes/modules that existed in `base_ref` but have
+    no corresponding id in the target graph at all -- deleted outright, not
+    just edited. Trailmark's target-tree graph can never represent these on
+    its own (it only ever parses the tree as it currently is).
+
+    Reconstructs each changed file's base-ref content under a fresh temp
+    directory at its correct relative path, then parses that directory as
+    one batch with Trailmark's public parse_directory(). The relative path
+    matters: Trailmark computes a node's id from its path relative to the
+    parsed root (e.g. "src.utils.helpers:parse"), so parsing a file in
+    isolation elsewhere produces a different id than the same file gets
+    when the real repo is parsed, and nothing would match target_node_ids.
+
+    Returns (deleted_node_metadata, deleted_edges) in the same shapes
+    analyze_impact already builds for regular nodes/edges. Never raises --
+    a base revision can contain content the installed Trailmark can't parse
+    (syntax it doesn't support, a binary file, ...), which has nothing to
+    do with whether the current analysis should succeed; any failure here
+    just means deletions aren't detected for this run, logged not fatal.
+    """
+    try:
+        with tempfile.TemporaryDirectory(prefix="zairo-deleted-") as tmp_dir:
+            found_any = False
+            for rel_path in changed_files:
+                result = subprocess.run(
+                    ["git", "show", f"{base_ref}:{rel_path}"],
+                    cwd=repo_path, capture_output=True, text=True,
+                )
+                if result.returncode != 0:
+                    continue  # didn't exist at base_ref (a newly added file) -- nothing to compare
+                dest = os.path.join(tmp_dir, rel_path)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with open(dest, 'w', encoding='utf-8', errors='surrogateescape') as f:
+                    f.write(result.stdout)
+                found_any = True
+
+            if not found_any:
+                return {}, []
+
+            base_graph = parse_directory(tmp_dir, language=language)
+
+            deleted_metadata = {}
+            for node_id, unit in base_graph.nodes.items():
+                if node_id in target_node_ids or unit.kind.value == 'proxy':
+                    continue
+                location = unit.location
+                # location.file_path points into tmp_dir, which is gone the
+                # moment this `with` block exits -- rewrite it to where that
+                # file would be under the real repo, consistent with every
+                # other node's 'file' convention (even though the deleted
+                # code obviously can't be read from there anymore).
+                rel = os.path.relpath(location.file_path, tmp_dir)
+                deleted_metadata[node_id] = {
+                    "id": node_id,
+                    "name": unit.name,
+                    "kind": unit.kind.value,
+                    "file": os.path.join(repo_path, rel),
+                    "start_line": location.start_line,
+                    "end_line": location.end_line,
+                    "complexity": unit.cyclomatic_complexity,
+                    "status": "deleted",
+                }
+
+            deleted_edges = [
+                {"source": e.source_id, "target": e.target_id, "kind": e.kind.value, "confidence": e.confidence.value}
+                for e in base_graph.edges
+            ]
+            return deleted_metadata, deleted_edges
+    except Exception as e:
+        log(f"Skipping deleted-node detection: could not parse {base_ref} ({e})")
+        return {}, []
 
 
 def analyze_impact(
@@ -94,12 +178,37 @@ def analyze_impact(
         log(f"Hop {hop + 1}/{depth}: added {len(next_frontier)} node(s), frontier now {len(subgraph_nodes)} total")
         current_frontier = next_frontier
 
-    # Extract edges for subgraph
-    final_edges = [
-        {"source": edge["source"], "target": edge["target"], "kind": edge["kind"], "confidence": edge["confidence"]}
-        for edge in graph_edges
-        if edge["source"] in subgraph_nodes and edge["target"] in subgraph_nodes
-    ]
+    # 3. Deleted nodes -- present in the base revision, absent from the
+    # target graph entirely (not just outside the traversal depth above).
+    # Always treated as seeds, like modified/added, since a deletion is
+    # itself the primary change of interest, not something reached by
+    # traversing from one.
+    effective_base = base or "HEAD"
+    changed_file_paths = get_changed_file_paths(analysis_root, base, target, log=log)
+    deleted_metadata, deleted_edges = _find_deleted_nodes(
+        analysis_root, changed_file_paths, effective_base, set(graph_nodes.keys()), language, log,
+    )
+    if deleted_metadata:
+        log(f"Found {len(deleted_metadata)} deleted node(s) (present in {effective_base}, absent from the current tree)")
+        subgraph_nodes.update(deleted_metadata.keys())
+        node_metadata.update(deleted_metadata)
+
+    # Extract edges for subgraph -- base-revision edges included (filtered
+    # by the same rule) so deleted nodes still connect to whatever
+    # surviving node used to contain or call them. Deduplicated: a node that
+    # exists unchanged on both sides (e.g. the module containing a deleted
+    # function) contributes the identical edge from both graph_edges and
+    # deleted_edges.
+    seen_edges = set()
+    final_edges = []
+    for edge in (graph_edges + deleted_edges):
+        if edge["source"] not in subgraph_nodes or edge["target"] not in subgraph_nodes:
+            continue
+        key = (edge["source"], edge["target"], edge["kind"], edge["confidence"])
+        if key in seen_edges:
+            continue
+        seen_edges.add(key)
+        final_edges.append({"source": edge["source"], "target": edge["target"], "kind": edge["kind"], "confidence": edge["confidence"]})
 
     nodes = []
     for n_id in subgraph_nodes:

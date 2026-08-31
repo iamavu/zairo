@@ -164,6 +164,18 @@ Run `zairo fleet --help` for the full list.
 table linking into each repo's reports, and every repo's SARIF results
 merged into one multi-run log).
 
+### Deleted code
+
+A function/class/module removed entirely (not just edited) shows up in
+`report.html` too, with status `deleted` — a dashed, faded node showing
+where it used to live. This isn't something Trailmark's graph can represent
+on its own (it only ever reflects the tree as it currently is); `zairo`
+detects it separately by also parsing the changed files as they existed at
+`--base` (or `HEAD`, if `--base` wasn't given) and diffing the two symbol
+sets. A deleted function is never sent to the LLM scanner — there's no live
+code left to scan — so it never carries findings, only its name, kind, and
+where it used to be.
+
 ## CI / PR gating
 
 `--fail-on <low|medium|high|critical>` (on both `analyze` and `fleet`) exits

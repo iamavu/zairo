@@ -3,7 +3,7 @@ import re
 import os
 import tempfile
 from collections import defaultdict
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 
 def create_worktree(repo_path: str, ref: str) -> str:
@@ -34,6 +34,29 @@ def remove_worktree(repo_path: str, worktree_path: str) -> None:
         capture_output=True,
         text=True,
     )
+
+def get_changed_file_paths(
+    repo_path: str,
+    base: str = None,
+    target: str = None,
+    log: Optional[Callable[[str], None]] = None,
+) -> List[str]:
+    """Repo-relative paths of every file that changed (`git diff --name-only`),
+    including a file deleted in its entirety -- unlike get_modified_lines,
+    which intentionally excludes those (there's no target-side line range
+    for a fully deleted file to anchor to)."""
+    log = log or (lambda msg: None)
+    cmd = ["git", "diff", "--name-only"]
+    if base and target:
+        cmd += [base, target]
+    elif base:
+        cmd += [base]
+    result = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True)
+    if result.returncode != 0:
+        log(f"git diff --name-only failed (exit {result.returncode}): {result.stderr.strip()}")
+        return []
+    return [line for line in result.stdout.splitlines() if line]
+
 
 def get_modified_lines(
     repo_path: str,

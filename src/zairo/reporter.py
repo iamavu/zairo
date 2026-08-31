@@ -36,6 +36,7 @@ HTML_TEMPLATE = """
             --status-added: #9ece6a;
             --status-modified: #7aa2f7;
             --status-unchanged: #414868;
+            --status-deleted: #bb9af7;
 
             /* Finding severity, shown as a node's border ring and in badges.
                Only "added"/"modified" nodes can ever carry a finding (only
@@ -102,6 +103,7 @@ HTML_TEMPLATE = """
         .legend-group-label { font-size: 0.72em; color: var(--text-faint); margin-bottom: 4px; }
         .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
         .dot.ring { background: transparent; border: 2px solid; box-sizing: content-box; width: 6px; height: 6px; }
+        .dot.deleted { background: transparent; border: 2px dashed; box-sizing: content-box; width: 6px; height: 6px; opacity: 0.75; }
 
         .empty-state {
             color: var(--text-faint); font-size: 0.85em; text-align: center;
@@ -117,6 +119,7 @@ HTML_TEMPLATE = """
         }
         .badge.status-modified { background: rgba(122,162,247,0.18); color: var(--status-modified); }
         .badge.status-added { background: rgba(158,206,106,0.18); color: var(--status-added); }
+        .badge.status-deleted { background: rgba(187,154,247,0.18); color: var(--status-deleted); }
         .badge.sev-critical { background: rgba(247,118,142,0.18); color: var(--sev-critical); }
         .badge.sev-high { background: rgba(255,158,100,0.18); color: var(--sev-high); }
         .badge.sev-medium { background: rgba(224,175,104,0.18); color: var(--sev-medium); }
@@ -148,6 +151,7 @@ HTML_TEMPLATE = """
             <span>Nodes: <b id="stat-nodes">0</b></span>
             <span>Edges: <b id="stat-edges">0</b></span>
             <span>Modified: <b id="stat-modified">0</b></span>
+            <span>Deleted: <b id="stat-deleted">0</b></span>
             <span class="stat-high">Findings: <b id="stat-findings">0</b></span>
             <span class="stat-crit">Critical: <b id="stat-critical">0</b></span>
         </div>
@@ -179,6 +183,7 @@ HTML_TEMPLATE = """
                     <div class="legend-item"><div class="dot" style="background: var(--status-added);"></div> Added</div>
                     <div class="legend-item"><div class="dot" style="background: var(--status-modified);"></div> Modified</div>
                     <div class="legend-item"><div class="dot" style="background: var(--status-unchanged);"></div> Unchanged</div>
+                    <div class="legend-item"><div class="dot deleted" style="border-color: var(--status-deleted);"></div> Deleted (dashed, faded)</div>
                 </div>
                 <div class="legend-group-label">Border ring = worst finding severity</div>
                 <div class="legend">
@@ -215,7 +220,7 @@ HTML_TEMPLATE = """
         // (Cytoscape's canvas renderer can't resolve CSS custom properties,
         // so these have to be literal hex here) -- the two scales must stay
         // disjoint, see the comment on --status-added in <style> for why.
-        const STATUS_COLOR = { added: '#9ece6a', modified: '#7aa2f7', unchanged: '#414868' };
+        const STATUS_COLOR = { added: '#9ece6a', modified: '#7aa2f7', unchanged: '#414868', deleted: '#bb9af7' };
         const SEVERITY_COLOR = { critical: '#f7768e', high: '#ff9e64', medium: '#e0af68', low: '#565f89' };
         const SEVERITY_RANK = { critical: 3, high: 2, medium: 1, low: 0 };
         const KIND_SHAPE = {
@@ -233,15 +238,17 @@ HTML_TEMPLATE = """
             return worst;
         }
 
-        let totalFindings = 0, totalCritical = 0, totalModified = 0;
+        let totalFindings = 0, totalCritical = 0, totalModified = 0, totalDeleted = 0;
 
         const elements = [];
         graphData.nodes.forEach(n => {
             const vulns = n.vulnerabilities || [];
             const worst = worstSeverity(vulns);
+            const isDeleted = n.status === 'deleted';
             totalFindings += vulns.length;
             vulns.forEach(v => { if ((v.severity || '').toLowerCase() === 'critical') totalCritical++; });
-            if (n.status !== 'unchanged') totalModified++;
+            if (isDeleted) totalDeleted++;
+            else if (n.status !== 'unchanged') totalModified++;
 
             const complexity = n.complexity || 1;
             const size = Math.max(26, Math.min(60, 24 + complexity * 3));
@@ -258,8 +265,14 @@ HTML_TEMPLATE = """
                     color: STATUS_COLOR[n.status] || STATUS_COLOR.unchanged,
                     shape: KIND_SHAPE[n.kind] || 'hexagon',
                     size: size,
-                    borderColor: worst ? SEVERITY_COLOR[worst] : 'transparent',
-                    borderWidth: worst ? 3 : 0,
+                    // A deleted node never has findings (it's never sent to
+                    // the LLM scanner -- there's no live source left to
+                    // scan), so it always falls to its own status color as
+                    // a baseline ring; a real severity ring still wins where
+                    // both could apply.
+                    borderColor: worst ? SEVERITY_COLOR[worst] : (isDeleted ? STATUS_COLOR.deleted : 'transparent'),
+                    borderWidth: worst ? 3 : (isDeleted ? 2 : 0),
+                    deleted: isDeleted,
                     vulnerabilities: vulns
                 }
             });
@@ -279,6 +292,7 @@ HTML_TEMPLATE = """
         document.getElementById('stat-nodes').textContent = graphData.nodes.length;
         document.getElementById('stat-edges').textContent = graphData.edges.length;
         document.getElementById('stat-modified').textContent = totalModified;
+        document.getElementById('stat-deleted').textContent = totalDeleted;
         document.getElementById('stat-findings').textContent = totalFindings;
         document.getElementById('stat-critical').textContent = totalCritical;
 
@@ -341,6 +355,15 @@ HTML_TEMPLATE = """
                     style: { 'line-style': 'dashed', 'line-color': '#3b4261' }
                 },
                 {
+                    // No-longer-exists reads as dashed + faded, on top of
+                    // whatever border color it already got above (its own
+                    // status color as a baseline, or a severity ring if it
+                    // somehow has one) -- a deleted node needs to look
+                    // distinctly "gone", not just differently colored.
+                    selector: 'node[?deleted]',
+                    style: { 'border-style': 'dashed', 'opacity': 0.65 }
+                },
+                {
                     selector: '.dimmed',
                     style: { 'opacity': 0.12 }
                 }
@@ -380,6 +403,10 @@ HTML_TEMPLATE = """
                 });
             }
 
+            const deletedNote = d.deleted
+                ? `<div class="meta-row" style="color: var(--status-deleted);">No longer present in the current code -- shown as it was before removal.</div>`
+                : '';
+
             document.getElementById('node-details').innerHTML = `
                 <div class="detail-card">
                     <h2>${escapeHtml(d.name)}</h2>
@@ -388,7 +415,8 @@ HTML_TEMPLATE = """
                         <span class="badge status-${escapeHtml(d.status)}">${escapeHtml(d.status)}</span>
                         ${worst ? severityBadge(worst) : ''}
                     </div>
-                    <div class="meta-row">File: <span class="mono">${escapeHtml(d.file)}</span></div>
+                    ${deletedNote}
+                    <div class="meta-row">${d.deleted ? 'Was at' : 'File'}: <span class="mono">${escapeHtml(d.file)}</span></div>
                     <div class="meta-row">Lines: <span class="mono">${escapeHtml(d.start_line)}-${escapeHtml(d.end_line)}</span></div>
                     ${vulnHtml}
                 </div>
