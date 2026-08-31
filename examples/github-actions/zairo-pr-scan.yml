@@ -30,7 +30,7 @@ jobs:
           # provider docs (https://docs.litellm.ai/docs/providers).
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          zairo analyze . \
+          zairo . \
             --base "origin/${{ github.base_ref }}" --target HEAD \
             --llm --fail-on high \
             --output zairo_out

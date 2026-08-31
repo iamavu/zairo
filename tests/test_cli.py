@@ -9,37 +9,38 @@ from zairo.cli import app
 runner = CliRunner()
 
 
-def test_analyze_end_to_end(git_repo: Path, tmp_path: Path):
+def test_single_repo_writes_a_direct_report(git_repo: Path, tmp_path: Path):
     output_dir = tmp_path / "out"
     result = runner.invoke(
         app,
-        ["analyze", str(git_repo), "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir)],
+        [str(git_repo), "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir)],
     )
 
     assert result.exit_code == 0, result.output
     assert (output_dir / "report.json").exists()
     assert (output_dir / "report.html").exists()
     assert not (output_dir / "report.sarif").exists()  # no --llm, nothing to convert
+    assert not (output_dir / "fleet.json").exists()  # single repo -> no fleet rollup
     assert "Success!" in result.output
 
 
-def test_analyze_fail_on_without_llm_is_rejected(git_repo: Path, tmp_path: Path):
+def test_single_repo_fail_on_without_llm_is_rejected(git_repo: Path, tmp_path: Path):
     output_dir = tmp_path / "out"
     result = runner.invoke(
         app,
-        ["analyze", str(git_repo), "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir), "--fail-on", "high"],
+        [str(git_repo), "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir), "--fail-on", "high"],
     )
 
     assert result.exit_code != 0
     assert "--fail-on requires --llm" in result.output
 
 
-def test_fleet_scans_multiple_repos(git_repo: Path, tmp_path: Path):
+def test_multiple_positional_paths_trigger_fleet_mode(git_repo: Path, tmp_path: Path):
     output_dir = tmp_path / "out"
     result = runner.invoke(
         app,
         [
-            "fleet", str(git_repo), str(git_repo),
+            str(git_repo), str(git_repo),
             "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir),
         ],
     )
@@ -48,6 +49,7 @@ def test_fleet_scans_multiple_repos(git_repo: Path, tmp_path: Path):
     assert (output_dir / "fleet.json").exists()
     assert (output_dir / "fleet.html").exists()
     assert not (output_dir / "fleet.sarif").exists()  # no --llm, nothing to convert
+    assert not (output_dir / "report.json").exists()  # fleet mode -> no direct single-repo report
 
     with open(output_dir / "fleet.json") as f:
         summary = json.load(f)
@@ -59,6 +61,50 @@ def test_fleet_scans_multiple_repos(git_repo: Path, tmp_path: Path):
         assert (output_dir / r["report_html"]).exists()
 
 
+def test_repos_file_with_one_entry_triggers_single_repo_mode(git_repo: Path, tmp_path: Path):
+    """Mode is decided purely by the final repo count, regardless of whether
+    it came from positional args or --repos-file."""
+    repos_file = tmp_path / "repos.txt"
+    repos_file.write_text(f"{git_repo}\n")
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(app, ["--repos-file", str(repos_file), "--output", str(output_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert (output_dir / "report.json").exists()
+    assert not (output_dir / "fleet.json").exists()
+
+
+def test_repos_file_with_multiple_entries_triggers_fleet_mode(git_repo: Path, tmp_path: Path):
+    repos_file = tmp_path / "repos.txt"
+    repos_file.write_text(f"{git_repo}\n# a comment\n\n{git_repo}\n")
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(app, ["--repos-file", str(repos_file), "--output", str(output_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert (output_dir / "fleet.json").exists()
+    with open(output_dir / "fleet.json") as f:
+        summary = json.load(f)
+    assert len(summary["repos"]) == 2
+
+
+def test_positional_paths_and_repos_file_combine(git_repo: Path, tmp_path: Path):
+    """A single positional path plus a --repos-file entry totals two repos
+    -> fleet mode, even though neither source alone would have."""
+    repos_file = tmp_path / "repos.txt"
+    repos_file.write_text(f"{git_repo}\n")
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(app, [str(git_repo), "--repos-file", str(repos_file), "--output", str(output_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert (output_dir / "fleet.json").exists()
+    with open(output_dir / "fleet.json") as f:
+        summary = json.load(f)
+    assert len(summary["repos"]) == 2
+
+
 def test_fleet_continues_past_a_failing_repo_by_default(git_repo: Path, tmp_path: Path):
     output_dir = tmp_path / "out"
     bad_repo = tmp_path / "not_a_repo"
@@ -66,7 +112,7 @@ def test_fleet_continues_past_a_failing_repo_by_default(git_repo: Path, tmp_path
 
     result = runner.invoke(
         app,
-        ["fleet", str(bad_repo), str(git_repo), "--output", str(output_dir)],
+        [str(bad_repo), str(git_repo), "--output", str(output_dir)],
     )
 
     assert result.exit_code != 0  # a repo failed -> overall failure
@@ -84,7 +130,7 @@ def test_fleet_repo_concurrency_scans_all_repos(make_git_repo, tmp_path: Path):
 
     result = runner.invoke(
         app,
-        ["fleet", *[str(r) for r in repos], "--repo-concurrency", "2", "--output", str(output_dir)],
+        [*[str(r) for r in repos], "--repo-concurrency", "2", "--output", str(output_dir)],
     )
 
     assert result.exit_code == 0, result.output
@@ -106,7 +152,7 @@ def test_fleet_repo_concurrency_continues_past_error_by_default(make_git_repo, t
 
     result = runner.invoke(
         app,
-        ["fleet", str(bad_repo), *[str(r) for r in good_repos], "--repo-concurrency", "2", "--output", str(output_dir)],
+        [str(bad_repo), *[str(r) for r in good_repos], "--repo-concurrency", "2", "--output", str(output_dir)],
     )
 
     assert result.exit_code != 0  # a repo failed -> overall failure
@@ -132,7 +178,7 @@ def test_fleet_repo_concurrency_stop_on_error_cancels_queued_repos(make_git_repo
     result = runner.invoke(
         app,
         [
-            "fleet", str(bad_repo), *[str(r) for r in good_repos],
+            str(bad_repo), *[str(r) for r in good_repos],
             "--repo-concurrency", "2", "--stop-on-error", "--output", str(output_dir),
         ],
     )
@@ -146,8 +192,8 @@ def test_fleet_repo_concurrency_stop_on_error_cancels_queued_repos(make_git_repo
     assert any(r["status"] == "error" for r in summary["repos"])
 
 
-def test_fleet_requires_at_least_one_repo(tmp_path: Path):
-    result = runner.invoke(app, ["fleet", "--output", str(tmp_path / "out")])
+def test_no_repos_given_is_rejected(tmp_path: Path):
+    result = runner.invoke(app, ["--output", str(tmp_path / "out")])
 
     assert result.exit_code != 0
     assert "no repos given" in result.output
@@ -156,7 +202,7 @@ def test_fleet_requires_at_least_one_repo(tmp_path: Path):
 def test_fleet_fail_on_without_llm_is_rejected(git_repo: Path, tmp_path: Path):
     result = runner.invoke(
         app,
-        ["fleet", str(git_repo), "--output", str(tmp_path / "out"), "--fail-on", "high"],
+        [str(git_repo), str(git_repo), "--output", str(tmp_path / "out"), "--fail-on", "high"],
     )
 
     assert result.exit_code != 0
@@ -168,7 +214,7 @@ def test_fleet_tokens_without_llm_is_silent(git_repo: Path, tmp_path: Path):
     there's no invalid combination here, it should just print nothing."""
     result = runner.invoke(
         app,
-        ["fleet", str(git_repo), "--output", str(tmp_path / "out"), "--tokens"],
+        [str(git_repo), str(git_repo), "--output", str(tmp_path / "out"), "--tokens"],
     )
 
     assert result.exit_code == 0, result.output
@@ -188,7 +234,7 @@ def test_fleet_tokens_sums_usage_across_repos(make_git_repo, tmp_path: Path):
     with patch("zairo.scan.scan_graph_for_vulnerabilities", return_value=({}, fake_usage)):
         result = runner.invoke(
             app,
-            ["fleet", str(repo_a), str(repo_b), "--llm", "--tokens", "--output", str(tmp_path / "out")],
+            [str(repo_a), str(repo_b), "--llm", "--tokens", "--output", str(tmp_path / "out")],
         )
 
     assert result.exit_code == 0, result.output

@@ -33,8 +33,7 @@ thousands that didn't. `zairo` instead:
 - [Why](#why)
 - [Install](#install)
 - [Quickstart](#quickstart)
-- [`zairo analyze`](#zairo-analyze) — scan a single repo
-- [`zairo fleet`](#zairo-fleet) — scan multiple repos at once
+- [Usage](#usage) — one command, auto-detects single-repo vs. fleet mode
 - [Output files](#output-files)
 - [CI / PR gating](#ci--pr-gating)
 - [Caching](#caching)
@@ -58,10 +57,10 @@ for the full list.
 
 ```bash
 # Analyze uncommitted changes in a repo
-zairo analyze /path/to/repo
+zairo /path/to/repo
 
 # Diff two refs, and run an LLM scan on what changed
-zairo analyze /path/to/repo --base main --target HEAD --llm
+zairo /path/to/repo --base main --target HEAD --llm
 ```
 
 No repo handy? Generate a few small ones with known, distinct
@@ -69,7 +68,7 @@ vulnerabilities to try it on:
 
 ```bash
 python examples/generate_sample_repos.py
-zairo analyze examples/sample-repos/cmd-injection-app --base HEAD~1 --target HEAD --llm
+zairo examples/sample-repos/cmd-injection-app --base HEAD~1 --target HEAD --llm
 ```
 
 This creates `examples/sample-repos/{cmd-injection-app,sql-injection-app,path-traversal-app}`
@@ -78,9 +77,34 @@ LLM-findable vulnerability. (Not committed to this repo: a usable git
 history can't live nested inside another repo's `.git`, so the generator
 creates them locally on demand.)
 
-## `zairo analyze`
+## Usage
 
-Scans a single repo. `repo_path` is the only required argument.
+There's one command. It auto-detects which mode to run based on how many
+repos end up in the list — however they were given:
+
+```bash
+# One repo -> a direct report.json/.html/.sarif
+zairo /path/to/repo --base main --target HEAD --llm
+
+# More than one repo (positional, here) -> fleet mode: each repo gets its
+# own <output>/<repo-slug>/ subdirectory, plus an aggregate rollup
+zairo /path/to/repo-a /path/to/repo-b --base main --target HEAD --llm
+
+# Or from a file, one repo path per line ('#' comments allowed) -- also
+# fleet mode once the file has more than one entry, single-repo mode if
+# it has exactly one
+zairo --repos-file repos.txt --base main --target HEAD --llm --fail-on high
+```
+
+Positional paths and `--repos-file` entries combine into one list before the
+mode is decided — one positional path plus a one-line `--repos-file` is two
+repos total, so it's fleet mode.
+
+In fleet mode, every option below applies identically to *every* repo — that
+means `--base`/`--target` need to mean the same thing across all of them,
+which fits best when your repos share a diffing convention (e.g. all
+diffing against `main`). Repos with different conventions need separate
+invocations.
 
 **What to diff:**
 
@@ -97,59 +121,34 @@ Scans a single repo. `repo_path` is the only required argument.
 |---|---|---|
 | `--llm` | off | Run the LLM vulnerability scan. Without it, `zairo` only produces the impact graph, no findings. |
 | `--model` | `gemini/gemini-2.5-pro` | Any [LiteLLM model string](https://docs.litellm.ai/docs/providers). |
-| `--concurrency`, `-c` | `5` | Parallel LLM requests. |
+| `--concurrency`, `-c` | `5` | Parallel LLM requests, *within* one repo's scan. |
 | `--max-tokens` | `4096` | Output token budget per request. Reasoning models count their internal thinking against this too — too low can produce empty responses; raise it if you see that. |
 | `--cache` / `--no-cache` | cache on | Cache findings by content hash in `<output>/.llm_cache.json`, so re-running against unchanged code skips the LLM entirely. |
-| `--tokens` | off | Print total prompt/completion/total token usage across real API calls (cache hits aren't counted — they made no call). |
+| `--tokens` | off | Print total prompt/completion/total token usage across real API calls (cache hits aren't counted — they made no call). In fleet mode, one combined total across every repo, not a per-repo breakdown. |
 
 **Output & gating:**
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--output`, `-o` | `zairo_out` | Output directory for `report.json` / `report.html` / `report.sarif`. |
-| `--fail-on` | *(none)* | Exit non-zero if any finding is at or above this severity (`low`/`medium`/`high`/`critical`). Requires `--llm`. See [CI / PR gating](#ci--pr-gating). |
+| `--output`, `-o` | `zairo_out` | Single repo: output directory for `report.json` / `report.html` / `report.sarif`. Fleet mode: each repo's reports go under `<output>/<repo-slug>/`, plus an aggregate `fleet.json` / `fleet.html` / `fleet.sarif` here. |
+| `--fail-on` | *(none)* | Exit non-zero if any finding is at or above this severity (`low`/`medium`/`high`/`critical`). Requires `--llm`. Fleet mode: evaluated across **all** repos combined — one `critical` finding anywhere fails the whole run. See [CI / PR gating](#ci--pr-gating). |
 | `--verbose`, `-v` | off | Print diagnostic detail: git commands run, worktree setup, node matching, per-node LLM scan progress, and full (untruncated) per-node error messages. |
 
-Run `zairo analyze --help` for this same list from the CLI.
-
-## `zairo fleet`
-
-For a security team that owns many repos, not just one: scans several repos
-with the *same* settings and rolls the results up into one
-`fleet.json`/`fleet.html`/`fleet.sarif`, alongside each repo's own reports
-under `<output>/<repo-slug>/`.
-
-```bash
-# From positional paths
-zairo fleet /path/to/repo-a /path/to/repo-b --base main --target HEAD --llm
-
-# Or from a file, one repo path per line ('#' comments allowed)
-zairo fleet --repos-file repos.txt --base main --target HEAD --llm --fail-on high
-```
-
-It accepts almost all the same options as `analyze` (see the tables above —
-`--depth`, `--language`, `--llm`, `--model`, `--concurrency`, `--cache`,
-`--max-tokens`, `--tokens`, `--fail-on`, `--verbose`), applied identically to
-every repo. That means `--base`/`--target` need to mean the same thing
-across all of them — this fits best when your repos share a diffing
-convention (e.g. all diffing against `main`). Repos with different
-conventions need separate `fleet` invocations.
-
-`--tokens` reports one combined total across every repo scanned, not a
-per-repo breakdown.
-
-A few things unique to `fleet`:
+**Fleet mode only** (ignored for a single repo):
 
 | Option | Default | Meaning |
 |---|---|---|
 | `--repos-file` | *(none)* | A text file, one repo path per line, merged with any positional paths. |
 | `--repo-concurrency` | `1` (sequential) | How many repos to scan in parallel. Above 1, progress prints one summary line per repo on completion (in completion order) instead of the default's live per-stage detail — concurrent repos' output can't safely interleave line-by-line. `--stop-on-error` also becomes best-effort: it cancels repos that haven't started yet, but can't interrupt one already in flight. |
 | `--continue-on-error` / `--stop-on-error` | continue | Whether one repo failing (bad path, parse error, ...) aborts the rest of the run. Either way, any failed repo still fails the overall exit code. |
-| `--fail-on` | *(none)* | Same severity gate as `analyze`, but evaluated across **all** repos combined — one `critical` finding anywhere fails the whole run. |
 
-Note `--concurrency` (shared with `analyze`) and `--repo-concurrency` control different things: `--concurrency` is LLM requests in parallel *within* one repo's scan; `--repo-concurrency` is how many repos run at once. Combined, total in-flight LLM requests can reach their product — mind your provider's rate limits.
+Note `--concurrency` and `--repo-concurrency` control different things:
+`--concurrency` is LLM requests in parallel *within* one repo's scan;
+`--repo-concurrency` is how many repos run at once. Combined, total
+in-flight LLM requests can reach their product — mind your provider's rate
+limits.
 
-Run `zairo fleet --help` for the full list.
+Run `zairo --help` for this same list from the CLI.
 
 ## Output files
 
@@ -159,10 +158,10 @@ Run `zairo fleet --help` for the full list.
 | `report.html` | always | A self-contained, interactive dependency-graph viewer (Cytoscape.js) — click a node to see its findings. |
 | `report.sarif` | `--llm` used | Findings in [SARIF 2.1.0](https://sarifweb.azurewebsites.net/), for GitHub code scanning or any other SARIF consumer. Written even for a clean scan (an empty-but-valid log) — that's what lets a scanning UI mark previously reported alerts as resolved. Findings are grouped into SARIF rules by CWE when the model tagged one, so recurring issues of the same category collapse into one rule instead of a new one every time the wording differs. |
 
-`fleet` produces the same three files per repo, plus `fleet.json` / `fleet.html`
-/ `fleet.sarif` (a rollup: per-repo status and severity counts, a dashboard
-table linking into each repo's reports, and every repo's SARIF results
-merged into one multi-run log).
+Fleet mode produces the same three files per repo, plus `fleet.json` /
+`fleet.html` / `fleet.sarif` (a rollup: per-repo status and severity counts,
+a dashboard table linking into each repo's reports, and every repo's SARIF
+results merged into one multi-run log).
 
 ### Deleted code
 
@@ -178,14 +177,14 @@ where it used to be.
 
 ## CI / PR gating
 
-`--fail-on <low|medium|high|critical>` (on both `analyze` and `fleet`) exits
-non-zero if any finding at or above that severity is found, so a CI step can
-block a merge on it. It requires `--llm`, and doesn't suppress the SARIF
-output — it's still written even on a failed gate, so a scanning UI reflects
-the current state either way.
+`--fail-on <low|medium|high|critical>` exits non-zero if any finding at or
+above that severity is found (evaluated across all repos combined in fleet
+mode), so a CI step can block a merge on it. It requires `--llm`, and
+doesn't suppress the SARIF output — it's still written even on a failed
+gate, so a scanning UI reflects the current state either way.
 
 ```bash
-zairo analyze . --base "$BASE_REF" --target HEAD --llm --fail-on high -o zairo_out
+zairo . --base "$BASE_REF" --target HEAD --llm --fail-on high -o zairo_out
 ```
 
 See [examples/github-actions/zairo-pr-scan.yml](examples/github-actions/zairo-pr-scan.yml)

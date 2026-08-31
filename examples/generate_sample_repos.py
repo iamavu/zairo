@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Generates a handful of small, distinctly-vulnerable sample git repos under
-examples/sample-repos/ for trying `zairo analyze` / `zairo fleet` against.
+examples/sample-repos/ for trying `zairo` against -- one path scans just
+that repo, multiple paths (or --repos-file) auto-switch to fleet mode.
 
 Each one isn't committed to zairo's own repo -- a real git history can't
 live nested inside another repo's .git (see examples/dummy_repo, which has
 the same constraint) -- so run this locally to create them:
 
     python examples/generate_sample_repos.py
-    zairo analyze examples/sample-repos/cmd-injection-app --base HEAD~1 --target HEAD --llm
-    zairo fleet examples/sample-repos/* --base HEAD~1 --target HEAD --llm
+    zairo examples/sample-repos/cmd-injection-app --base HEAD~1 --target HEAD --llm
+    zairo examples/sample-repos/* --base HEAD~1 --target HEAD --llm
 """
 import shutil
 import subprocess
@@ -18,8 +19,9 @@ SAMPLE_REPOS_DIR = Path(__file__).parent / "sample-repos"
 
 # Each repo is 2 commits: a safe "before", then a commit that introduces one
 # specific, LLM-findable vulnerability -- so `--base HEAD~1 --target HEAD`
-# works immediately, and `zairo fleet` has genuinely different repos (not
-# just copies of one) to demonstrate rolling results up across a fleet.
+# works immediately, and passing all of them at once has genuinely
+# different repos (not just copies of one) to demonstrate fleet mode's
+# rollup with.
 REPOS = {
     "cmd-injection-app": {
         "file": "app.py",
@@ -108,8 +110,8 @@ def main() -> None:
         print(f"created {repo} (2 commits: initial -> {spec['message']!r})")
 
     print("\nTry:")
-    print(f"  zairo analyze {SAMPLE_REPOS_DIR / 'cmd-injection-app'} --base HEAD~1 --target HEAD --llm")
-    print(f"  zairo fleet {SAMPLE_REPOS_DIR}/* --base HEAD~1 --target HEAD --llm")
+    print(f"  zairo {SAMPLE_REPOS_DIR / 'cmd-injection-app'} --base HEAD~1 --target HEAD --llm")
+    print(f"  zairo {SAMPLE_REPOS_DIR}/* --base HEAD~1 --target HEAD --llm  # multiple paths -> fleet mode")
 
 
 if __name__ == "__main__":
