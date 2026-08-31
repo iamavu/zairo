@@ -50,6 +50,7 @@ zairo backend frontend infra --base main --fail-on high -o zairo_multi_out
 - `--output`, `-o` *(`zairo_out`)*: where the reports go. Multi-repo mode: each repo gets its own `<output>/<repo-slug>/`, plus a combined `rollup.*` here too.
 - `--fail-on` *(none)*: exit non-zero if a finding at or above this severity turns up (`low`/`medium`/`high`/`critical`). Errors if combined with `--graph-only` (nothing to gate on). Multi-repo mode: checked across all repos combined. See [CI / PR gating](#ci--pr-gating).
 - `--verbose`, `-v` *(off)*: print what's happening step by step (git commands, worktree setup, per-node scan progress).
+- `--debug`, `-vv` *(off)*: everything `--verbose` prints, plus the exact prompt sent to the LLM and its raw response for every node -- written to `<output>/debug.log` (per-repo in multi-repo mode), since it's too much to print to the console.
 
 **Multi-repo mode only**
 
