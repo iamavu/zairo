@@ -120,6 +120,17 @@ HTML_TEMPLATE = """
         .dot.ring { background: transparent; border: 2px solid; box-sizing: content-box; width: 6px; height: 6px; }
         .dot.deleted { background: transparent; border: 2px dashed; box-sizing: content-box; width: 6px; height: 6px; opacity: 0.75; }
 
+        /* Hidden unless the dagre layout throws (a real dagre bug seen on
+           some large/complex graphs) and JS falls back to a grid arrangement
+           -- without this the grid layout would look like an unexplained
+           downgrade instead of a deliberate fallback. */
+        .layout-note {
+            display: none; position: absolute; top: 16px; left: 16px; z-index: 5;
+            background: rgba(26,27,38,0.94); border: 1px solid var(--sev-high);
+            border-radius: 8px; padding: 8px 12px; max-width: 320px;
+            font-size: 0.8em; color: var(--text-dim);
+        }
+
         #sidebar {
             width: 320px; flex-shrink: 0; height: 100%; background: var(--panel);
             padding: 16px; box-sizing: border-box; overflow-y: auto; overflow-wrap: anywhere;
@@ -191,6 +202,7 @@ HTML_TEMPLATE = """
     </header>
     <div class="main">
         <div id="cy"></div>
+        <div id="layout-note" class="layout-note">Hierarchical layout failed on this graph -- showing a simpler grid arrangement instead.</div>
         <div class="legend-panel">
             <div class="legend-group-label">Node fill = change status</div>
             <div class="legend">
@@ -430,9 +442,13 @@ HTML_TEMPLATE = """
                     style: { 'opacity': 0.12 }
                 }
             ],
+            // 'preset' runs no layout at all during construction (nodes just
+            // keep whatever position they're given, i.e. none) -- the real
+            // layout is triggered explicitly below, after construction has
+            // safely finished, specifically so a layout crash can't also
+            // take every line after it with it (see runLayout).
             layout: {
-                name: 'dagre',
-                fit: false
+                name: 'preset'
             }
         });
         window.cy = cy; // inspectable from devtools/automation
@@ -452,7 +468,28 @@ HTML_TEMPLATE = """
                 cy.center();
             }
         }
-        fitGraph();
+
+        // dagre's own layout algorithm has real, unfixed bugs that throw on
+        // some large/complex graphs (seen: "Cannot set properties of
+        // undefined (setting 'order')" deep inside dagre.min.js, on a graph
+        // with 1000+ changed nodes) -- and because layout used to run
+        // *during* cytoscape construction, that exception used to abort
+        // construction itself, meaning search/toggles/click handlers never
+        // got wired up either: the whole page looked broken, not just the
+        // graph. Running it here, after construction, with try/catch and a
+        // grid fallback means a dagre crash only costs the hierarchical
+        // arrangement -- everything else on the page still works.
+        function runLayout(eles, name) {
+            try {
+                eles.layout({ name, fit: false }).run();
+            } catch (e) {
+                console.warn('zairo: ' + name + ' layout failed, falling back to grid', e);
+                document.getElementById('layout-note').style.display = 'block';
+                eles.layout({ name: 'grid', fit: false }).run();
+            }
+            fitGraph();
+        }
+        runLayout(cy.elements(), 'dagre');
 
         function severityBadge(sev) {
             if (!sev) return '';
@@ -502,10 +539,7 @@ HTML_TEMPLATE = """
         // there, so the visible nodes never actually close the gap.
         // Restricting the collection is what makes them redistribute into
         // the freed-up space instead of just holding their old positions.
-        const relayout = () => {
-            cy.elements(':visible').layout({ name: 'dagre', fit: false }).run();
-            fitGraph();
-        };
+        const relayout = () => runLayout(cy.elements(':visible'), 'dagre');
 
         document.getElementById('toggle-unchanged').addEventListener('change', (evt) => {
             const nodes = cy.nodes('[status = "unchanged"]');
