@@ -171,11 +171,6 @@ HTML_TEMPLATE = """
             <input id="search" type="text" placeholder="Filter by name..." autocomplete="off">
             <div class="toggle-group">
                 <label class="toggle">
-                    <input type="checkbox" id="toggle-layout">
-                    <span class="track"></span>
-                    Force-directed
-                </label>
-                <label class="toggle">
                     <input type="checkbox" id="toggle-unchanged" checked>
                     <span class="track"></span>
                     Unchanged
@@ -477,10 +472,6 @@ HTML_TEMPLATE = """
                 });
             }
 
-            const deletedNote = d.deleted
-                ? `<div class="meta-row" style="color: var(--status-deleted);">No longer present in the current code -- shown as it was before removal.</div>`
-                : '';
-
             document.getElementById('node-details').innerHTML = `
                 <div class="detail-card">
                     <h2>${escapeHtml(d.name)}</h2>
@@ -488,7 +479,6 @@ HTML_TEMPLATE = """
                         <span class="badge">${escapeHtml(d.kind)}</span>
                         <span class="badge status-${escapeHtml(d.status)}">${escapeHtml(d.status)}</span>
                     </div>
-                    ${deletedNote}
                     <div class="meta-row">${d.deleted ? 'Was at' : 'File'}: <span class="mono">${escapeHtml(d.file)}</span></div>
                     <div class="meta-row">Lines: <span class="mono">${escapeHtml(d.start_line)}-${escapeHtml(d.end_line)}</span></div>
                     ${vulnHtml}
@@ -496,16 +486,13 @@ HTML_TEMPLATE = """
             `;
         });
 
-        const currentLayoutName = () => document.getElementById('toggle-layout').checked ? 'cose' : 'dagre';
         // Layout must run on cy.elements(':visible'), not the whole graph --
         // a layout run over hidden elements still reserves their space (a
-        // dagre rank, a cose repulsion slot, ...) even though nothing is
-        // drawn there, so the visible nodes never actually close the gap.
+        // dagre rank still gets allocated) even though nothing is drawn
+        // there, so the visible nodes never actually close the gap.
         // Restricting the collection is what makes them redistribute into
         // the freed-up space instead of just holding their old positions.
-        const relayout = () => cy.elements(':visible').layout({ name: currentLayoutName() }).run();
-
-        document.getElementById('toggle-layout').addEventListener('change', relayout);
+        const relayout = () => cy.elements(':visible').layout({ name: 'dagre' }).run();
 
         document.getElementById('toggle-unchanged').addEventListener('change', (evt) => {
             const nodes = cy.nodes('[status = "unchanged"]');
