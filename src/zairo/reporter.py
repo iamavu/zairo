@@ -182,12 +182,12 @@ HTML_TEMPLATE = """
             <input id="search" type="text" placeholder="Filter by name..." autocomplete="off">
             <div class="toggle-group">
                 <label class="toggle">
-                    <input type="checkbox" id="toggle-unchanged" checked>
+                    <input type="checkbox" id="toggle-unchanged">
                     <span class="track"></span>
                     Unchanged
                 </label>
                 <label class="toggle">
-                    <input type="checkbox" id="toggle-deleted" checked>
+                    <input type="checkbox" id="toggle-deleted">
                     <span class="track"></span>
                     Deleted
                 </label>
@@ -453,6 +453,13 @@ HTML_TEMPLATE = """
         });
         window.cy = cy; // inspectable from devtools/automation
 
+        // Unchanged/deleted nodes are off by default -- they're context,
+        // not what changed, and on a large diff they'd otherwise dominate
+        // the node count before the user ever gets to the toggles. The
+        // checkboxes above start unchecked to match.
+        cy.nodes('[status = "unchanged"]').hide();
+        cy.nodes('[?deleted]').hide();
+
         // fit:true (the default) zooms out until every node is on screen no
         // matter how many there are -- on a large diff (a thousand-plus
         // changed nodes) that shrinks nodes to sub-pixel dust, which reads
@@ -489,7 +496,7 @@ HTML_TEMPLATE = """
             }
             fitGraph();
         }
-        runLayout(cy.elements(), 'dagre');
+        runLayout(cy.elements(':visible'), 'dagre');
 
         function severityBadge(sev) {
             if (!sev) return '';
