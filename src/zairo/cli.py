@@ -49,7 +49,7 @@ def _print_scan_errors(token_usage: dict, indent: str = "") -> None:
         return
     total_failed = sum(errors.values())
     console.print(
-        f"{indent}[bold red]Warning:[/bold red] {total_failed}/{token_usage['requests']} node scan(s) failed "
+        f"{indent}[bold red]Warning:[/bold red] {total_failed}/{token_usage['nodes_scanned']} node scan(s) failed "
         f"— results may be incomplete:"
     )
     for message, count in sorted(errors.items(), key=lambda kv: -kv[1])[:3]:

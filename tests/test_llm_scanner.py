@@ -266,3 +266,25 @@ def test_batch_call_failure_errors_every_node_in_the_batch(monkeypatch):
     assert vulnerabilities == {}
     assert token_usage["errors"] == {"boom": 2}
     assert token_usage["requests"] == 1  # one call covers both nodes, not one call each
+    assert token_usage["nodes_scanned"] == 2  # but 2 nodes were actually in it
+
+
+def test_nodes_scanned_counts_nodes_not_batched_calls(monkeypatch):
+    """Regression: the failure-summary line divides by nodes_scanned, not
+    requests. With batching, requests (real API calls) can be much smaller
+    than the number of nodes those calls covered -- e.g. 12 nodes at
+    batch_size=4 is 3 calls. Using 'requests' as the denominator there
+    produced a nonsensical "12/3 node scan(s) failed" (more failures than
+    the printed total)."""
+    _mock_litellm(monkeypatch, RuntimeError("boom"))
+    graph_data = {"nodes": [_node(f"n{i}", f"fn_{i}") for i in range(12)], "edges": []}
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(
+        graph_data, "fake-model", cache_path=None, batch_size=4,
+    )
+
+    assert token_usage["requests"] == 3  # 12 nodes / batch_size 4
+    assert token_usage["nodes_scanned"] == 12
+    assert sum(token_usage["errors"].values()) == 12
+    # The number the CLI would print as "X/Y failed" -- X must never exceed Y.
+    assert sum(token_usage["errors"].values()) <= token_usage["nodes_scanned"]

@@ -653,7 +653,12 @@ def scan_graph_for_vulnerabilities(
 
     token_usage = {
         'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0,
-        'requests': 0, 'requests_without_usage': 0,
+        # 'requests' is real LLM calls made (one call can cover several nodes
+        # when batch_size > 1); 'nodes_scanned' is how many nodes those calls
+        # actually covered -- kept separate so a batched run's "N/M node scan(s)
+        # failed" can divide by the right M instead of the (much smaller)
+        # call count.
+        'requests': 0, 'requests_without_usage': 0, 'nodes_scanned': len(jobs),
         # Deduplicated {error message: count of nodes that hit it} -- surfaced
         # by the CLI *without* requiring --verbose, so a scan that silently
         # failed on every node (e.g. a missing API key) is never
