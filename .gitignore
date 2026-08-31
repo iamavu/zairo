@@ -10,7 +10,7 @@ venv/
 
 # Default zairo output dir and LLM finding cache
 zairo_out/
-zairo_fleet_out/
+zairo_multi_out/
 .llm_cache.json
 
 # Manual demo fixtures (each has its own nested .git; not part of the

@@ -8,14 +8,14 @@ from jinja2 import Template
 from ._util import SEVERITY_LEVELS, max_severity, normalize_severity
 from .sarif import SARIF_SCHEMA_URI, build_sarif
 
-FLEET_HTML_TEMPLATE = """
+ROLLUP_HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Zairo Fleet Report</title>
+    <title>Zairo Rollup Report</title>
     <style>
         /* Identical to reporter.py's HTML_TEMPLATE :root -- same source of
-           truth for the palette, so report.html and fleet.html always
+           truth for the palette, so report.html and rollup.html always
            match. See that file for why the status and severity variables
            are kept disjoint (a node's fill and severity ring render
            superimposed there); doesn't apply to this table, but the
@@ -99,7 +99,7 @@ FLEET_HTML_TEMPLATE = """
 </head>
 <body>
     <header>
-        <div class="brand"><span>zairo</span> fleet report</div>
+        <div class="brand"><span>zairo</span> rollup report</div>
         <div class="stats">
             <span>Repos: <b>{{ repos|length }}</b></span>
             <span class="stat-high">High: <b>{{ totals.high }}</b></span>
@@ -141,7 +141,7 @@ FLEET_HTML_TEMPLATE = """
             </tbody>
         </table>
         <div class="totals">
-            Totals across the fleet — critical: <b>{{ totals.critical }}</b>, high: <b>{{ totals.high }}</b>,
+            Totals across all repos — critical: <b>{{ totals.critical }}</b>, high: <b>{{ totals.high }}</b>,
             medium: <b>{{ totals.medium }}</b>, low: <b>{{ totals.low }}</b>
         </div>
     </div>
@@ -164,12 +164,12 @@ def unique_slug(repo_path: str, used: set) -> str:
     return slug
 
 
-def build_fleet_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def build_rollup_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """`results` is a list of {"repo", "slug", "status", "result": ScanResult
-    | None, "error": str | None} entries, one per repo `fleet` attempted.
+    | None, "error": str | None} entries, one per repo scanned.
     Returns a JSON-serializable rollup: per-repo status and severity counts,
-    plus fleet-wide totals -- the shape both fleet.json and fleet.html render
-    from."""
+    plus totals across every repo -- the shape both rollup.json and
+    rollup.html render from."""
     repos_summary = []
     totals = {level: 0 for level in SEVERITY_LEVELS}
 
@@ -205,7 +205,7 @@ def build_fleet_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"repos": repos_summary, "totals": totals}
 
 
-def _build_fleet_sarif(results: List[Dict[str, Any]], tool_version: str) -> Optional[Dict[str, Any]]:
+def _build_rollup_sarif(results: List[Dict[str, Any]], tool_version: str) -> Optional[Dict[str, Any]]:
     """Merges every scanned repo's SARIF results into one multi-run log (one
     `run` per repo) -- not written at all if no repo actually ran an LLM
     scan. Locations are re-rooted under "<slug>/..." so files that share a
@@ -233,34 +233,34 @@ def _build_fleet_sarif(results: List[Dict[str, Any]], tool_version: str) -> Opti
     return {"$schema": SARIF_SCHEMA_URI, "version": "2.1.0", "runs": runs}
 
 
-def write_fleet_reports(
+def write_rollup_reports(
     results: List[Dict[str, Any]], output_dir: str, tool_version: str = "0.0.0",
 ) -> Dict[str, Optional[str]]:
-    """Writes fleet.json (rollup summary), fleet.html (a dashboard table
-    linking into each repo's own report.html/.json/.sarif), and fleet.sarif
+    """Writes rollup.json (summary), rollup.html (a dashboard table
+    linking into each repo's own report.html/.json/.sarif), and rollup.sarif
     (all scanned repos merged into one multi-run log, omitted entirely if no
     repo ran an LLM scan). Returns {"json": ..., "html": ..., "sarif": ...}
     (sarif is None when omitted)."""
     os.makedirs(output_dir, exist_ok=True)
-    summary = build_fleet_summary(results)
+    summary = build_rollup_summary(results)
 
-    json_path = os.path.join(output_dir, "fleet.json")
+    json_path = os.path.join(output_dir, "rollup.json")
     with open(json_path, 'w') as f:
         json.dump(summary, f, indent=2)
 
-    html_path = os.path.join(output_dir, "fleet.html")
+    html_path = os.path.join(output_dir, "rollup.html")
     # autoescape=True: r.repo/r.error are user- and exception-supplied text,
     # not safe HTML -- unlike reporter.py's template, nothing here needs raw
     # markup through, so there's no reason not to escape everything.
-    template = Template(FLEET_HTML_TEMPLATE, autoescape=True)
+    template = Template(ROLLUP_HTML_TEMPLATE, autoescape=True)
     with open(html_path, 'w') as f:
         f.write(template.render(**summary))
 
     sarif_path = None
-    fleet_sarif = _build_fleet_sarif(results, tool_version)
-    if fleet_sarif is not None:
-        sarif_path = os.path.join(output_dir, "fleet.sarif")
+    rollup_sarif = _build_rollup_sarif(results, tool_version)
+    if rollup_sarif is not None:
+        sarif_path = os.path.join(output_dir, "rollup.sarif")
         with open(sarif_path, 'w') as f:
-            json.dump(fleet_sarif, f, indent=2)
+            json.dump(rollup_sarif, f, indent=2)
 
     return {"json": json_path, "html": html_path, "sarif": sarif_path}

@@ -36,13 +36,13 @@ def run_scan(
     on_event: Optional[Callable[..., None]] = None,
 ) -> ScanResult:
     """Runs the full single-repo pipeline: diff -> impact graph -> optional
-    LLM scan -> reports on disk. Shared by the `analyze` and `fleet` CLI
-    commands so the worktree/graph/scan/report logic exists in exactly one
-    place.
+    LLM scan -> reports on disk. Shared by the single-repo and multi-repo
+    code paths in the `analyze` CLI command so the worktree/graph/scan/report
+    logic exists in exactly one place.
 
     Raises on failure (git/Trailmark/LLM errors) -- it's the caller's call
-    whether that aborts everything (a single `analyze` run) or gets recorded
-    and skipped so the rest of a fleet can still complete.
+    whether that aborts everything (a single-repo run) or gets recorded
+    and skipped so the rest of a multi-repo run can still complete.
 
     `on_event(event: str, **kwargs)` is called at the same three checkpoints
     `analyze` used to print inline ("graph_built", "llm_scan_started",

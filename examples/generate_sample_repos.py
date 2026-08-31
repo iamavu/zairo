@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generates a handful of small, distinctly-vulnerable sample git repos under
 examples/sample-repos/ for trying `zairo` against -- one path scans just
-that repo, multiple paths (or --repos-file) auto-switch to fleet mode.
+that repo, multiple paths (or --repos-file) auto-switch to multi-repo mode.
 
 Each one isn't committed to zairo's own repo -- a real git history can't
 live nested inside another repo's .git (see examples/dummy_repo, which has
@@ -20,7 +20,7 @@ SAMPLE_REPOS_DIR = Path(__file__).parent / "sample-repos"
 # Each repo is 2 commits: a safe "before", then a commit that introduces one
 # specific, LLM-findable vulnerability -- so `--base HEAD~1 --target HEAD`
 # works immediately, and passing all of them at once has genuinely
-# different repos (not just copies of one) to demonstrate fleet mode's
+# different repos (not just copies of one) to demonstrate multi-repo mode's
 # rollup with.
 REPOS = {
     "cmd-injection-app": {
@@ -111,7 +111,7 @@ def main() -> None:
 
     print("\nTry:")
     print(f"  zairo {SAMPLE_REPOS_DIR / 'cmd-injection-app'} --base HEAD~1 --target HEAD --llm")
-    print(f"  zairo {SAMPLE_REPOS_DIR}/* --base HEAD~1 --target HEAD --llm  # multiple paths -> fleet mode")
+    print(f"  zairo {SAMPLE_REPOS_DIR}/* --base HEAD~1 --target HEAD --llm  # multiple paths -> multi-repo mode")
 
 
 if __name__ == "__main__":

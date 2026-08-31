@@ -6,7 +6,7 @@ from typing import List, Optional
 import typer
 from rich.console import Console
 from . import __version__
-from .fleet import unique_slug, write_fleet_reports
+from .rollup import unique_slug, write_rollup_reports
 from .scan import run_scan
 from ._util import max_severity, severity_rank
 
@@ -98,9 +98,9 @@ def _print_token_usage(token_usage: dict) -> None:
 
 
 def _sum_token_usage(token_usages: List[dict]) -> dict:
-    """Combines every repo's token_usage in a fleet run into one totals dict
-    with the same shape _print_token_usage expects, so the fleet-wide number
-    is printed the exact same way a single-repo run's is."""
+    """Combines every repo's token_usage in a multi-repo run into one totals
+    dict with the same shape _print_token_usage expects, so the combined
+    number is printed the exact same way a single-repo run's is."""
     total = {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0, 'requests': 0, 'requests_without_usage': 0}
     for usage in token_usages:
         if not usage:
@@ -160,14 +160,14 @@ def _run_single_repo(
     return should_fail
 
 
-def _run_fleet(
+def _run_multi_repo(
     paths: List[str], output_dir: str, depth: int, base: Optional[str], target: Optional[str],
     language: str, llm: bool, model: str, concurrency: int, repo_concurrency: int, cache: bool,
     max_tokens: int, tokens: bool, fail_on: Optional[Severity], continue_on_error: bool, verbose: bool,
 ) -> bool:
     """Runs the multi-repo path: per-repo subdirectories plus an aggregate
-    fleet.json/.html/.sarif rollup. Returns whether the run should fail
-    (a repo errored, or a --fail-on gate failed across the fleet)."""
+    rollup.json/.html/.sarif. Returns whether the run should fail
+    (a repo errored, or a --fail-on gate failed across all repos)."""
     def log(msg: str) -> None:
         if verbose:
             console.print(f"[dim]    · {msg}[/dim]")
@@ -212,7 +212,7 @@ def _run_fleet(
             if entry["status"] == "error":
                 console.print(f"    [bold red]error:[/bold red] {entry['error']}")
                 if not continue_on_error:
-                    console.print("[bold red]Aborting fleet run (--stop-on-error).[/bold red]")
+                    console.print("[bold red]Aborting multi-repo run (--stop-on-error).[/bold red]")
                     break
     else:
         # Multiple repos run genuinely concurrently here, so live per-stage
@@ -261,14 +261,14 @@ def _run_fleet(
     ok_results = [r for r in results if r["status"] == "ok"]
     errored_results = [r for r in results if r["status"] == "error"]
 
-    reports = write_fleet_reports(results, output_dir, tool_version=__version__)
+    reports = write_rollup_reports(results, output_dir, tool_version=__version__)
 
     console.print(f"[bold green]Scanned {len(ok_results)}/{len(results)} repo(s) successfully.[/bold green]")
     if errored_results:
         console.print(f"[bold red]{len(errored_results)} repo(s) failed:[/bold red] " + ", ".join(r["repo"] for r in errored_results))
     if llm and tokens:
         _print_token_usage(_sum_token_usage([r["result"].token_usage for r in ok_results]))
-    console.print("Fleet reports generated:")
+    console.print("Rollup reports generated:")
     console.print(f"  - {reports['json']}")
     console.print(f"  - {reports['html']}")
     if reports['sarif']:
@@ -284,7 +284,7 @@ def _run_fleet(
         if worst is not None:
             should_fail = True
             console.print(
-                f"[bold red]Gate failed:[/bold red] found a '{worst}' severity finding across the fleet "
+                f"[bold red]Gate failed:[/bold red] found a '{worst}' severity finding across all repos "
                 f"(threshold: {fail_on.value})."
             )
 
@@ -293,27 +293,27 @@ def _run_fleet(
 
 @app.command()
 def analyze(
-    repo_paths: Optional[List[str]] = typer.Argument(None, help="Path(s) to git repositories to scan. More than one switches to fleet mode -- see below."),
+    repo_paths: Optional[List[str]] = typer.Argument(None, help="Path(s) to git repositories to scan. More than one switches to multi-repo mode -- see below."),
     repos_file: str = typer.Option(None, "--repos-file", help="Text file with one repo path per line ('#' comments allowed), combined with any positional paths."),
     depth: int = typer.Option(1, "--depth", "-d", help="Depth of connections to traverse from changed nodes"),
-    output_dir: str = typer.Option("zairo_out", "--output", "-o", help="Output directory (fleet mode: a subdirectory per repo, plus an aggregate rollup here)"),
+    output_dir: str = typer.Option("zairo_out", "--output", "-o", help="Output directory (multi-repo mode: a subdirectory per repo, plus an aggregate rollup here)"),
     base: str = typer.Option(None, "--base", "-b", help="Base commit/ref to diff from (e.g. HEAD~3, main, a1b2c3d)"),
     target: str = typer.Option(None, "--target", "-t", help="Target commit/ref to diff to (e.g. HEAD, feature-branch). Requires --base."),
     language: str = typer.Option("auto", "--language", "-l", help="Language for Trailmark parsing (auto, python, typescript, rust, etc.)"),
     llm: bool = typer.Option(False, "--llm", help="Run LLM vulnerability scanning on modified nodes"),
     model: str = typer.Option("gemini/gemini-2.5-pro", "--model", help="LiteLLM model string to use for scanning"),
     concurrency: int = typer.Option(5, "--concurrency", "-c", help="Number of LLM scan requests to run in parallel, per repo"),
-    repo_concurrency: int = typer.Option(1, "--repo-concurrency", help="Fleet mode: how many repos to scan in parallel"),
+    repo_concurrency: int = typer.Option(1, "--repo-concurrency", help="Multi-repo mode: how many repos to scan in parallel"),
     cache: bool = typer.Option(True, "--cache/--no-cache", help="Cache LLM findings by content hash to skip re-scanning unchanged nodes across runs"),
     max_tokens: int = typer.Option(4096, "--max-tokens", help="Max output tokens per LLM scan request. Reasoning models count internal thinking against this budget too — too low can cause empty responses"),
     tokens: bool = typer.Option(False, "--tokens", help="Show total LLM tokens used across real API calls (cache hits don't count)"),
     fail_on: Severity = typer.Option(None, "--fail-on", help="Exit with a non-zero status if any finding at or above this severity is found (requires --llm) -- for gating CI/PR checks"),
-    continue_on_error: bool = typer.Option(True, "--continue-on-error/--stop-on-error", help="Fleet mode: keep scanning remaining repos if one fails (default), instead of aborting the run"),
+    continue_on_error: bool = typer.Option(True, "--continue-on-error/--stop-on-error", help="Multi-repo mode: keep scanning remaining repos if one fails (default), instead of aborting the run"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Print detailed diagnostic output (git commands, worktree setup, node matching, per-node LLM scan progress)")
 ):
     """Diffs one or more repos and builds the impact graph around what changed, optionally running an LLM vulnerability scan.
 
-    One repo produces a direct report; more than one (given positionally, via --repos-file, or both combined) switches to fleet mode -- each repo gets its own report plus an aggregate rollup."""
+    One repo produces a direct report; more than one (given positionally, via --repos-file, or both combined) switches to multi-repo mode -- each repo gets its own report plus an aggregate rollup."""
     _require_llm_for_fail_on(fail_on, llm)
 
     paths = list(repo_paths or [])
@@ -334,7 +334,7 @@ def analyze(
             cache, max_tokens, tokens, fail_on, verbose,
         )
     else:
-        should_fail = _run_fleet(
+        should_fail = _run_multi_repo(
             paths, output_dir, depth, base, target, language, llm, model, concurrency,
             repo_concurrency, cache, max_tokens, tokens, fail_on, continue_on_error, verbose,
         )

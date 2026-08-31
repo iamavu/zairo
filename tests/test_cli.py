@@ -20,7 +20,7 @@ def test_single_repo_writes_a_direct_report(git_repo: Path, tmp_path: Path):
     assert (output_dir / "report.json").exists()
     assert (output_dir / "report.html").exists()
     assert not (output_dir / "report.sarif").exists()  # no --llm, nothing to convert
-    assert not (output_dir / "fleet.json").exists()  # single repo -> no fleet rollup
+    assert not (output_dir / "rollup.json").exists()  # single repo -> no rollup
     assert "Success!" in result.output
 
 
@@ -35,7 +35,7 @@ def test_single_repo_fail_on_without_llm_is_rejected(git_repo: Path, tmp_path: P
     assert "--fail-on requires --llm" in result.output
 
 
-def test_multiple_positional_paths_trigger_fleet_mode(git_repo: Path, tmp_path: Path):
+def test_multiple_positional_paths_trigger_multi_repo_mode(git_repo: Path, tmp_path: Path):
     output_dir = tmp_path / "out"
     result = runner.invoke(
         app,
@@ -46,12 +46,12 @@ def test_multiple_positional_paths_trigger_fleet_mode(git_repo: Path, tmp_path: 
     )
 
     assert result.exit_code == 0, result.output
-    assert (output_dir / "fleet.json").exists()
-    assert (output_dir / "fleet.html").exists()
-    assert not (output_dir / "fleet.sarif").exists()  # no --llm, nothing to convert
-    assert not (output_dir / "report.json").exists()  # fleet mode -> no direct single-repo report
+    assert (output_dir / "rollup.json").exists()
+    assert (output_dir / "rollup.html").exists()
+    assert not (output_dir / "rollup.sarif").exists()  # no --llm, nothing to convert
+    assert not (output_dir / "report.json").exists()  # multi-repo mode -> no direct single-repo report
 
-    with open(output_dir / "fleet.json") as f:
+    with open(output_dir / "rollup.json") as f:
         summary = json.load(f)
     assert len(summary["repos"]) == 2
     assert summary["repos"][0]["slug"] != summary["repos"][1]["slug"]  # de-duplicated
@@ -72,10 +72,10 @@ def test_repos_file_with_one_entry_triggers_single_repo_mode(git_repo: Path, tmp
 
     assert result.exit_code == 0, result.output
     assert (output_dir / "report.json").exists()
-    assert not (output_dir / "fleet.json").exists()
+    assert not (output_dir / "rollup.json").exists()
 
 
-def test_repos_file_with_multiple_entries_triggers_fleet_mode(git_repo: Path, tmp_path: Path):
+def test_repos_file_with_multiple_entries_triggers_multi_repo_mode(git_repo: Path, tmp_path: Path):
     repos_file = tmp_path / "repos.txt"
     repos_file.write_text(f"{git_repo}\n# a comment\n\n{git_repo}\n")
     output_dir = tmp_path / "out"
@@ -83,15 +83,15 @@ def test_repos_file_with_multiple_entries_triggers_fleet_mode(git_repo: Path, tm
     result = runner.invoke(app, ["--repos-file", str(repos_file), "--output", str(output_dir)])
 
     assert result.exit_code == 0, result.output
-    assert (output_dir / "fleet.json").exists()
-    with open(output_dir / "fleet.json") as f:
+    assert (output_dir / "rollup.json").exists()
+    with open(output_dir / "rollup.json") as f:
         summary = json.load(f)
     assert len(summary["repos"]) == 2
 
 
 def test_positional_paths_and_repos_file_combine(git_repo: Path, tmp_path: Path):
     """A single positional path plus a --repos-file entry totals two repos
-    -> fleet mode, even though neither source alone would have."""
+    -> multi-repo mode, even though neither source alone would have."""
     repos_file = tmp_path / "repos.txt"
     repos_file.write_text(f"{git_repo}\n")
     output_dir = tmp_path / "out"
@@ -99,13 +99,13 @@ def test_positional_paths_and_repos_file_combine(git_repo: Path, tmp_path: Path)
     result = runner.invoke(app, [str(git_repo), "--repos-file", str(repos_file), "--output", str(output_dir)])
 
     assert result.exit_code == 0, result.output
-    assert (output_dir / "fleet.json").exists()
-    with open(output_dir / "fleet.json") as f:
+    assert (output_dir / "rollup.json").exists()
+    with open(output_dir / "rollup.json") as f:
         summary = json.load(f)
     assert len(summary["repos"]) == 2
 
 
-def test_fleet_continues_past_a_failing_repo_by_default(git_repo: Path, tmp_path: Path):
+def test_multi_repo_continues_past_a_failing_repo_by_default(git_repo: Path, tmp_path: Path):
     output_dir = tmp_path / "out"
     bad_repo = tmp_path / "not_a_repo"
     bad_repo.mkdir()
@@ -116,7 +116,7 @@ def test_fleet_continues_past_a_failing_repo_by_default(git_repo: Path, tmp_path
     )
 
     assert result.exit_code != 0  # a repo failed -> overall failure
-    with open(output_dir / "fleet.json") as f:
+    with open(output_dir / "rollup.json") as f:
         summary = json.load(f)
     statuses = {r["slug"]: r["status"] for r in summary["repos"]}
     assert len(statuses) == 2
@@ -124,7 +124,7 @@ def test_fleet_continues_past_a_failing_repo_by_default(git_repo: Path, tmp_path
     assert "ok" in statuses.values()
 
 
-def test_fleet_repo_concurrency_scans_all_repos(make_git_repo, tmp_path: Path):
+def test_multi_repo_repo_concurrency_scans_all_repos(make_git_repo, tmp_path: Path):
     repos = [make_git_repo(f"repo{i}") for i in range(3)]
     output_dir = tmp_path / "out"
 
@@ -134,7 +134,7 @@ def test_fleet_repo_concurrency_scans_all_repos(make_git_repo, tmp_path: Path):
     )
 
     assert result.exit_code == 0, result.output
-    with open(output_dir / "fleet.json") as f:
+    with open(output_dir / "rollup.json") as f:
         summary = json.load(f)
     # Completion order isn't submission order under real concurrency --
     # check the set of outcomes, not positions.
@@ -144,7 +144,7 @@ def test_fleet_repo_concurrency_scans_all_repos(make_git_repo, tmp_path: Path):
         assert (output_dir / r["report_json"]).exists()
 
 
-def test_fleet_repo_concurrency_continues_past_error_by_default(make_git_repo, tmp_path: Path):
+def test_multi_repo_repo_concurrency_continues_past_error_by_default(make_git_repo, tmp_path: Path):
     good_repos = [make_git_repo(f"repo{i}") for i in range(3)]
     bad_repo = tmp_path / "not_a_repo"
     bad_repo.mkdir()
@@ -156,7 +156,7 @@ def test_fleet_repo_concurrency_continues_past_error_by_default(make_git_repo, t
     )
 
     assert result.exit_code != 0  # a repo failed -> overall failure
-    with open(output_dir / "fleet.json") as f:
+    with open(output_dir / "rollup.json") as f:
         summary = json.load(f)
     statuses = [r["status"] for r in summary["repos"]]
     assert len(statuses) == 4  # continue-on-error (default): every repo attempted
@@ -164,7 +164,7 @@ def test_fleet_repo_concurrency_continues_past_error_by_default(make_git_repo, t
     assert statuses.count("ok") == 3
 
 
-def test_fleet_repo_concurrency_stop_on_error_cancels_queued_repos(make_git_repo, tmp_path: Path):
+def test_multi_repo_repo_concurrency_stop_on_error_cancels_queued_repos(make_git_repo, tmp_path: Path):
     """With only 2 worker slots and a repo guaranteed to fail immediately
     (nonexistent path -> no Trailmark work at all) submitted first, the
     repos beyond the first 2 are still queued -- not yet handed to a worker
@@ -184,7 +184,7 @@ def test_fleet_repo_concurrency_stop_on_error_cancels_queued_repos(make_git_repo
     )
 
     assert result.exit_code != 0
-    with open(output_dir / "fleet.json") as f:
+    with open(output_dir / "rollup.json") as f:
         summary = json.load(f)
     # Not a precise count (real thread timing) -- but at least one queued
     # repo must have been skipped, or this test proves nothing.
@@ -199,7 +199,7 @@ def test_no_repos_given_is_rejected(tmp_path: Path):
     assert "no repos given" in result.output
 
 
-def test_fleet_fail_on_without_llm_is_rejected(git_repo: Path, tmp_path: Path):
+def test_multi_repo_fail_on_without_llm_is_rejected(git_repo: Path, tmp_path: Path):
     result = runner.invoke(
         app,
         [str(git_repo), str(git_repo), "--output", str(tmp_path / "out"), "--fail-on", "high"],
@@ -209,7 +209,7 @@ def test_fleet_fail_on_without_llm_is_rejected(git_repo: Path, tmp_path: Path):
     assert "--fail-on requires --llm" in result.output
 
 
-def test_fleet_tokens_without_llm_is_silent(git_repo: Path, tmp_path: Path):
+def test_multi_repo_tokens_without_llm_is_silent(git_repo: Path, tmp_path: Path):
     """--tokens has nothing to report without --llm -- unlike --fail-on,
     there's no invalid combination here, it should just print nothing."""
     result = runner.invoke(
@@ -222,7 +222,7 @@ def test_fleet_tokens_without_llm_is_silent(git_repo: Path, tmp_path: Path):
     assert "Tokens used" not in result.output
 
 
-def test_fleet_tokens_sums_usage_across_repos(make_git_repo, tmp_path: Path):
+def test_multi_repo_tokens_sums_usage_across_repos(make_git_repo, tmp_path: Path):
     repo_a = make_git_repo("repo_a")
     repo_b = make_git_repo("repo_b")
 

@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from zairo.fleet import build_fleet_summary, unique_slug, write_fleet_reports
+from zairo.rollup import build_rollup_summary, unique_slug, write_rollup_reports
 from zairo.scan import ScanResult
 
 
@@ -29,7 +29,7 @@ def _ok_result(vulnerabilities=None):
     )
 
 
-def test_build_fleet_summary_counts_severities_and_totals():
+def test_build_rollup_summary_counts_severities_and_totals():
     results = [
         {"repo": "/a", "slug": "a", "status": "ok", "result": _ok_result({
             "n1": [{"severity": "critical"}, {"severity": "low"}],
@@ -40,7 +40,7 @@ def test_build_fleet_summary_counts_severities_and_totals():
         {"repo": "/c", "slug": "c", "status": "error", "error": "boom"},
     ]
 
-    summary = build_fleet_summary(results)
+    summary = build_rollup_summary(results)
 
     assert summary["totals"] == {"low": 1, "medium": 0, "high": 0, "critical": 2}
     by_slug = {r["slug"]: r for r in summary["repos"]}
@@ -50,10 +50,10 @@ def test_build_fleet_summary_counts_severities_and_totals():
     assert by_slug["c"]["error"] == "boom"
 
 
-def test_write_fleet_reports_escapes_untrusted_text_in_html(tmp_path: Path):
+def test_write_rollup_reports_escapes_untrusted_text_in_html(tmp_path: Path):
     """repo paths and error messages are attacker-influenceable (a repo path
     passed on the CLI, an exception message that can echo file/command
-    content) -- fleet.html must not let them inject markup."""
+    content) -- rollup.html must not let them inject markup."""
     results = [{
         "repo": "<script>alert(1)</script>",
         "slug": "evil",
@@ -61,7 +61,7 @@ def test_write_fleet_reports_escapes_untrusted_text_in_html(tmp_path: Path):
         "error": "<img src=x onerror=alert(2)>",
     }]
 
-    reports = write_fleet_reports(results, str(tmp_path))
+    reports = write_rollup_reports(results, str(tmp_path))
 
     html = Path(reports["html"]).read_text()
     assert "<script>alert(1)" not in html
@@ -70,19 +70,19 @@ def test_write_fleet_reports_escapes_untrusted_text_in_html(tmp_path: Path):
     assert "&lt;img src=x onerror=alert(2)&gt;" in html
 
 
-def test_write_fleet_reports_sarif_omitted_when_no_repo_ran_llm(tmp_path: Path):
+def test_write_rollup_reports_sarif_omitted_when_no_repo_ran_llm(tmp_path: Path):
     results = [{"repo": "/a", "slug": "a", "status": "ok", "result": _ok_result(vulnerabilities=None)}]
-    reports = write_fleet_reports(results, str(tmp_path))
+    reports = write_rollup_reports(results, str(tmp_path))
     assert reports["sarif"] is None
-    assert not (tmp_path / "fleet.sarif").exists()
+    assert not (tmp_path / "rollup.sarif").exists()
 
 
-def test_write_fleet_reports_sarif_merges_one_run_per_repo(tmp_path: Path):
+def test_write_rollup_reports_sarif_merges_one_run_per_repo(tmp_path: Path):
     results = [
         {"repo": "/a", "slug": "a", "status": "ok", "result": _ok_result({"n1": [{"title": "X", "severity": "high"}]})},
         {"repo": "/b", "slug": "b", "status": "ok", "result": _ok_result({"n1": [{"title": "Y", "severity": "low"}]})},
     ]
-    reports = write_fleet_reports(results, str(tmp_path))
+    reports = write_rollup_reports(results, str(tmp_path))
     with open(reports["sarif"]) as f:
         sarif = json.load(f)
     assert len(sarif["runs"]) == 2
