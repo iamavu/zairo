@@ -512,8 +512,14 @@ HTML_TEMPLATE = """
                 cy.elements().removeClass('dimmed');
                 return;
             }
+            const nameMatches = n => (n.data('name') || '').toLowerCase().includes(query);
             cy.nodes().forEach(n => {
-                const match = (n.data('name') || '').toLowerCase().includes(query);
+                // A compound container's opacity cascades down to its
+                // children (Cytoscape multiplies effective opacity up the
+                // ancestor chain), so dimming a container would dim a
+                // matching node nested inside it too. A container stays
+                // undimmed whenever any descendant matches, not just itself.
+                const match = nameMatches(n) || (n.isParent() && n.descendants().some(nameMatches));
                 n.toggleClass('dimmed', !match);
             });
             cy.edges().forEach(e => {
