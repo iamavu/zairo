@@ -183,8 +183,6 @@ HTML_TEMPLATE = """
             </div>
         </div>
         <div class="stats">
-            <span>Nodes: <b id="stat-nodes">0</b></span>
-            <span>Edges: <b id="stat-edges">0</b></span>
             <span>Modified: <b id="stat-modified">0</b></span>
             <span>Deleted: <b id="stat-deleted">0</b></span>
             <span class="stat-high">Findings: <b id="stat-findings">0</b></span>
@@ -314,10 +312,8 @@ HTML_TEMPLATE = """
             elements.push({ data });
         });
 
-        let renderedEdgeCount = 0;
         graphData.edges.forEach(e => {
             if (e.kind === 'contains') return; // expressed as compound nesting above, not an arrow
-            renderedEdgeCount++;
             elements.push({
                 data: {
                     source: e.source,
@@ -328,8 +324,6 @@ HTML_TEMPLATE = """
             });
         });
 
-        document.getElementById('stat-nodes').textContent = graphData.nodes.length;
-        document.getElementById('stat-edges').textContent = renderedEdgeCount;
         document.getElementById('stat-modified').textContent = totalModified;
         document.getElementById('stat-deleted').textContent = totalDeleted;
         document.getElementById('stat-findings').textContent = totalFindings;
@@ -356,8 +350,6 @@ HTML_TEMPLATE = """
                         'color': '#c0caf5',
                         'text-valign': 'bottom',
                         'text-margin-y': 6,
-                        'text-outline-width': 2,
-                        'text-outline-color': '#16161e',
                         'font-size': '10px'
                     }
                 },
