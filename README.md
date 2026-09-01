@@ -2,6 +2,9 @@
 Diff security scanners miss the effects of the changes, Zairo finds those effects and looks for vulnerabilities.
 Zairo scans what has changed in your code with context, makes a subgraph for you to look at and finds vulnerabilities using LLMs of your choice.
 
+![graph](images/graph.png)
+
+
 ## Installation
 
 ```bash
