@@ -1,59 +1,8 @@
 import json
 import os
-from typing import Tuple
-
 from jinja2 import Template
 
 from .sarif import build_sarif
-
-# Cytoscape + dagre becomes unusably slow, and dagre itself has a known
-# crash (see the try/catch around runLayout in the JS below), somewhere in
-# the low thousands of nodes. A genuinely huge diff -- or a modest diff at
-# a high --depth -- can pull in far more unchanged context than that.
-# report.json always keeps the full, untruncated graph (it's the raw data
-# other tooling consumes); only the interactive HTML view caps what it
-# embeds and renders, so a huge diff degrades to "some context is missing,
-# noted in a banner" instead of a multi-megabyte page that's unusable
-# either way. Real changes -- modified/added/deleted nodes, and whatever
-# module/class contains them, so compound nesting doesn't break -- are
-# never capped away, only surrounding unchanged context is trimmed.
-_MAX_HTML_GRAPH_NODES = 2000
-
-
-def _cap_graph_for_html(graph_data: dict, max_nodes: int) -> Tuple[dict, int]:
-    """Returns (graph_data to embed in report.html, number of nodes
-    omitted). Never mutates the caller's graph_data -- report.json needs
-    the untouched original -- and returns it as-is (0 omitted) when it's
-    already under the cap, so the common case pays no extra work."""
-    nodes = graph_data['nodes']
-    if len(nodes) <= max_nodes:
-        return graph_data, 0
-
-    edges = graph_data['edges']
-    essential = {n['id'] for n in nodes if n['status'] in ('modified', 'added', 'deleted')}
-
-    # "contains" edges are rendered as compound nesting in the HTML (see
-    # parentOf in the JS below) -- a kept node whose parent module got
-    # dropped would be a dangling parent reference Cytoscape can't render.
-    # Walk every essential node's containment chain up to its root and
-    # keep that too.
-    parent_of = {e['target']: e['source'] for e in edges if e['kind'] == 'contains'}
-    keep = set(essential)
-    for node_id in essential:
-        cur = parent_of.get(node_id)
-        while cur is not None and cur not in keep:
-            keep.add(cur)
-            cur = parent_of.get(cur)
-
-    for n in nodes:
-        if len(keep) >= max_nodes:
-            break
-        keep.add(n['id'])
-
-    kept_nodes = [n for n in nodes if n['id'] in keep]
-    kept_edges = [e for e in edges if e['source'] in keep and e['target'] in keep]
-    return {'nodes': kept_nodes, 'edges': kept_edges}, len(nodes) - len(kept_nodes)
-
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -177,25 +126,14 @@ HTML_TEMPLATE = """
         .dot.ring { background: transparent; border: 2px solid; box-sizing: content-box; width: 6px; height: 6px; }
         .dot.deleted { background: transparent; border: 2px dashed; box-sizing: content-box; width: 6px; height: 6px; opacity: 0.75; }
 
-        /* Holds both banners below (dagre-crash fallback note, huge-graph
-           cap note) stacked without overlapping -- either, both, or
-           neither can be visible depending on what this particular graph
-           hit. */
-        .notices {
-            position: absolute; top: 16px; left: 16px; z-index: 5;
-            display: flex; flex-direction: column; gap: 8px; max-width: 320px;
-        }
         /* Hidden unless the dagre layout throws (a real dagre bug seen on
            some large/complex graphs) and JS falls back to a grid arrangement
            -- without this the grid layout would look like an unexplained
-           downgrade instead of a deliberate fallback. Also reused for the
-           huge-graph cap note (see _cap_graph_for_html in reporter.py) --
-           same "here's why this view looks smaller than you expected"
-           purpose, same look. */
+           downgrade instead of a deliberate fallback. */
         .layout-note {
-            display: none;
+            display: none; position: absolute; top: 16px; left: 16px; z-index: 5;
             background: rgba(26,27,38,0.94); border: 1px solid var(--sev-high);
-            border-radius: 8px; padding: 8px 12px;
+            border-radius: 8px; padding: 8px 12px; max-width: 320px;
             font-size: 0.8em; color: var(--text-dim);
         }
 
@@ -270,10 +208,7 @@ HTML_TEMPLATE = """
     </header>
     <div class="main">
         <div id="cy"></div>
-        <div class="notices">
-            <div id="layout-note" class="layout-note">Hierarchical layout failed on this graph -- showing a simpler grid arrangement instead.</div>
-            <div id="graph-cap-note" class="layout-note"></div>
-        </div>
+        <div id="layout-note" class="layout-note">Hierarchical layout failed on this graph -- showing a simpler grid arrangement instead.</div>
         <div class="legend-panel">
             <div class="legend-group-label">Node fill = change status</div>
             <div class="legend">
@@ -302,15 +237,6 @@ HTML_TEMPLATE = """
 
     <script>
         const graphData = {{ graph_json }};
-
-        // Set server-side by _cap_graph_for_html when a huge graph got
-        // trimmed for this view -- report.json (linked from the note) still
-        // has everything.
-        if (graphData.omitted_count > 0) {
-            const note = document.getElementById('graph-cap-note');
-            note.textContent = `Graph too large to render in full: ${graphData.omitted_count} unchanged context node(s) omitted from this view (modified/added/deleted nodes are never omitted). Full data is in report.json.`;
-            note.style.display = 'block';
-        }
 
         // Node/finding text ultimately comes from scanned source code and
         // LLM output -- neither is trusted input. Escape before it ever
@@ -763,11 +689,8 @@ def generate_reports(
     with open(json_path, 'w') as f:
         json.dump(graph_data, f, indent=2)
 
-    html_graph_data, omitted_count = _cap_graph_for_html(graph_data, _MAX_HTML_GRAPH_NODES)
-    html_payload = dict(html_graph_data, omitted_count=omitted_count)
-
     template = Template(HTML_TEMPLATE)
-    html_content = template.render(graph_json=_json_for_script(html_payload))
+    html_content = template.render(graph_json=_json_for_script(graph_data))
 
     with open(html_path, 'w') as f:
         f.write(html_content)
