@@ -2,11 +2,19 @@ import json
 import os
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from trailmark import parse_directory
 from trailmark.query.api import QueryEngine
 from .git_utils import get_changed_file_paths, get_modified_lines
 from ._util import display_name as _display_name
+
+# Cap on how many `git show` subprocesses run at once in _find_deleted_nodes.
+# Each is I/O-bound (process spawn + reading one blob out of git's object
+# store), not CPU-bound, so well beyond the CPU count is fine -- but an
+# unbounded pool on a diff touching tens of thousands of files would spawn
+# that many git processes simultaneously.
+_MAX_GIT_SHOW_WORKERS = 32
 
 
 def _find_deleted_nodes(
@@ -36,22 +44,39 @@ def _find_deleted_nodes(
     (syntax it doesn't support, a binary file, ...), which has nothing to
     do with whether the current analysis should succeed; any failure here
     just means deletions aren't detected for this run, logged not fatal.
+
+    Fetches every changed file's base-ref content concurrently -- each
+    `git show` is independent and I/O-bound, so a diff touching thousands
+    of files no longer pays thousands of sequential process-spawn round
+    trips one at a time.
     """
+    def fetch(rel_path: str) -> Optional[Tuple[str, str]]:
+        result = subprocess.run(
+            ["git", "show", f"{base_ref}:{rel_path}"],
+            cwd=repo_path, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return None  # didn't exist at base_ref (a newly added file) -- nothing to compare
+        return rel_path, result.stdout
+
     try:
         with tempfile.TemporaryDirectory(prefix="zairo-deleted-") as tmp_dir:
             found_any = False
-            for rel_path in changed_files:
-                result = subprocess.run(
-                    ["git", "show", f"{base_ref}:{rel_path}"],
-                    cwd=repo_path, capture_output=True, text=True,
-                )
-                if result.returncode != 0:
-                    continue  # didn't exist at base_ref (a newly added file) -- nothing to compare
-                dest = os.path.join(tmp_dir, rel_path)
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                with open(dest, 'w', encoding='utf-8', errors='surrogateescape') as f:
-                    f.write(result.stdout)
-                found_any = True
+            if changed_files:
+                # File writes happen back on this thread as results come in
+                # (pool.map preserves submission order) -- only the git
+                # subprocess calls themselves run concurrently, so there's
+                # no need to lock around tmp_dir.
+                with ThreadPoolExecutor(max_workers=min(_MAX_GIT_SHOW_WORKERS, len(changed_files))) as pool:
+                    for outcome in pool.map(fetch, changed_files):
+                        if outcome is None:
+                            continue
+                        rel_path, content = outcome
+                        dest = os.path.join(tmp_dir, rel_path)
+                        os.makedirs(os.path.dirname(dest), exist_ok=True)
+                        with open(dest, 'w', encoding='utf-8', errors='surrogateescape') as f:
+                            f.write(content)
+                        found_any = True
 
             if not found_any:
                 return {}, []
