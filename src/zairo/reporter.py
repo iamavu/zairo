@@ -99,6 +99,12 @@ HTML_TEMPLATE = """
         .stats b { color: var(--text); font-weight: 600; }
         .stats .stat-crit b { color: var(--sev-critical); }
         .stats .stat-high b { color: var(--sev-high); }
+        .stats .stat-clickable {
+            cursor: pointer; padding: 2px 8px; margin: -2px -8px; border-radius: 5px;
+            transition: background 0.15s ease, color 0.15s ease;
+        }
+        .stats .stat-clickable:hover { background: var(--panel-2); color: var(--text); }
+        .stats .stat-clickable.active { background: rgba(122,162,247,0.22); color: var(--text); }
 
         .main { flex: 1; display: flex; min-height: 0; position: relative; }
         #cy { flex: 1; height: 100%; }
@@ -196,8 +202,8 @@ HTML_TEMPLATE = """
         <div class="stats">
             <span>Modified: <b id="stat-modified">0</b></span>
             <span>Deleted: <b id="stat-deleted">0</b></span>
-            <span class="stat-high">Findings: <b id="stat-findings">0</b></span>
-            <span class="stat-crit">Critical: <b id="stat-critical">0</b></span>
+            <span class="stat-high stat-clickable" data-stat="findings" title="Click to highlight nodes with any finding">Findings: <b id="stat-findings">0</b></span>
+            <span class="stat-crit stat-clickable" data-stat="critical" title="Click to highlight nodes with a critical finding">Critical: <b id="stat-critical">0</b></span>
         </div>
     </header>
     <div class="main">
@@ -583,9 +589,24 @@ HTML_TEMPLATE = """
             relayout();
         });
 
-        document.getElementById('search').addEventListener('input', (evt) => {
-            const query = evt.target.value.trim().toLowerCase();
-            if (!query) {
+        // Two independent filters can dim the graph at once: the free-text
+        // search box, and a stat clicked in the header (Findings/Critical).
+        // Both apply together (AND), so e.g. typing "parse" while Critical
+        // is active narrows to critical findings in nodes named "parse" --
+        // no separate combined-filter UI needed for that.
+        let activeStatFilter = null; // null | 'findings' | 'critical'
+
+        function nodeMatchesStatFilter(n) {
+            if (!activeStatFilter) return true;
+            const vulns = n.data('vulnerabilities') || [];
+            if (activeStatFilter === 'findings') return vulns.length > 0;
+            if (activeStatFilter === 'critical') return vulns.some(v => (v.severity || '').toLowerCase() === 'critical');
+            return true;
+        }
+
+        function applyDimming() {
+            const query = document.getElementById('search').value.trim().toLowerCase();
+            if (!query && !activeStatFilter) {
                 cy.elements().removeClass('dimmed');
                 return;
             }
@@ -595,13 +616,28 @@ HTML_TEMPLATE = """
                 // children (Cytoscape multiplies effective opacity up the
                 // ancestor chain), so dimming a container would dim a
                 // matching node nested inside it too. A container stays
-                // undimmed whenever any descendant matches, not just itself.
-                const match = nameMatches(n) || (n.isParent() && n.descendants().some(nameMatches));
-                n.toggleClass('dimmed', !match);
+                // undimmed whenever any descendant matches, not just itself
+                // -- for both filters independently.
+                const searchOk = !query || nameMatches(n) || (n.isParent() && n.descendants().some(nameMatches));
+                const statOk = nodeMatchesStatFilter(n) || (n.isParent() && n.descendants().some(nodeMatchesStatFilter));
+                n.toggleClass('dimmed', !(searchOk && statOk));
             });
             cy.edges().forEach(e => {
                 const match = !e.source().hasClass('dimmed') && !e.target().hasClass('dimmed');
                 e.toggleClass('dimmed', !match);
+            });
+        }
+
+        document.getElementById('search').addEventListener('input', applyDimming);
+
+        document.querySelectorAll('.stat-clickable').forEach(el => {
+            el.addEventListener('click', () => {
+                const stat = el.dataset.stat;
+                activeStatFilter = (activeStatFilter === stat) ? null : stat; // click again to clear
+                document.querySelectorAll('.stat-clickable').forEach(e2 => {
+                    e2.classList.toggle('active', e2.dataset.stat === activeStatFilter);
+                });
+                applyDimming();
             });
         });
     </script>
