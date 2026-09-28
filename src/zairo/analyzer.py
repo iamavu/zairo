@@ -20,43 +20,43 @@ _MAX_GIT_SHOW_WORKERS = 32
 def _find_deleted_nodes(
     repo_path: str,
     changed_files: List[str],
-    base_ref: str,
-    target_node_ids: Set[str],
+    from_ref: str,
+    to_node_ids: Set[str],
     language: str,
     log: Callable[[str], None],
 ) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
-    """Detects functions/classes/modules that existed in `base_ref` but have
-    no corresponding id in the target graph at all -- deleted outright, not
-    just edited. Trailmark's target-tree graph can never represent these on
-    its own (it only ever parses the tree as it currently is).
+    """Detects functions/classes/modules that existed in `from_ref` but have
+    no corresponding id in the to-side graph at all -- deleted outright, not
+    just edited. Trailmark's to-side graph can never represent these on its
+    own (it only ever parses the tree as it currently is).
 
-    Reconstructs each changed file's base-ref content under a fresh temp
+    Reconstructs each changed file's from_ref content under a fresh temp
     directory at its correct relative path, then parses that directory as
     one batch with Trailmark's public parse_directory(). The relative path
     matters: Trailmark computes a node's id from its path relative to the
     parsed root (e.g. "src.utils.helpers:parse"), so parsing a file in
     isolation elsewhere produces a different id than the same file gets
-    when the real repo is parsed, and nothing would match target_node_ids.
+    when the real repo is parsed, and nothing would match to_node_ids.
 
     Returns (deleted_node_metadata, deleted_edges) in the same shapes
     analyze_impact already builds for regular nodes/edges. Never raises --
-    a base revision can contain content the installed Trailmark can't parse
+    a from_ref revision can contain content the installed Trailmark can't parse
     (syntax it doesn't support, a binary file, ...), which has nothing to
     do with whether the current analysis should succeed; any failure here
     just means deletions aren't detected for this run, logged not fatal.
 
-    Fetches every changed file's base-ref content concurrently -- each
+    Fetches every changed file's from_ref content concurrently -- each
     `git show` is independent and I/O-bound, so a diff touching thousands
     of files no longer pays thousands of sequential process-spawn round
     trips one at a time.
     """
     def fetch(rel_path: str) -> Optional[Tuple[str, str]]:
         result = subprocess.run(
-            ["git", "show", f"{base_ref}:{rel_path}"],
+            ["git", "show", f"{from_ref}:{rel_path}"],
             cwd=repo_path, capture_output=True, text=True,
         )
         if result.returncode != 0:
-            return None  # didn't exist at base_ref (a newly added file) -- nothing to compare
+            return None  # didn't exist at from_ref (a newly added file) -- nothing to compare
         return rel_path, result.stdout
 
     try:
@@ -85,7 +85,7 @@ def _find_deleted_nodes(
 
             deleted_metadata = {}
             for node_id, unit in base_graph.nodes.items():
-                if node_id in target_node_ids or unit.kind.value == 'proxy':
+                if node_id in to_node_ids or unit.kind.value == 'proxy':
                     continue
                 location = unit.location
                 # location.file_path points into tmp_dir, which is gone the
@@ -111,29 +111,29 @@ def _find_deleted_nodes(
             ]
             return deleted_metadata, deleted_edges
     except Exception as e:
-        log(f"Skipping deleted-node detection: could not parse {base_ref} ({e})")
+        log(f"Skipping deleted-node detection: could not parse {from_ref} ({e})")
         return {}, []
 
 
 def analyze_impact(
     repo_path: str,
     depth: int = 1,
-    base: str = None,
-    target: str = None,
+    from_ref: str = None,
+    to_ref: str = None,
     language: str = "auto",
     log: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """
     `repo_path` must already be checked out at the state to be indexed: the
     caller is responsible for pointing it at a worktree checked out to
-    `target` when diffing two commits, so that node locations/contents line
-    up with the line numbers `git diff base target` reports.
+    `to_ref` when diffing two commits, so that node locations/contents line
+    up with the line numbers `git diff from_ref to_ref` reports.
     """
     log = log or (lambda msg: None)
 
     analysis_root = os.path.abspath(repo_path)
 
-    modified_files_lines = get_modified_lines(analysis_root, base, target, log=log)
+    modified_files_lines = get_modified_lines(analysis_root, from_ref, to_ref, log=log)
     log(f"git diff found {len(modified_files_lines)} modified file(s):")
     for f, lines in modified_files_lines.items():
         log(f"  {f}: {len(lines)} line(s) changed -> {sorted(lines.keys())}")
@@ -203,22 +203,22 @@ def analyze_impact(
         log(f"Hop {hop + 1}/{depth}: added {len(next_frontier)} node(s), frontier now {len(subgraph_nodes)} total")
         current_frontier = next_frontier
 
-    # 3. Deleted nodes -- present in the base revision, absent from the
-    # target graph entirely (not just outside the traversal depth above).
+    # 3. Deleted nodes -- present in the from_ref revision, absent from the
+    # to-side graph entirely (not just outside the traversal depth above).
     # Always treated as seeds, like modified/added, since a deletion is
     # itself the primary change of interest, not something reached by
     # traversing from one.
-    effective_base = base or "HEAD"
-    changed_file_paths = get_changed_file_paths(analysis_root, base, target, log=log)
+    effective_from_ref = from_ref or "HEAD"
+    changed_file_paths = get_changed_file_paths(analysis_root, from_ref, to_ref, log=log)
     deleted_metadata, deleted_edges = _find_deleted_nodes(
-        analysis_root, changed_file_paths, effective_base, set(graph_nodes.keys()), language, log,
+        analysis_root, changed_file_paths, effective_from_ref, set(graph_nodes.keys()), language, log,
     )
     if deleted_metadata:
-        log(f"Found {len(deleted_metadata)} deleted node(s) (present in {effective_base}, absent from the current tree)")
+        log(f"Found {len(deleted_metadata)} deleted node(s) (present in {effective_from_ref}, absent from the current tree)")
         subgraph_nodes.update(deleted_metadata.keys())
         node_metadata.update(deleted_metadata)
 
-    # Extract edges for subgraph -- base-revision edges included (filtered
+    # Extract edges for subgraph -- from_ref revision edges included (filtered
     # by the same rule) so deleted nodes still connect to whatever
     # surviving node used to contain or call them. Deduplicated: a node that
     # exists unchanged on both sides (e.g. the module containing a deleted

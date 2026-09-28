@@ -16,26 +16,29 @@ pipx install zairo
 # Scan whatever you haven't committed yet
 zairo .
 
+# Scan what the latest commit changed
+zairo . --from HEAD~1 --to HEAD
+
 # Scan a PR/branch diff
-zairo . --base main --target HEAD
+zairo . --from main --to HEAD
 
 # Fail the build if anything high-severity turns up
-zairo . --base main --target HEAD --fail-on high
+zairo . --from main --to HEAD --fail-on high
 ```
 
 Give it more than one repo, as extra arguments or one per line in a `--repos-file` (or both, merged into one list), and it switches to **multi-repo mode** on its own: every repo gets its own report, plus one combined summary.
 ```bash
-zairo backend frontend infra --base main --fail-on high -o zairo_multi_out
+zairo backend frontend infra --from main --fail-on high -o zairo_multi_out
 ```
 
-`--base`/`--target` (and every other option) apply the same way to every repo in the list, so multi-repo mode fits best when they all diff against the same thing (e.g. everyone's `main`). Repos with different conventions need separate runs.
+`--from`/`--to` (and every other option) apply the same way to every repo in the list, so multi-repo mode fits best when they all diff against the same thing (e.g. everyone's `main`). Repos with different conventions need separate runs.
 
 ### Flags
 
 **What to scan**
 
-- `--base`, `-b` *(none)*: ref to diff from, e.g. `main` or `HEAD~3`. Left out, `zairo` scans uncommitted changes instead: staged, unstaged, and new untracked files (anything `.gitignore`d is skipped).
-- `--target`, `-t` *(none)*: ref to diff to. Needs `--base`; left out (with `--base` set), it diffs against your working tree.
+- `--from`, `-f` *(none)*: ref to diff from (the older side), e.g. `main` or `HEAD~3`. Left out, `zairo` scans uncommitted changes instead: staged, unstaged, and new untracked files (anything `.gitignore`d is skipped).
+- `--to`, `-t` *(none)*: ref to diff to (the newer side), e.g. `HEAD` or a branch. Needs `--from`, and errors without it; left out (with `--from` set), it diffs against your working tree.
 - `--depth`, `-d` *(1)*: how many hops of callers/callees to pull into the impact graph around each change.
 - `--language`, `-l` *(auto)*: force a language instead of letting Trailmark auto-detect it.
 
@@ -74,7 +77,7 @@ Multi-repo mode produces the same three files per repo, plus `rollup.json` / `ro
 
 ### Deleted code
 
-A function/class/module removed entirely (not just edited) still shows up in `report.html`, with status `deleted`: a dashed, faded node marking where it used to live. Trailmark's graph can't represent this on its own (it only ever reflects the tree as it stands now), so `zairo` detects deletions separately: it also parses the changed files as they existed at `--base` (or `HEAD`, if `--base` wasn't given) and diffs the two symbol sets. A deleted function is never sent to the LLM scanner (there's no live code left to scan), so it carries only its name, kind, and former location, never findings.
+A function/class/module removed entirely (not just edited) still shows up in `report.html`, with status `deleted`: a dashed, faded node marking where it used to live. Trailmark's graph can't represent this on its own (it only ever reflects the tree as it stands now), so `zairo` detects deletions separately: it also parses the changed files as they existed at `--from` (or `HEAD`, if `--from` wasn't given) and diffs the two symbol sets. A deleted function is never sent to the LLM scanner (there's no live code left to scan), so it carries only its name, kind, and former location, never findings.
 
 ## CI / PR gating
 
@@ -88,7 +91,7 @@ knowing:
   failed gate, so a scanning UI reflects the current state either way.
 
 ```bash
-zairo . --base "$BASE_REF" --target HEAD --fail-on high -o zairo_out
+zairo . --from "$BASE_REF" --to HEAD --fail-on high -o zairo_out
 ```
 
 See [examples/github-actions/zairo-pr-scan.yml](examples/github-actions/zairo-pr-scan.yml)

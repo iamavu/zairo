@@ -12,7 +12,7 @@ def _run_git(repo: Path, *args: str) -> None:
 def git_repo(tmp_path: Path) -> Path:
     """A throwaway git repo with two commits: an initial safe version of
     test.py, then a commit that introduces a command-injection vulnerability.
-    The working tree is left clean (HEAD == target commit)."""
+    The working tree is left clean (HEAD == the vulnerable commit)."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _run_git(repo, "init", "-q")

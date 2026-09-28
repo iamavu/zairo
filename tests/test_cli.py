@@ -13,7 +13,7 @@ def test_single_repo_writes_a_direct_report(git_repo: Path, tmp_path: Path):
     output_dir = tmp_path / "out"
     result = runner.invoke(
         app,
-        [str(git_repo), "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir), "--graph-only"],
+        [str(git_repo), "--from", "HEAD~1", "--to", "HEAD", "--output", str(output_dir), "--graph-only"],
     )
 
     assert result.exit_code == 0, result.output
@@ -28,11 +28,23 @@ def test_single_repo_fail_on_with_graph_only_is_rejected(git_repo: Path, tmp_pat
     output_dir = tmp_path / "out"
     result = runner.invoke(
         app,
-        [str(git_repo), "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir), "--graph-only", "--fail-on", "high"],
+        [str(git_repo), "--from", "HEAD~1", "--to", "HEAD", "--output", str(output_dir), "--graph-only", "--fail-on", "high"],
     )
 
     assert result.exit_code != 0
     assert "--fail-on requires LLM scanning" in result.output
+
+
+def test_to_without_from_is_rejected(git_repo: Path, tmp_path: Path):
+    """--to alone isn't a diff of anything -- without this check it would be
+    silently dropped, scanning uncommitted changes instead of the commit
+    that was actually asked for."""
+    output_dir = tmp_path / "out"
+    result = runner.invoke(app, [str(git_repo), "--to", "HEAD", "--output", str(output_dir), "--graph-only"])
+
+    assert result.exit_code != 0
+    assert "--to requires --from" in result.output
+    assert not output_dir.exists()  # rejected before any scan ran
 
 
 def test_multiple_positional_paths_trigger_multi_repo_mode(git_repo: Path, tmp_path: Path):
@@ -41,7 +53,7 @@ def test_multiple_positional_paths_trigger_multi_repo_mode(git_repo: Path, tmp_p
         app,
         [
             str(git_repo), str(git_repo),
-            "--base", "HEAD~1", "--target", "HEAD", "--output", str(output_dir), "--graph-only",
+            "--from", "HEAD~1", "--to", "HEAD", "--output", str(output_dir), "--graph-only",
         ],
     )
 

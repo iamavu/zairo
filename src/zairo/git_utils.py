@@ -12,8 +12,8 @@ def create_worktree(repo_path: str, ref: str) -> str:
     Checks out `ref` into a new temporary git worktree and returns its path.
 
     Used so that node locations/contents indexed by Trailmark line up with the
-    line numbers reported by `git diff base target` — those line numbers refer
-    to `target`'s tree, which may differ arbitrarily from whatever happens to
+    line numbers reported by `git diff from_ref to_ref` — those line numbers refer
+    to `to_ref`'s tree, which may differ arbitrarily from whatever happens to
     be checked out in the caller's working directory.
     """
     worktree_path = tempfile.mkdtemp(prefix="zairo-worktree-")
@@ -41,20 +41,20 @@ def remove_worktree(repo_path: str, worktree_path: str) -> None:
     )
 
 
-def _diff_refs(repo_path: str, base: Optional[str], target: Optional[str]) -> List[str]:
+def _diff_refs(repo_path: str, from_ref: Optional[str], to_ref: Optional[str]) -> List[str]:
     """The ref argument(s) to pass `git diff` for each mode:
 
-    - base + target: two commits (e.g. HEAD~3..HEAD).
-    - base only:     that commit vs the working tree.
-    - neither:       HEAD vs the working tree -- staged AND unstaged changes.
-                     A bare `git diff` compares against the index instead,
-                     so anything already `git add`ed would silently vanish
-                     from the scan.
+    - from_ref + to_ref: two commits (e.g. HEAD~3..HEAD).
+    - from_ref only:     that commit vs the working tree.
+    - neither:           HEAD vs the working tree -- staged AND unstaged
+                         changes. A bare `git diff` compares against the
+                         index instead, so anything already `git add`ed
+                         would silently vanish from the scan.
     """
-    if base and target:
-        return [base, target]
-    if base:
-        return [base]
+    if from_ref and to_ref:
+        return [from_ref, to_ref]
+    if from_ref:
+        return [from_ref]
     head = subprocess.run(
         ["git", "rev-parse", "--verify", "--quiet", "HEAD"],
         cwd=repo_path, capture_output=True, text=True,
@@ -118,17 +118,17 @@ def _untracked_file_lines(repo_path: str, log: Callable[[str], None]) -> Dict[st
 
 def get_changed_file_paths(
     repo_path: str,
-    base: str = None,
-    target: str = None,
+    from_ref: str = None,
+    to_ref: str = None,
     log: Optional[Callable[[str], None]] = None,
 ) -> List[str]:
     """Repo-relative paths of every file that changed (`git diff --name-only`),
     including a file deleted in its entirety -- unlike get_modified_lines,
-    which intentionally excludes those (there's no target-side line range
-    for a fully deleted file to anchor to). Untracked files aren't listed:
-    they didn't exist at the base, so they can't contain a deletion."""
+    which intentionally excludes those (there's no to-side line range for a
+    fully deleted file to anchor to). Untracked files aren't listed: they
+    didn't exist at from_ref, so they can't contain a deletion."""
     log = log or (lambda msg: None)
-    cmd = ["git", "diff", "--name-only"] + _diff_refs(repo_path, base, target)
+    cmd = ["git", "diff", "--name-only"] + _diff_refs(repo_path, from_ref, to_ref)
     result = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True)
     if result.returncode != 0:
         log(f"git diff --name-only failed (exit {result.returncode}): {result.stderr.strip()}")
@@ -138,38 +138,38 @@ def get_changed_file_paths(
 
 def get_modified_lines(
     repo_path: str,
-    base: str = None,
-    target: str = None,
+    from_ref: str = None,
+    to_ref: str = None,
     log: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Dict[int, str]]:
     """
     Parses `git diff -U0` to find which lines have been added/modified.
 
-    - No base/target: compares working tree vs HEAD (uncommitted changes,
-                      staged or not).
-    - base only:      compares working tree vs that commit.
-    - base + target:  compares two commits (e.g. HEAD~3..HEAD).
+    - Neither ref:       compares working tree vs HEAD (uncommitted changes,
+                         staged or not).
+    - from_ref only:     compares working tree vs that commit.
+    - from_ref + to_ref: compares two commits (e.g. HEAD~3..HEAD).
 
     In both working-tree modes, untracked (not .gitignore'd) files count
     too, with every line treated as added.
 
     Returns a dict mapping absolute file paths to a dict of
-    {target line number: representative changed text}. The text is used to
+    {to-side line number: representative changed text}. The text is used to
     cheaply filter out non-substantive changes (comments, blank lines)
     before spending an LLM call on them, and to build a windowed view of
     large functions instead of sending their full body.
 
     A hunk with zero added lines (a pure deletion, e.g. `@@ -11 +10,0 @@`)
-    has no "+" line to anchor to in the target tree, but the enclosing node
+    has no "+" line to anchor to in the to-side tree, but the enclosing node
     still changed — a deleted validation check or sanitization call is
     exactly the kind of change a security scan most needs to catch. Those
     are recorded under a synthetic marker at the deletion's boundary line
-    in the target file, with the removed text as its value, so the
+    in the to-side file, with the removed text as its value, so the
     enclosing node is still found instead of silently skipped.
     """
     log = log or (lambda msg: None)
 
-    cmd = ["git", "diff", "-U0"] + _diff_refs(repo_path, base, target)
+    cmd = ["git", "diff", "-U0"] + _diff_refs(repo_path, from_ref, to_ref)
     log(f"Running: {' '.join(cmd)} (cwd={repo_path})")
     result = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True)
 
@@ -198,8 +198,8 @@ def get_modified_lines(
                 rel_path = line[6:]
                 current_file = os.path.abspath(os.path.join(repo_path, rel_path))
             else:
-                # "+++ /dev/null": the whole file was deleted in the target.
-                # There's no target-side file to attribute this hunk to, and
+                # "+++ /dev/null": the whole file was deleted on the to side.
+                # There's no to-side file to attribute this hunk to, and
                 # without resetting this, a stale current_file from the
                 # PREVIOUS file section in the diff would silently absorb
                 # this file's content -- a genuine cross-file data leak.
@@ -229,7 +229,7 @@ def get_modified_lines(
 
     flush_pending_deletion()
 
-    if not (base and target):
+    if not (from_ref and to_ref):
         untracked = _untracked_file_lines(repo_path, log)
         if untracked:
             log(f"Including {len(untracked)} untracked file(s), every line as added")

@@ -31,7 +31,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           zairo . \
-            --base "origin/${{ github.base_ref }}" --target HEAD \
+            --from "origin/${{ github.base_ref }}" --to HEAD \
             --fail-on high \
             --output zairo_out
         continue-on-error: true

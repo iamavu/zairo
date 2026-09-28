@@ -28,6 +28,15 @@ def _require_llm_for_fail_on(fail_on: Optional[Severity], llm: bool) -> None:
         raise typer.Exit(1)
 
 
+def _require_from_for_to(from_ref: Optional[str], to_ref: Optional[str]) -> None:
+    # Without --from there's no two-commit diff for --to to be one side of,
+    # so it would otherwise be silently dropped -- scanning uncommitted
+    # changes instead of the commits that were actually asked for.
+    if to_ref and not from_ref:
+        console.print("[bold red]Error:[/bold red] --to requires --from (e.g. --from HEAD~1 --to HEAD).")
+        raise typer.Exit(1)
+
+
 def _severity_gate_failure(vulnerabilities: dict, fail_on: Severity) -> Optional[str]:
     """The worst severity found, if it meets or exceeds fail_on's threshold
     -- None if the gate passes (including when there are no findings)."""
@@ -146,7 +155,7 @@ def _sum_token_usage(token_usages: List[dict]) -> dict:
 
 
 def _run_single_repo(
-    repo_path: str, output_dir: str, depth: int, base: Optional[str], target: Optional[str],
+    repo_path: str, output_dir: str, depth: int, from_ref: Optional[str], to_ref: Optional[str],
     language: str, llm: bool, model: str, concurrency: int, cache: bool, max_tokens: int,
     tokens: bool, fail_on: Optional[Severity], verbose: bool, debug: bool, batch_size: int,
 ) -> bool:
@@ -154,17 +163,17 @@ def _run_single_repo(
     directly to output_dir. Returns whether a --fail-on gate failed."""
     log, debug_log, close_debug_log = _make_loggers(output_dir, verbose, debug, indent="  · ")
 
-    if base and target:
-        console.print(f"[bold green]Analyzing {repo_path} at depth {depth} — diff {base}..{target}[/bold green]")
-    elif base:
-        console.print(f"[bold green]Analyzing {repo_path} at depth {depth} — diff {base}..working tree[/bold green]")
+    if from_ref and to_ref:
+        console.print(f"[bold green]Analyzing {repo_path} at depth {depth} — diff {from_ref}..{to_ref}[/bold green]")
+    elif from_ref:
+        console.print(f"[bold green]Analyzing {repo_path} at depth {depth} — diff {from_ref}..working tree[/bold green]")
     else:
         console.print(f"[bold green]Analyzing {repo_path} at depth {depth} — uncommitted changes[/bold green]")
 
     cache_path = os.path.join(output_dir, ".llm_cache.json") if (llm and cache) else None
     try:
         result = run_scan(
-            repo_path, output_dir, depth, base, target, language, llm, model, concurrency,
+            repo_path, output_dir, depth, from_ref, to_ref, language, llm, model, concurrency,
             cache_path, max_tokens, log=log, on_event=_single_repo_on_event, debug_log=debug_log,
             batch_size=batch_size,
         )
@@ -199,7 +208,7 @@ def _run_single_repo(
 
 
 def _run_multi_repo(
-    paths: List[str], output_dir: str, depth: int, base: Optional[str], target: Optional[str],
+    paths: List[str], output_dir: str, depth: int, from_ref: Optional[str], to_ref: Optional[str],
     language: str, llm: bool, model: str, concurrency: int, repo_concurrency: int, cache: bool,
     max_tokens: int, tokens: bool, fail_on: Optional[Severity], continue_on_error: bool, verbose: bool,
     debug: bool, batch_size: int,
@@ -222,7 +231,7 @@ def _run_multi_repo(
         log, debug_log, close_debug_log = _make_loggers(repo_output_dir, verbose, debug, indent="    · ")
         try:
             scan_result = run_scan(
-                repo_path, repo_output_dir, depth, base, target, language, llm, model, concurrency,
+                repo_path, repo_output_dir, depth, from_ref, to_ref, language, llm, model, concurrency,
                 cache_path, max_tokens, log=log, on_event=on_event, debug_log=debug_log,
                 batch_size=batch_size,
             )
@@ -342,8 +351,8 @@ def analyze(
     repos_file: str = typer.Option(None, "--repos-file", help="Text file with one repo path per line ('#' comments allowed), combined with any positional paths."),
     depth: int = typer.Option(1, "--depth", "-d", help="Depth of connections to traverse from changed nodes"),
     output_dir: str = typer.Option("zairo_out", "--output", "-o", help="Output directory (multi-repo mode: a subdirectory per repo, plus an aggregate rollup here)"),
-    base: str = typer.Option(None, "--base", "-b", help="Base commit/ref to diff from (e.g. HEAD~3, main, a1b2c3d)"),
-    target: str = typer.Option(None, "--target", "-t", help="Target commit/ref to diff to (e.g. HEAD, feature-branch). Requires --base."),
+    from_ref: str = typer.Option(None, "--from", "-f", help="Commit/ref to diff from, the older side (e.g. HEAD~3, main, a1b2c3d). Left out: HEAD vs your working tree, i.e. uncommitted changes."),
+    to_ref: str = typer.Option(None, "--to", "-t", help="Commit/ref to diff to, the newer side (e.g. HEAD, feature-branch). Requires --from. Left out: your working tree."),
     language: str = typer.Option("auto", "--language", "-l", help="Language for Trailmark parsing (auto, python, typescript, rust, etc.)"),
     graph_only: bool = typer.Option(False, "--graph-only", help="Skip the LLM vulnerability scan and only build the impact graph -- report.json/.html only, no report.sarif or findings"),
     model: str = typer.Option("gemini/gemini-2.5-pro", "--model", help="LiteLLM model string to use for scanning"),
@@ -363,6 +372,7 @@ def analyze(
     One repo produces a direct report; more than one (given positionally, via --repos-file, or both combined) switches to multi-repo mode -- each repo gets its own report plus an aggregate rollup."""
     llm = not graph_only
     verbose = verbose or debug
+    _require_from_for_to(from_ref, to_ref)
     _require_llm_for_fail_on(fail_on, llm)
 
     paths = list(repo_paths or [])
@@ -379,12 +389,12 @@ def analyze(
 
     if len(paths) == 1:
         should_fail = _run_single_repo(
-            paths[0], output_dir, depth, base, target, language, llm, model, concurrency,
+            paths[0], output_dir, depth, from_ref, to_ref, language, llm, model, concurrency,
             cache, max_tokens, tokens, fail_on, verbose, debug, batch_size,
         )
     else:
         should_fail = _run_multi_repo(
-            paths, output_dir, depth, base, target, language, llm, model, concurrency,
+            paths, output_dir, depth, from_ref, to_ref, language, llm, model, concurrency,
             repo_concurrency, cache, max_tokens, tokens, fail_on, continue_on_error, verbose, debug,
             batch_size,
         )

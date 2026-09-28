@@ -77,7 +77,7 @@ def test_gitignored_and_binary_untracked_files_are_skipped(git_repo: Path):
 
 
 def test_untracked_files_not_included_when_diffing_two_commits(git_repo: Path):
-    """base + target compares two commits -- whatever happens to be lying
+    """from_ref + to_ref compares two commits -- whatever happens to be lying
     around untracked in the working tree isn't part of either."""
     (git_repo / "new.py").write_text("def f():\n    pass\n")
 

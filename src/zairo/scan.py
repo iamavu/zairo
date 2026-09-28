@@ -29,8 +29,8 @@ def run_scan(
     repo_path: str,
     output_dir: str,
     depth: int = 1,
-    base: Optional[str] = None,
-    target: Optional[str] = None,
+    from_ref: Optional[str] = None,
+    to_ref: Optional[str] = None,
     language: str = "auto",
     llm: bool = False,
     model: str = "gemini/gemini-2.5-pro",
@@ -68,13 +68,13 @@ def run_scan(
     worktree_path = None
     analysis_root = abs_repo
     try:
-        if base and target:
-            log(f"Checking out '{target}' into a temporary worktree (base+target diff mode)...")
-            worktree_path = create_worktree(abs_repo, target)
+        if from_ref and to_ref:
+            log(f"Checking out '{to_ref}' into a temporary worktree (--from + --to diff mode)...")
+            worktree_path = create_worktree(abs_repo, to_ref)
             analysis_root = worktree_path
             log(f"Worktree ready at {worktree_path}")
 
-        graph_data = analyze_impact(analysis_root, depth, base, target, language, log=log)
+        graph_data = analyze_impact(analysis_root, depth, from_ref, to_ref, language, log=log)
         num_modified = sum(1 for n in graph_data['nodes'] if n['status'] in ('modified', 'added'))
         num_deleted = sum(1 for n in graph_data['nodes'] if n['status'] == 'deleted')
         on_event(
