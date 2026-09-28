@@ -1,4 +1,20 @@
-from zairo._util import max_severity, normalize_cwe, normalize_severity, severity_rank
+import pytest
+
+from zairo._util import is_test_file, max_severity, normalize_cwe, normalize_severity, severity_rank
+
+
+@pytest.mark.parametrize("path, expected", [
+    ("src/utils/__tests__/merge-with.spec.ts", True),
+    ("tests/test_app.py", True),
+    ("pkg/app_test.go", True),
+    ("web/index.test.js", True),
+    ("spec\\models\\user_spec.rb", True),
+    ("src/utils/merge-with.ts", False),
+    ("src/testing.py", False),
+    ("src/latest.py", False),
+])
+def test_is_test_file(path, expected):
+    assert is_test_file(path) is expected
 
 
 def test_normalize_severity_passes_through_known_values():

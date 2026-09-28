@@ -4,10 +4,9 @@ from unittest.mock import MagicMock
 import zairo
 import zairo.llm_scanner as llm_scanner
 
-# A real, short, non-test-named file to use as node source -- llm_scanner
-# skips anything it recognizes as a test file, and skips nodes whose source
-# can't be read at all, so the mocked litellm call would never actually
-# fire against a fake/test-shaped path.
+# A real, short file to use as node source -- llm_scanner skips nodes whose
+# source can't be read at all, so the mocked litellm call would never
+# actually fire against a fake path.
 _FAKE_FILE = zairo.__file__
 
 
@@ -410,7 +409,7 @@ def test_assessed_nodes_lists_every_node_with_a_valid_answer(monkeypatch, tmp_pa
     fake_litellm.completion.side_effect = answer
     monkeypatch.setattr(llm_scanner, "litellm", fake_litellm)
     monkeypatch.setattr(llm_scanner, "_ensure_litellm", lambda: fake_litellm)
-    skipped = dict(_node("n4", "fn_test"), file="tests/test_x.py")  # test files are never sent
+    skipped = dict(_node("n4", "fn_gone"), file=str(tmp_path / "missing.py"))  # no source, so never sent
     graph_data = {"nodes": [_node("n1", "fn_clean"), _node("n2", "fn_vuln"), _node("n3", "fn_fail"), skipped], "edges": []}
     cache_path = str(tmp_path / "cache.json")
 
@@ -657,15 +656,11 @@ def test_no_context_section_without_neighbors(monkeypatch):
 
 def test_skipped_nodes_record_why_they_were_not_scanned(monkeypatch, tmp_path):
     _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
-    spec = tmp_path / "__tests__" / "merge-with.spec.ts"
-    spec.parent.mkdir()
-    spec.write_text("it('merges', () => {})\n")
     settings = tmp_path / "settings.py"
     settings.write_text("# a comment\nos.system('ls')\n")
     nodes = [
         _node("n1", "fn_one"),
-        {"id": "t", "name": "__tests__/merge-with.spec.ts", "kind": "module", "file": str(spec), "start_line": 1,
-         "end_line": 1, "status": "modified", "diff_hunks": [{"start": 1, "removed": [], "added": ["it('merges', () => {})"]}]},
+        dict(_node("g", "fn_gone"), file=str(tmp_path / "missing.py")),
         {"id": "p", "name": "os.system", "kind": "proxy", "file": str(settings), "start_line": 2, "end_line": 2, "status": "modified"},
         {"id": "m", "name": "settings.py", "kind": "module", "file": str(settings), "start_line": 1, "end_line": 2,
          "status": "modified", "diff_hunks": [{"start": 1, "removed": [], "added": ["# a comment"]}]},
@@ -674,7 +669,7 @@ def test_skipped_nodes_record_why_they_were_not_scanned(monkeypatch, tmp_path):
     _, token_usage = llm_scanner.scan_graph_for_vulnerabilities({"nodes": nodes, "edges": []}, "fake-model", cache_path=None)
 
     assert token_usage["skipped_nodes"] == {
-        "t": "test file, not shipped code",
+        "g": "source not found",
         "p": "external call target, no source of its own",
         "m": "only comments or blank lines changed",
     }

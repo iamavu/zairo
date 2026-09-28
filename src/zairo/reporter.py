@@ -56,7 +56,7 @@ def generate_reports(
     `vulnerabilities` can't, since it only holds nodes with findings.
 
     `skipped_nodes` ({node id: reason}) are changed nodes the scan left out
-    on purpose (a test file, a comment-only change, ...). Each gets a
+    on purpose (a comment-only change, an external call target, ...). Each gets a
     'scan_skipped' reason, which report.html shows -- a bare "not scanned"
     on changed code reads like a failure."""
     os.makedirs(output_dir, exist_ok=True)

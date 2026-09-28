@@ -125,6 +125,38 @@ def test_deleted_modules_are_named_by_their_file_path(git_repo: Path):
     assert {n["name"] for n in graph["nodes"] if n["status"] == "deleted"} == {"old.helpers.py", "f"}
 
 
+def test_test_code_stays_out_of_the_graph(git_repo: Path):
+    """Neither a change to a test file nor a test calling changed code puts
+    test code in the graph -- or, through it, in the model's context."""
+    (git_repo / "tests").mkdir()
+    _commit_file(git_repo, "app.py", "def get_invoice(i, t):\n    return db.get(i, t)\n", "add app")
+    _commit_file(git_repo, "tests/test_app.py", "from app import get_invoice\n\n\ndef test_it():\n    assert get_invoice(1, 2)\n", "add test")
+    (git_repo / "app.py").write_text("def get_invoice(i, t):\n    return db.get(i)\n")
+    subprocess.run(["git", "add", "app.py"], cwd=git_repo, check=True, capture_output=True)
+    _commit_file(git_repo, "tests/test_app.py", "from app import get_invoice\n\n\ndef test_it():\n    assert get_invoice(1, 3)\n", "change both")
+
+    graph = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
+
+    names = {n["name"] for n in graph["nodes"] if n["kind"] != "proxy"}
+    assert {"app.py", "get_invoice"} <= names
+    assert not names & {"tests/test_app.py", "test_it"}
+
+
+def test_a_repo_inside_a_tests_directory_is_not_all_test_code(tmp_path: Path):
+    """Test code is recognized by its path within the repo, not by where the
+    repo itself happens to live."""
+    repo = tmp_path / "tests" / "svc"
+    repo.mkdir(parents=True)
+    for args in (["init", "-q"], ["config", "user.email", "t@e"], ["config", "user.name", "T"]):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    _commit_file(repo, "app.py", "def f():\n    return 1\n", "add app")
+    _commit_file(repo, "app.py", "def f():\n    return 2\n", "change app")
+
+    graph = analyze_impact(str(repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+
+    assert "f" in {n["name"] for n in graph["nodes"]}
+
+
 def test_no_deleted_nodes_when_nothing_was_deleted(git_repo: Path):
     """Diffing a ref against itself: nothing changed, so nothing should be
     reported as deleted either."""

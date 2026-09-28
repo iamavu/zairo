@@ -380,7 +380,7 @@ def test_reports_say_why_a_changed_symbol_was_not_scanned(git_repo: Path, tmp_pa
 
     def scan(graph_data, *args, **kwargs):
         usage = _scan_usage({})
-        usage["skipped_nodes"] = {n["id"]: "test file, not shipped code" for n in graph_data["nodes"] if n["name"] == "vulnerable_exec"}
+        usage["skipped_nodes"] = {n["id"]: "only comments or blank lines changed" for n in graph_data["nodes"] if n["name"] == "vulnerable_exec"}
         return {}, usage
 
     with patch("zairo.scan.scan_graph_for_vulnerabilities", side_effect=scan):
@@ -389,4 +389,4 @@ def test_reports_say_why_a_changed_symbol_was_not_scanned(git_repo: Path, tmp_pa
     assert result.exit_code == 0, result.output
     report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
     [node] = [n for n in report["nodes"] if n["name"] == "vulnerable_exec"]
-    assert node["scan_skipped"] == "test file, not shipped code"
+    assert node["scan_skipped"] == "only comments or blank lines changed"

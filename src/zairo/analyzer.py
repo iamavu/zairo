@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from trailmark import parse_directory
 from .git_utils import get_changed_file_paths, get_diff_hunks, hunk_lines, hunks_in_range
-from ._util import display_name as _display_name
+from ._util import display_name as _display_name, is_test_file
 
 # Cap on how many `git show` subprocesses run at once in _find_deleted_nodes.
 # Each is I/O-bound (process spawn + reading one blob out of git's object
@@ -27,6 +27,13 @@ def _edge_dict(edge, with_line: bool = True) -> Dict[str, Any]:
         "confidence": edge.confidence.value,
         "line": location.start_line if location and location.start_line > 0 else None,
     }
+
+
+def _in_test_file(file_path: str, root: str) -> bool:
+    try:
+        return is_test_file(os.path.relpath(file_path, root))
+    except ValueError:  # another drive, on Windows
+        return False
 
 
 def _node_name(unit, root: str) -> str:
@@ -170,6 +177,13 @@ def analyze_impact(
     log(f"git diff found {len(diff_hunks)} modified file(s):")
     for f, hunks in diff_hunks.items():
         log(f"  {f}: {len(hunks)} hunk(s) at line(s) {[hunk_lines(h)[0] for h in hunks]}")
+    # Test code stays out of the graph entirely (see _util.is_test_file):
+    # a change to it isn't a change to the attack surface.
+    changed_tests = [f for f in diff_hunks if _in_test_file(f, analysis_root)]
+    for f in changed_tests:
+        del diff_hunks[f]
+    if changed_tests:
+        log(f"Leaving out {len(changed_tests)} changed test file(s): test code isn't part of the graph")
 
     # Initialize Trailmark
     log(f"Indexing {analysis_root} with Trailmark (language={language})...")
@@ -178,14 +192,27 @@ def analyze_impact(
     # which QueryEngine.to_json() drops. The scanner needs that to show a
     # caller around where it calls the changed code.
     graph = parse_directory(analysis_root, language=language)
-    graph_edges = [_edge_dict(e) for e in graph.edges]
-    log(f"Trailmark graph: {len(graph.nodes)} node(s), {len(graph_edges)} edge(s)")
+    log(f"Trailmark graph: {len(graph.nodes)} node(s), {len(graph.edges)} edge(s)")
+    # Nor can traversal reach test code: a test calling changed code isn't a
+    # caller that matters to its security. Proxies (external call targets)
+    # sit at wherever Trailmark first saw them called, which may be a test,
+    # but belong to no file -- they stay.
+    test_nodes = {
+        node_id for node_id, unit in graph.nodes.items()
+        if unit.kind.value != 'proxy' and _in_test_file(unit.location.file_path, analysis_root)
+    }
+    graph_edges = [
+        _edge_dict(e) for e in graph.edges
+        if e.source_id not in test_nodes and e.target_id not in test_nodes
+    ]
 
     # 1. Identify seed nodes (modified/added)
     seed_nodes = set()
     node_metadata = {}
 
     for node_id, unit in graph.nodes.items():
+        if node_id in test_nodes:
+            continue
         location = unit.location
         node_metadata[node_id] = {
             "id": node_id,
@@ -236,7 +263,7 @@ def analyze_impact(
     # itself the primary change of interest, not something reached by
     # traversing from one.
     effective_from_ref = from_ref or "HEAD"
-    changed_file_paths = get_changed_file_paths(analysis_root, from_ref, to_ref)
+    changed_file_paths = [p for p in get_changed_file_paths(analysis_root, from_ref, to_ref) if not is_test_file(p)]
     deleted_metadata, deleted_edges = _find_deleted_nodes(
         analysis_root, changed_file_paths, effective_from_ref, set(graph.nodes), language, log,
     )

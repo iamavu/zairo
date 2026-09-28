@@ -181,11 +181,11 @@ def test_reports_say_why_a_symbol_was_not_scanned(tmp_path):
     """A bare "Not scanned" on changed code reads like a failed scan."""
     json_path, html_path, _ = generate_reports(
         _graph_data(str(tmp_path / "x.py")), str(tmp_path / "out"), {}, repo_root=str(tmp_path),
-        skipped_nodes={"n1": "test file, not shipped code"},
+        skipped_nodes={"n1": "only comments or blank lines changed"},
     )
 
     with open(json_path) as f:
-        assert json.load(f)["nodes"][0]["scan_skipped"] == "test file, not shipped code"
+        assert json.load(f)["nodes"][0]["scan_skipped"] == "only comments or blank lines changed"
     html = Path(html_path).read_text(encoding="utf-8")
     assert "Not scanned: ${escapeHtml(oneLine(d.scan_skipped))}." in html
     assert "Not scanned: unchanged, shown for context." in html

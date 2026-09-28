@@ -1,6 +1,28 @@
 import re
 from typing import Any, Dict, List, Optional
 
+# Test code isn't part of the shipped attack surface, so it's left out of
+# the graph entirely: never a changed symbol, never pulled in as a caller
+# of one -- and so never shown to the model, which would otherwise review
+# test scaffolding as if it were exploitable production code, or see a
+# well-tested function's test callers crowd out its real ones as context.
+_TEST_DIR_NAMES = {'test', 'tests', '__tests__', 'spec', 'specs'}
+_TEST_STEM_PREFIXES = ('test_', 'test-')
+_TEST_STEM_SUFFIXES = ('_test', '-test', '.test', '_spec', '-spec', '.spec')
+
+
+def is_test_file(rel_path: str) -> bool:
+    """Whether a repo-relative path is test code, by its directories or its
+    file name. Relative, so a repo that happens to live under a directory
+    named "tests" isn't all test code."""
+    parts = re.split(r'[/\\]', rel_path)
+    if any(p.lower() in _TEST_DIR_NAMES for p in parts[:-1]):
+        return True
+    # Strip exactly one extension so "index.test.ts" -> "index.test" (still
+    # matches the ".test" suffix) without over-stripping "test_utils.py".
+    stem = re.sub(r'\.[a-zA-Z0-9]+$', '', parts[-1]).lower()
+    return stem.startswith(_TEST_STEM_PREFIXES) or stem.endswith(_TEST_STEM_SUFFIXES)
+
 
 def display_name(name: Any, limit: int = 60) -> str:
     """Collapses a node name to one short line for log display. Some graph

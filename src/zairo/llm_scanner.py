@@ -34,27 +34,6 @@ from .git_utils import hunk_lines
 # real vulnerability finding — skip them before spending an LLM call.
 _COMMENT_PREFIXES = ("//", "#", "*", "/*", "<!--", "-->", "--", "'''", '"""')
 
-# Test files aren't part of the shipped attack surface. Scanning them tends
-# to produce either a duplicate of a finding already attached to the real
-# implementation they exercise, or a category error (treating mock/test
-# scaffolding as if it were exploitable production code) -- wasted LLM calls
-# for low-value output either way.
-_TEST_DIR_NAMES = {'test', 'tests', '__tests__', 'spec', 'specs'}
-_TEST_STEM_PREFIXES = ('test_', 'test-')
-_TEST_STEM_SUFFIXES = ('_test', '-test', '.test', '_spec', '-spec', '.spec')
-
-
-def _is_test_file(file_path: Optional[str]) -> bool:
-    if not file_path:
-        return False
-    parts = re.split(r'[/\\]', file_path)
-    if any(p.lower() in _TEST_DIR_NAMES for p in parts[:-1]):
-        return True
-    # Strip exactly one extension so "index.test.ts" -> "index.test" (still
-    # matches the ".test" suffix) without over-stripping "test_utils.py".
-    stem = re.sub(r'\.[a-zA-Z0-9]+$', '', parts[-1]).lower()
-    return stem.startswith(_TEST_STEM_PREFIXES) or stem.endswith(_TEST_STEM_SUFFIXES)
-
 # Functions larger than this get a windowed view around the changed lines
 # instead of their full body, so a one-line change in a 600-line function
 # doesn't cost 600 lines of prompt. Padding is generous on purpose: a tight
@@ -701,9 +680,6 @@ def scan_graph_for_vulnerabilities(
             # into the prompt and produces findings misattributed to code
             # that was never touched by this diff.
             skip(mod_node, "external call target, no source of its own")
-            continue
-        if _is_test_file(mod_node.get('file')):
-            skip(mod_node, "test file, not shipped code")
             continue
         hunks = mod_node.get('diff_hunks') or []
         start, end = mod_node.get('start_line'), mod_node.get('end_line')
