@@ -122,10 +122,19 @@ def test_no_sarif_when_llm_scan_did_not_run(tmp_path: Path):
     assert not (output_dir / "report.sarif").exists()
 
 
-@pytest.mark.parametrize("findings, scanned_ids", [(None, []), ({}, []), ({"n1": []}, ["n1"])])
-def test_html_distinguishes_unscanned_symbols_from_clean_scans(tmp_path, findings, scanned_ids):
+@pytest.mark.parametrize("findings, assessed, scanned_ids", [
+    (None, None, []),      # --graph-only: no scan at all
+    ({}, [], []),          # scan ran, but this symbol was never sent (skipped / context)
+    ({}, ["n1"], ["n1"]),  # scanned clean: no findings, yet assessed
+])
+def test_html_distinguishes_unscanned_symbols_from_clean_scans(tmp_path, findings, assessed, scanned_ids):
+    """What the scanner assessed comes from assessed_nodes, not from the
+    findings dict -- the scanner only puts nodes *with* findings in there,
+    so a symbol scanned clean would otherwise read as "Not scanned"."""
     graph_data = _graph_data(str(tmp_path / "x.py"))
-    _, html_path, _ = generate_reports(graph_data, str(tmp_path / "out"), findings, repo_root=str(tmp_path))
+    _, html_path, _ = generate_reports(
+        graph_data, str(tmp_path / "out"), findings, repo_root=str(tmp_path), assessed_nodes=assessed,
+    )
 
     html = Path(html_path).read_text(encoding="utf-8")
     metadata = json.loads(re.search(r"const reportMeta = (.+);", html).group(1))

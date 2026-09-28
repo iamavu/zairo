@@ -410,7 +410,10 @@ def scan_graph_for_vulnerabilities(
     requests/requests_without_usage so a caller can tell whether the token
     totals are complete or partial (e.g. some providers don't report it),
     and failed_nodes ({node id: error}) -- any entry at all means the scan
-    is incomplete.
+    is incomplete -- and assessed_nodes, the ids of every node that did get
+    a valid answer (from the model or the cache), findings or not: the only
+    way to tell "scanned clean" apart from "never scanned", since
+    `vulnerabilities` only holds nodes with findings.
     With batch_size > 1, 'requests' counts actual API calls, not nodes --
     that's the whole point of batching, so it's the number that should drop.
 
@@ -438,6 +441,7 @@ def scan_graph_for_vulnerabilities(
             log(msg)
 
     vulnerabilities = {}
+    assessed_nodes = []
     nodes = {n['id']: n for n in graph_data['nodes']}
     edges = graph_data['edges']
     cache = _load_cache(cache_path)
@@ -541,6 +545,7 @@ def scan_graph_for_vulnerabilities(
         cached = cache.get(prompt_hash)
         if cached is not None:
             log(f"  cache hit: {_display_name(mod_node['name'])} ({len(cached)} finding(s))")
+            assessed_nodes.append(mod_node['id'])
             if cached:
                 vulnerabilities[mod_node['id']] = cached
             continue
@@ -689,6 +694,7 @@ def scan_graph_for_vulnerabilities(
         # -- what makes a scan incomplete. The reports mark these nodes, and
         # --fail-on refuses to pass a scan that has any.
         'failed_nodes': {},
+        'assessed_nodes': assessed_nodes,  # cache hits so far; successful calls added below
     }
 
     if jobs:
@@ -717,6 +723,7 @@ def scan_graph_for_vulnerabilities(
                         token_usage['errors'][error_message] = token_usage['errors'].get(error_message, 0) + 1
                         continue  # request failed; don't cache a non-result
                     cache[prompt_hash] = findings
+                    assessed_nodes.append(node_id)
                     if findings:
                         vulnerabilities[node_id] = findings
 

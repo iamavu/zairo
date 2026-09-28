@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -241,7 +242,7 @@ def test_multi_repo_tokens_sums_usage_across_repos(make_git_repo, tmp_path: Path
 
     fake_usage = {
         "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
-        "requests": 1, "requests_without_usage": 0, "errors": {}, "failed_nodes": {},
+        "requests": 1, "requests_without_usage": 0, "errors": {}, "failed_nodes": {}, "assessed_nodes": [],
     }
 
     with patch("zairo.scan.scan_graph_for_vulnerabilities", return_value=({}, fake_usage)):
@@ -314,7 +315,7 @@ def _scan_usage(failed_nodes: dict) -> dict:
     return {
         "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "requests": 1,
         "requests_without_usage": 1, "nodes_scanned": len(failed_nodes) or 1,
-        "errors": errors, "failed_nodes": failed_nodes,
+        "errors": errors, "failed_nodes": failed_nodes, "assessed_nodes": [],
     }
 
 
@@ -355,3 +356,18 @@ def test_multi_repo_fail_on_fails_when_any_repo_scan_is_incomplete(make_git_repo
 
     assert result.exit_code != 0
     assert "scan is incomplete" in result.output
+
+
+def test_report_html_marks_what_the_scan_assessed(git_repo: Path, tmp_path: Path):
+    """End to end: the scanner's assessed_nodes has to reach report.html,
+    or every symbol scanned clean reads as "Not scanned"."""
+    usage = _scan_usage({})
+    usage["assessed_nodes"] = ["some-node-id"]
+    output_dir = tmp_path / "out"
+    with patch("zairo.scan.scan_graph_for_vulnerabilities", return_value=({}, usage)):
+        result = runner.invoke(app, [str(git_repo), "--from", "HEAD~1", "--to", "HEAD", "--output", str(output_dir)])
+
+    assert result.exit_code == 0, result.output
+    html = (output_dir / "report.html").read_text(encoding="utf-8")
+    metadata = json.loads(re.search(r"const reportMeta = (.+);", html).group(1))
+    assert metadata["scanned_node_ids"] == ["some-node-id"]

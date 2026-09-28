@@ -36,6 +36,7 @@ def generate_reports(
     tool_version: str = "0.0.0",
     repo_name: str = None,
     failed_nodes: dict = None,
+    assessed_nodes: list = None,
 ):
     """Returns (json_path, html_path, sarif_path). sarif_path is None unless
     an LLM scan actually ran (vulnerabilities is not None, including when it
@@ -46,7 +47,12 @@ def generate_reports(
     assess. Each gets a 'scan_error' in report.json, whose top-level
     'scan_complete' is then false, and report.sarif marks its run as not
     executed successfully -- so neither can read as a clean result for code
-    nobody actually reviewed."""
+    nobody actually reviewed.
+
+    `assessed_nodes` are the ids the scan did get an answer for, findings
+    or not. report.html needs them to tell a symbol that was scanned clean
+    from one that was never scanned at all (skipped, or just context) --
+    `vulnerabilities` can't, since it only holds nodes with findings."""
     os.makedirs(output_dir, exist_ok=True)
     failed_nodes = failed_nodes or {}
 
@@ -73,7 +79,7 @@ def generate_reports(
             "repo_root": os.path.abspath(repo_root) if repo_root else "",
             "repo_name": repo_name or (os.path.basename(os.path.abspath(repo_root)) if repo_root else ""),
             "scan_performed": vulnerabilities is not None,
-            "scanned_node_ids": list(vulnerabilities or {}),
+            "scanned_node_ids": list(assessed_nodes or []),
         }),
     )
 

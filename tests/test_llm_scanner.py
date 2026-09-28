@@ -387,3 +387,34 @@ def test_changing_the_prompt_invalidates_cached_verdicts(monkeypatch, tmp_path):
     monkeypatch.setattr(llm_scanner, "_build_prompt", lambda *a: build_prompt(*a) + "\nNew instruction.")
     llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=cache_path)
     assert fake_litellm.completion.call_count == 2  # prompt changed: cache miss
+
+
+def test_assessed_nodes_lists_every_node_with_a_valid_answer(monkeypatch, tmp_path):
+    """Clean answers, answers with findings, and cache hits all count as
+    assessed; a failed node doesn't -- and neither does a skipped one."""
+    fake_litellm = MagicMock()
+
+    def answer(model, messages, max_tokens):
+        prompt = messages[0]["content"]
+        response = MagicMock()
+        response.choices[0].finish_reason = "stop"
+        response.usage = None
+        response.choices[0].message.content = (
+            '{"vulnerabilities": [{"title": "X", "severity": "high"}]}' if "fn_vuln" in prompt
+            else '{"message": "unable to assess"}' if "fn_fail" in prompt
+            else '{"vulnerabilities": []}'
+        )
+        return response
+
+    fake_litellm.completion.side_effect = answer
+    monkeypatch.setattr(llm_scanner, "litellm", fake_litellm)
+    monkeypatch.setattr(llm_scanner, "_ensure_litellm", lambda: fake_litellm)
+    skipped = dict(_node("n4", "fn_test"), file="tests/test_x.py")  # test files are never sent
+    graph_data = {"nodes": [_node("n1", "fn_clean"), _node("n2", "fn_vuln"), _node("n3", "fn_fail"), skipped], "edges": []}
+    cache_path = str(tmp_path / "cache.json")
+
+    _, first = llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=cache_path)
+    _, second = llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=cache_path)
+
+    assert sorted(first["assessed_nodes"]) == ["n1", "n2"]
+    assert sorted(second["assessed_nodes"]) == ["n1", "n2"]  # this time from the cache
