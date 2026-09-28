@@ -579,6 +579,82 @@ def test_batch_prompt_spells_out_the_finding_format(monkeypatch):
         assert field in prompt
 
 
+def _changed_callee_and_long_caller(tmp_path, call_lines):
+    """get_invoice (lines 1-2, changed) and view (lines 4-63), which calls it
+    at `call_lines` -- each padded with "step" lines around them."""
+    src = tmp_path / "views.py"
+    body = [f"    step_{ln} = {ln}" for ln in range(5, 64)]
+    for ln in call_lines:
+        body[ln - 5] = f"    invoice_{ln} = get_invoice(request.GET['id'])"
+    src.write_text("def get_invoice(invoice_id):\n    return Invoice.get(invoice_id)\n\ndef view(request):\n" + "\n".join(body) + "\n")
+    changed = {"id": "g", "name": "get_invoice", "kind": "function", "file": str(src), "start_line": 1, "end_line": 2,
+               "status": "modified", "diff_hunks": [{"start": 2, "removed": ["    return Invoice.get(invoice_id, tenant)"],
+                                                     "added": ["    return Invoice.get(invoice_id)"]}]}
+    caller = {"id": "v", "name": "view", "kind": "function", "file": str(src), "start_line": 4, "end_line": 63,
+              "status": "unchanged"}
+    edge = {"source": "v", "target": "g", "kind": "calls", "confidence": "certain", "lines": call_lines}
+    return {"nodes": [changed, caller], "edges": [edge]}
+
+
+def test_long_caller_is_shown_around_where_it_calls_the_changed_code(monkeypatch, tmp_path):
+    """The call is on line 50 of a 60-line caller: the first 30 lines -- all
+    the context used to show -- would never reach it."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+
+    llm_scanner.scan_graph_for_vulnerabilities(_changed_callee_and_long_caller(tmp_path, [50]), "fake-model", cache_path=None)
+
+    [prompt] = _prompts(fake_litellm)
+    context = prompt.split("Related code, for context")[1]
+    assert "Caller: view -- shown around where it calls get_invoice\n" in context
+    assert "def view(request):" in context  # the signature
+    assert "invoice_50 = get_invoice(request.GET['id'])" in context
+    assert "step_40 = 40" in context and "step_55 = 55" in context  # what comes before and after the call
+    assert "step_20 = 20" not in context and "step_60 = 60" not in context
+
+
+def test_caller_call_sites_beyond_the_budget_are_counted_not_shown(monkeypatch, tmp_path):
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+
+    llm_scanner.scan_graph_for_vulnerabilities(_changed_callee_and_long_caller(tmp_path, [20, 40, 60]), "fake-model", cache_path=None)
+
+    [prompt] = _prompts(fake_litellm)
+    context = prompt.split("Related code, for context")[1]
+    assert "invoice_20 =" in context
+    assert "invoice_40 =" not in context and "invoice_60 =" not in context
+    assert "(2 more call site(s) not shown)" in context
+
+
+def test_neighbors_are_labeled_by_how_they_relate_and_deleted_ones_skipped(monkeypatch, tmp_path):
+    """A deleted neighbor's lines point into the old version of its file --
+    reading them from the file as it is now would show unrelated code. A
+    proxy (external call target) sits at the call site: its "code" is just
+    the calling line, already shown."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    src = tmp_path / "app.py"
+    src.write_text("def check(x):\n    return x\n\ndef handle(y):\n    return check(y)\n")
+    handle = {"id": "h", "name": "handle", "kind": "function", "file": str(src), "start_line": 4, "end_line": 5,
+              "status": "modified", "diff_hunks": [{"start": 5, "removed": ["    return y"], "added": ["    return check(y)"]}]}
+    check = {"id": "c", "name": "check", "kind": "function", "file": str(src), "start_line": 1, "end_line": 2, "status": "unchanged"}
+    gone = {"id": "d", "name": "old_guard", "kind": "function", "file": str(src), "start_line": 1, "end_line": 2, "status": "deleted"}
+    proxy = {"id": "p", "name": "os.system", "kind": "proxy", "file": str(src), "start_line": 5, "end_line": 5, "status": "modified"}
+    edges = [{"source": "h", "target": target, "kind": "calls", "confidence": "certain", "lines": [5]} for target in ("c", "d", "p")]
+
+    llm_scanner.scan_graph_for_vulnerabilities({"nodes": [handle, check, gone, proxy], "edges": edges}, "fake-model", cache_path=None)
+
+    [prompt] = _prompts(fake_litellm)
+    assert "Callee: check\n```\ndef check(x):\n    return x\n```" in prompt
+    assert "old_guard" not in prompt and "os.system" not in prompt
+
+
+def test_no_context_section_without_neighbors(monkeypatch):
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+
+    llm_scanner.scan_graph_for_vulnerabilities({"nodes": [_node("n1", "fn_one")], "edges": []}, "fake-model", cache_path=None)
+
+    [prompt] = _prompts(fake_litellm)
+    assert "Related code" not in prompt
+
+
 def test_replacing_module_code_with_a_comment_is_not_trivial(monkeypatch, tmp_path):
     """Only comments were *added* -- but real code was removed, which is
     exactly the kind of change that must not be skipped."""

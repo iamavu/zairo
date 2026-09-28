@@ -1,11 +1,9 @@
-import json
 import os
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from trailmark import parse_directory
-from trailmark.query.api import QueryEngine
 from .git_utils import get_changed_file_paths, get_diff_hunks, hunk_lines, hunks_in_range
 from ._util import display_name as _display_name
 
@@ -15,6 +13,20 @@ from ._util import display_name as _display_name
 # unbounded pool on a diff touching tens of thousands of files would spawn
 # that many git processes simultaneously.
 _MAX_GIT_SHOW_WORKERS = 32
+
+
+def _edge_dict(edge, with_line: bool = True) -> Dict[str, Any]:
+    """A Trailmark edge as a plain dict. `line` is where in the source node's
+    file the edge occurs -- for a call, the call site -- when Trailmark
+    knows it (it reports 0 for "unknown" in places)."""
+    location = edge.location if with_line else None
+    return {
+        "source": edge.source_id,
+        "target": edge.target_id,
+        "kind": edge.kind.value,
+        "confidence": edge.confidence.value,
+        "line": location.start_line if location and location.start_line > 0 else None,
+    }
 
 
 def _find_deleted_nodes(
@@ -105,9 +117,15 @@ def _find_deleted_nodes(
                     "status": "deleted",
                 }
 
+            # Only edges touching a deleted node: an edge between two nodes
+            # that both survive is the to-side graph's to report -- a
+            # from_ref one would show a call the change removed as still
+            # there. No lines either: they'd point into from_ref's copy of
+            # the file, not the one on disk.
             deleted_edges = [
-                {"source": e.source_id, "target": e.target_id, "kind": e.kind.value, "confidence": e.confidence.value}
+                _edge_dict(e, with_line=False)
                 for e in base_graph.edges
+                if e.source_id in deleted_metadata or e.target_id in deleted_metadata
             ]
             return deleted_metadata, deleted_edges
     except Exception as e:
@@ -140,45 +158,40 @@ def analyze_impact(
 
     # Initialize Trailmark
     log(f"Indexing {analysis_root} with Trailmark (language={language})...")
-    engine = QueryEngine.from_directory(analysis_root, language=language)
-    # engine.to_json() is Trailmark's public serialization of the graph --
-    # unlike reaching into engine._store._graph (two layers of underscore-
-    # prefixed internals with no stability contract; even Trailmark's own
-    # to_json() has to do that same reach internally, with a lint
-    # suppression acknowledging it's not meant to be public), this is the
-    # one interface Trailmark commits to keeping working. indent=None since
-    # the pretty-printing is wasted work on a string we immediately reparse.
-    graph = json.loads(engine.to_json(indent=None))
-    graph_nodes: Dict[str, Any] = graph["nodes"]  # {node_id: unit_dict}
-    graph_edges = graph["edges"]  # [{"source", "target", "kind", "confidence", ...}]
-    log(f"Trailmark graph: {len(graph_nodes)} node(s), {len(graph_edges)} edge(s)")
+    # parse_directory() is Trailmark's public parser entry point, and its
+    # CodeGraph keeps each edge's location -- the call site, for a call --
+    # which QueryEngine.to_json() drops. The scanner needs that to show a
+    # caller around where it calls the changed code.
+    graph = parse_directory(analysis_root, language=language)
+    graph_edges = [_edge_dict(e) for e in graph.edges]
+    log(f"Trailmark graph: {len(graph.nodes)} node(s), {len(graph_edges)} edge(s)")
 
     # 1. Identify seed nodes (modified/added)
     seed_nodes = set()
     node_metadata = {}
 
-    for node_id, unit in graph_nodes.items():
-        location = unit["location"]
+    for node_id, unit in graph.nodes.items():
+        location = unit.location
         node_metadata[node_id] = {
             "id": node_id,
-            "name": unit["name"],
-            "kind": unit["kind"],
-            "file": location["file_path"],
-            "start_line": location["start_line"],
-            "end_line": location["end_line"],
-            "complexity": unit["cyclomatic_complexity"],
+            "name": unit.name,
+            "kind": unit.kind.value,
+            "file": location.file_path,
+            "start_line": location.start_line,
+            "end_line": location.end_line,
+            "complexity": unit.cyclomatic_complexity,
             "status": "unchanged" # default
         }
 
-        if location["file_path"] in diff_hunks:
-            start = location["start_line"]
-            end = location["end_line"]
-            node_hunks = hunks_in_range(diff_hunks[location["file_path"]], start, end)
+        if location.file_path in diff_hunks:
+            start = location.start_line
+            end = location.end_line
+            node_hunks = hunks_in_range(diff_hunks[location.file_path], start, end)
             if node_hunks:
                 seed_nodes.add(node_id)
                 node_metadata[node_id]["status"] = "modified"
                 node_metadata[node_id]["diff_hunks"] = node_hunks
-                log(f"  seed: {_display_name(node_metadata[node_id]['name'])} ({location['file_path']}:{start}-{end}), {len(node_hunks)} hunk(s)")
+                log(f"  seed: {_display_name(node_metadata[node_id]['name'])} ({location.file_path}:{start}-{end}), {len(node_hunks)} hunk(s)")
 
     log(f"Identified {len(seed_nodes)} seed node(s)")
 
@@ -210,7 +223,7 @@ def analyze_impact(
     effective_from_ref = from_ref or "HEAD"
     changed_file_paths = get_changed_file_paths(analysis_root, from_ref, to_ref)
     deleted_metadata, deleted_edges = _find_deleted_nodes(
-        analysis_root, changed_file_paths, effective_from_ref, set(graph_nodes.keys()), language, log,
+        analysis_root, changed_file_paths, effective_from_ref, set(graph.nodes), language, log,
     )
     if deleted_metadata:
         log(f"Found {len(deleted_metadata)} deleted node(s) (present in {effective_from_ref}, absent from the current tree)")
@@ -219,20 +232,23 @@ def analyze_impact(
 
     # Extract edges for subgraph -- from_ref revision edges included (filtered
     # by the same rule) so deleted nodes still connect to whatever
-    # surviving node used to contain or call them. Deduplicated: a node that
-    # exists unchanged on both sides (e.g. the module containing a deleted
-    # function) contributes the identical edge from both graph_edges and
-    # deleted_edges.
-    seen_edges = set()
-    final_edges = []
+    # surviving node used to contain or call them. Deduplicated, since
+    # Trailmark emits one edge per call site: each edge appears once, with
+    # `lines` listing every place in its source's file where it occurs.
+    merged_edges: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
     for edge in (graph_edges + deleted_edges):
         if edge["source"] not in subgraph_nodes or edge["target"] not in subgraph_nodes:
             continue
         key = (edge["source"], edge["target"], edge["kind"], edge["confidence"])
-        if key in seen_edges:
-            continue
-        seen_edges.add(key)
-        final_edges.append({"source": edge["source"], "target": edge["target"], "kind": edge["kind"], "confidence": edge["confidence"]})
+        merged = merged_edges.setdefault(key, {
+            "source": edge["source"], "target": edge["target"], "kind": edge["kind"],
+            "confidence": edge["confidence"], "lines": [],
+        })
+        if edge["line"] is not None and edge["line"] not in merged["lines"]:
+            merged["lines"].append(edge["line"])
+    final_edges = list(merged_edges.values())
+    for edge in final_edges:
+        edge["lines"].sort()
 
     nodes = []
     for n_id in subgraph_nodes:

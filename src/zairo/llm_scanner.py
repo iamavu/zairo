@@ -5,7 +5,7 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
-from typing import Callable, Dict, List, Optional, Tuple, Any
+from typing import Callable, Dict, List, Optional, Set, Tuple, Any
 
 # `litellm` transitively imports the openai/anthropic SDKs and their full
 # Pydantic type trees (~3s). Import it lazily, only once actual scanning
@@ -68,6 +68,13 @@ _GUARD_HEAD_LINES = 15
 
 # Neighbor (caller/callee) context is for orientation, not full audit — cap it.
 _NEIGHBOR_MAX_LINES = 30
+# A caller longer than that is shown around where it calls the changed code
+# instead of from the top: what it checks before the call, and what it does
+# with the result, decide whether a flaw there is reachable. Its first few
+# lines (the signature) stay in for orientation.
+_NEIGHBOR_HEAD_LINES = 3
+_CALL_SITE_BEFORE = 10
+_CALL_SITE_AFTER = 5
 
 # Reasoning ("thinking") models count their internal reasoning tokens against
 # this same budget. Too low a cap can make the model exhaust it mid-thought
@@ -118,6 +125,17 @@ def _numbered_source(file_path: Optional[str], start_line: Optional[int], end_li
     return [f"{n:>{_GUTTER}} | {text}" for n, text in zip(numbers, lines)], numbers
 
 
+def _merged(ranges: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    """Inclusive line ranges, sorted, with overlapping/adjacent ones joined."""
+    out = []
+    for lo, hi in sorted(ranges):
+        if out and lo <= out[-1][1] + 1:
+            out[-1] = (out[-1][0], max(out[-1][1], hi))
+        else:
+            out.append((lo, hi))
+    return out
+
+
 def _windowed_source(file_path: str, start_line: int, end_line: int, changed_line_numbers: List[int]) -> Tuple[str, List[int]]:
     """Full body for small functions; a padded window around changed lines for
     large ones, plus the function's head (signature + early guard clauses)
@@ -128,19 +146,10 @@ def _windowed_source(file_path: str, start_line: int, end_line: int, changed_lin
         lines, shown = _numbered_source(file_path, start_line, end_line)
         return "\n".join(lines), shown
 
-    ranges = []
-
-    def add_range(lo, hi):
-        if ranges and lo <= ranges[-1][1] + 1:
-            ranges[-1] = (ranges[-1][0], max(ranges[-1][1], hi))
-        else:
-            ranges.append((lo, hi))
-
-    add_range(start_line, min(end_line, start_line + _GUARD_HEAD_LINES - 1))
-    for ln in sorted(set(changed_line_numbers)):
-        lo = max(start_line, ln - _WINDOW_PADDING)
-        hi = min(end_line, ln + _WINDOW_PADDING)
-        add_range(lo, hi)
+    ranges = _merged(
+        [(start_line, min(end_line, start_line + _GUARD_HEAD_LINES - 1))]
+        + [(max(start_line, ln - _WINDOW_PADDING), min(end_line, ln + _WINDOW_PADDING)) for ln in changed_line_numbers]
+    )
 
     chunks, shown = [], []
     for lo, hi in ranges:
@@ -277,18 +286,105 @@ def _collapse_nested_definitions(
     return "\n".join(out), shown
 
 
-def _neighbor_snippet(n: Dict[str, Any]) -> Optional[str]:
+def _neighbor_code(n: Dict[str, Any], call_lines: List[int]) -> Tuple[str, bool]:
+    """A neighbor's code for the prompt, and whether it's cut down to the
+    places it calls the changed code. Short ones are shown whole; a long
+    caller as its signature plus a window around each such call, as many as
+    fit in _NEIGHBOR_MAX_LINES; anything else long as its first
+    _NEIGHBOR_MAX_LINES lines. Not numbered: findings cite the changed
+    code's lines, never a neighbor's."""
     # .get() throughout: a neighbor can be a malformed/dangling graph node
     # missing these fields entirely (see analyzer.py's subgraph-assembly
     # fallback) -- treat it as having no known source rather than crashing.
-    code = get_source_code(n.get('file'), n.get('start_line'), n.get('end_line'))
-    if not code.strip():
+    lines = get_source_code(n.get('file'), n.get('start_line'), n.get('end_line')).splitlines()
+    if not any(line.strip() for line in lines):
+        return "", False
+    if len(lines) <= _NEIGHBOR_MAX_LINES:
+        return "\n".join(lines), False
+
+    first = n.get('start_line') or 1
+    last = first + len(lines) - 1
+    sites = sorted({ln for ln in call_lines if first <= ln <= last})
+    if not sites:
+        ranges = [(first, first + _NEIGHBOR_MAX_LINES - 1)]
+    else:
+        ranges = [(first, first + _NEIGHBOR_HEAD_LINES - 1)]
+    omitted = 0
+    for i, ln in enumerate(sites):
+        window = (max(first, ln - _CALL_SITE_BEFORE), min(last, ln + _CALL_SITE_AFTER))
+        candidate = _merged(ranges + [window])
+        # The first call site always goes in; later ones only while they fit.
+        if i and sum(hi - lo + 1 for lo, hi in candidate) > _NEIGHBOR_MAX_LINES:
+            omitted += 1
+            continue
+        ranges = candidate
+
+    code = "\n...\n".join("\n".join(lines[lo - first:hi - first + 1]) for lo, hi in ranges)
+    if ranges[-1][1] < last:
+        code += "\n..."
+    if omitted:
+        code += f"\n... ({omitted} more call site(s) not shown)"
+    return code, bool(sites)
+
+
+# How a neighbor relates to the changed code, for its label in the prompt.
+_ROLE_LABELS = {"caller": "Caller", "callee": "Callee"}
+
+
+def _neighbor_snippet(n: Dict[str, Any], roles: Set[str], call_lines: List[int], mod_name: str) -> Optional[str]:
+    code, around_calls = _neighbor_code(n, call_lines)
+    if not code:
         return None
-    lines = code.splitlines()
-    if len(lines) > _NEIGHBOR_MAX_LINES:
-        truncated = len(lines) - _NEIGHBOR_MAX_LINES
-        code = "\n".join(lines[:_NEIGHBOR_MAX_LINES]) + f"\n... ({truncated} more line(s) truncated)"
-    return f"Function: {n.get('name', '?')}\n```\n{code}\n```"
+    label = ", ".join(_ROLE_LABELS.get(role, f"Related ({role})") for role in sorted(roles, key=lambda r: (r not in _ROLE_LABELS, r)))
+    header = f"{label}: {n.get('name', '?')}"
+    if n.get('status') in ('modified', 'added'):
+        header += " (also changed in this change)"
+    if around_calls:
+        header += f" -- shown around where it calls {mod_name}"
+    return f"{header}\n```\n{code}\n```"
+
+
+def _neighbor_contexts(mod_node: Dict[str, Any], nodes: Dict[str, Dict[str, Any]], edges: List[Dict[str, Any]]) -> List[str]:
+    """The code around a changed node that the prompt shows for context:
+    its direct callers and callees, and whatever else it's linked to."""
+    roles: Dict[str, Set[str]] = {}
+    call_lines: Dict[str, List[int]] = {}
+    for e in edges:
+        kind = e.get('kind')
+        # "contains" edges are structural nesting (module -> its functions),
+        # not a caller/callee relationship -- pulling a contained child's
+        # full body in here as "context" would (a) re-leak exactly the
+        # content the collapse step excludes from a module's own scan,
+        # reintroducing the duplicate-attribution bug, and (b) for a
+        # function node, pointlessly pull in its enclosing module's source
+        # under a "Callers/Callees" label where it doesn't belong.
+        if kind == 'contains':
+            continue
+        if e['source'] == mod_node['id']:
+            other, role = e['target'], ('callee' if kind == 'calls' else kind)
+        elif e['target'] == mod_node['id']:
+            other, role = e['source'], ('caller' if kind == 'calls' else kind)
+            if kind == 'calls':
+                call_lines.setdefault(other, []).extend(e.get('lines') or [])
+        else:
+            continue
+        roles.setdefault(other, set()).add(role or 'unknown')
+
+    # sorted(): the prompt, and so its cache key, can't depend on edge
+    # order. Skipped: a deleted neighbor, whose line numbers point into the
+    # old version of its file, so reading them now would show unrelated
+    # code -- and what the change removed is in the diff already; and a
+    # proxy (an external/unresolved call target like `fs.unlinkSync`), whose
+    # only "source" is the call expression in this node -- shown already.
+    contexts = []
+    for n_id in sorted(roles):
+        n = nodes.get(n_id)
+        if n is None or n_id == mod_node['id'] or n.get('status') == 'deleted' or n.get('kind') == 'proxy':
+            continue
+        snippet = _neighbor_snippet(n, roles[n_id], call_lines.get(n_id, []), mod_node['name'])
+        if snippet:
+            contexts.append(snippet)
+    return contexts
 
 
 _TRACEBACK_MARKER = "Traceback (most recent call last):"
@@ -478,12 +574,14 @@ def _node_section(mod_node: Dict[str, Any], mod_code: str, diff_text: str, neigh
     and batch prompts so both always describe a node the same way."""
     kind_label = mod_node.get('kind') or 'function'
     diff_part = f"\n{diff_text}" if diff_text else ""
+    context_part = (
+        f"\nRelated code, for context (its callers, callees and other links):\n{chr(10).join(neighbor_contexts)}"
+        if neighbor_contexts else ""
+    )
     return f"""Modified {kind_label.capitalize()}: {mod_node['name']} (after the change)
 ```
 {mod_code}
-```{diff_part}
-Context Functions (Callers/Callees):
-{chr(10).join(neighbor_contexts)}"""
+```{diff_part}{context_part}"""
 
 
 def _build_prompt(mod_node: Dict[str, Any], section: str) -> str:
@@ -660,31 +758,7 @@ def scan_graph_for_vulnerabilities(
             if outline:
                 mod_code = outline + "\n\n" + mod_code
 
-        # "contains" edges are structural nesting (module -> its functions),
-        # not a caller/callee relationship -- pulling a contained child's
-        # full body in here as "context" would (a) re-leak exactly the
-        # content the collapse step above just excluded from a module's own
-        # scan, reintroducing the duplicate-attribution bug, and (b) for a
-        # function node, pointlessly pull in its enclosing module's source
-        # under a "Callers/Callees" label where it doesn't belong.
-        neighbor_ids = set()
-        for e in edges:
-            if e.get('kind') == 'contains':
-                continue
-            if e['source'] == mod_node['id']:
-                neighbor_ids.add(e['target'])
-            elif e['target'] == mod_node['id']:
-                neighbor_ids.add(e['source'])
-
-        # sorted(): the prompt, and so its cache key, can't depend on set
-        # iteration order, which changes from run to run.
-        neighbor_contexts = []
-        for n_id in sorted(neighbor_ids):
-            if n_id in nodes and n_id != mod_node['id']:
-                snippet = _neighbor_snippet(nodes[n_id])
-                if snippet:
-                    neighbor_contexts.append(snippet)
-
+        neighbor_contexts = _neighbor_contexts(mod_node, nodes, edges)
         diff_text = _diff_section(hunks, fully_added, mod_node.get('kind') or 'function')
         section = _node_section(mod_node, mod_code, diff_text, neighbor_contexts)
 

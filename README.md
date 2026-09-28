@@ -69,7 +69,7 @@ Run `zairo --help` any time for this same list from the CLI.
 
 ## Output files
 
-- **`report.json`** *(always)*: the raw impact graph (nodes, edges, and any attached findings), as data. Each changed node carries its `diff_hunks`: the lines the change removed and added there, which is also what the model is shown alongside the code. After a vulnerability scan, `scan_complete` says whether every node got assessed, and each one that didn't carries a `scan_error` saying why. Each finding has a `title`, `description`, `impact`, `severity` and `cwe`, plus:
+- **`report.json`** *(always)*: the raw impact graph (nodes, edges, and any attached findings), as data. Each changed node carries its `diff_hunks`: the lines the change removed and added there, which is also what the model is shown alongside the code. Each edge carries `lines`: where in its source's file it occurs (for a call, every call site), when Trailmark knows. The model sees a long caller around those call sites rather than from the top. After a vulnerability scan, `scan_complete` says whether every node got assessed, and each one that didn't carries a `scan_error` saying why. Each finding has a `title`, `description`, `impact`, `severity` and `cwe`, plus:
   - `line`: the line it's about. The model is shown numbered code, and a line it cites is kept only if it was one of those shown; otherwise it's `null`.
   - `introduced_by_change`: `true` if this change introduced it or made it reachable (for example by removing a check), `false` if it was already there.
   - `trigger`: who can trigger it, and how.
