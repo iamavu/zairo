@@ -59,7 +59,7 @@ def _print_scan_errors(token_usage: dict, indent: str = "") -> None:
         return
     total_failed = sum(errors.values())
     console.print(
-        f"{indent}[bold red]Warning:[/bold red] {total_failed}/{token_usage['nodes_scanned']} node scan(s) failed "
+        f"{indent}[bold red]Warning:[/bold red] {total_failed} of {token_usage['nodes_scanned']} symbol(s) couldn't be assessed "
         f"— results may be incomplete:"
     )
     for message, count in sorted(errors.items(), key=lambda kv: -kv[1])[:3]:
@@ -70,9 +70,8 @@ def _print_scan_errors(token_usage: dict, indent: str = "") -> None:
 
 def _single_repo_on_event(event: str, **kw) -> None:
     if event == "graph_built":
-        console.print(f"[bold blue]Found {kw['num_modified']} modified/added node(s), {kw['num_deleted']} deleted node(s).[/bold blue]")
-        console.print(f"[bold blue]Total nodes in subgraph: {kw['num_nodes']}[/bold blue]")
-        console.print(f"[bold blue]Total edges in subgraph: {kw['num_edges']}[/bold blue]")
+        console.print(f"[bold blue]Found {kw['num_modified']} changed symbol(s), {kw['num_deleted']} deleted symbol(s).[/bold blue]")
+        console.print(f"[bold blue]Graph: {kw['num_nodes']} symbol(s), {kw['num_edges']} connection(s).[/bold blue]")
     elif event == "llm_scan_started":
         console.print(f"[bold yellow]Running LLM scanner using {escape(kw['model'])} (concurrency={kw['concurrency']})...[/bold yellow]")
     elif event == "llm_scan_done":
@@ -81,7 +80,7 @@ def _single_repo_on_event(event: str, **kw) -> None:
         else:
             console.print(
                 f"[bold yellow]Found {kw['num_vulnerabilities']} vulnerability(s) "
-                f"in {kw['num_vulnerable_nodes']} node(s).[/bold yellow]"
+                f"in {kw['num_vulnerable_nodes']} symbol(s).[/bold yellow]"
             )
         _print_scan_errors(kw['token_usage'])
 
@@ -198,7 +197,7 @@ def _run_single_repo(
             if num_failed:
                 should_fail = True
                 console.print(
-                    f"[bold red]Gate failed:[/bold red] the scan is incomplete -- {num_failed} node(s) "
+                    f"[bold red]Gate failed:[/bold red] the scan is incomplete -- {num_failed} symbol(s) "
                     f"couldn't be assessed, and --fail-on only passes a complete scan."
                 )
         if tokens:
@@ -257,14 +256,14 @@ def _run_multi_repo(
 
             def on_event(event: str, **kw) -> None:
                 if event == "graph_built":
-                    console.print(f"    {kw['num_modified']} modified/added node(s), {kw['num_deleted']} deleted node(s); {kw['num_nodes']} node(s), {kw['num_edges']} edge(s) in subgraph")
+                    console.print(f"    {kw['num_modified']} changed symbol(s), {kw['num_deleted']} deleted symbol(s); graph: {kw['num_nodes']} symbol(s), {kw['num_edges']} connection(s)")
                 elif event == "llm_scan_started":
                     console.print(f"    running LLM scan ({escape(kw['model'])})...")
                 elif event == "llm_scan_done":
                     if kw['num_vulnerabilities'] == 0:
                         console.print("    found 0 vulnerabilities")
                     else:
-                        console.print(f"    found {kw['num_vulnerabilities']} vulnerability(s) in {kw['num_vulnerable_nodes']} node(s)")
+                        console.print(f"    found {kw['num_vulnerabilities']} vulnerability(s) in {kw['num_vulnerable_nodes']} symbol(s)")
                     _print_scan_errors(kw['token_usage'], indent="    ")
 
             entry = scan_one(repo_path, slug, on_event)
@@ -302,10 +301,10 @@ def _run_multi_repo(
                     sr = entry["result"]
                     num_modified = sum(1 for n in sr.graph_data['nodes'] if n['status'] in ('modified', 'added'))
                     num_deleted = sum(1 for n in sr.graph_data['nodes'] if n['status'] == 'deleted')
-                    summary = f"{num_modified} modified/added node(s), {num_deleted} deleted node(s)"
+                    summary = f"{num_modified} changed symbol(s), {num_deleted} deleted symbol(s)"
                     if llm:
                         num_vulns = sum(len(findings) for findings in (sr.vulnerabilities or {}).values())
-                        summary += f", found {num_vulns} vulnerability(s) in {len(sr.vulnerabilities or {})} node(s)"
+                        summary += f", found {num_vulns} vulnerability(s) in {len(sr.vulnerabilities or {})} symbol(s)"
                     console.print(f"[bold cyan][{completed}/{len(paths)}][/bold cyan] {escape(entry['repo'])} — {summary}")
                     if llm:
                         _print_scan_errors(sr.token_usage, indent="    ")
@@ -353,7 +352,7 @@ def _run_multi_repo(
         if num_failed:
             should_fail = True
             console.print(
-                f"[bold red]Gate failed:[/bold red] the scan is incomplete -- {num_failed} node(s) "
+                f"[bold red]Gate failed:[/bold red] the scan is incomplete -- {num_failed} symbol(s) "
                 f"across all repos couldn't be assessed, and --fail-on only passes a complete scan."
             )
 
@@ -372,15 +371,15 @@ def analyze(
     graph_only: bool = typer.Option(False, "--graph-only", help="Skip the LLM vulnerability scan and only build the impact graph -- report.json/.html only, no report.sarif or findings"),
     model: str = typer.Option("gemini/gemini-2.5-pro", "--model", help="LiteLLM model string to use for scanning"),
     concurrency: int = typer.Option(5, "--concurrency", "-c", help="Number of LLM requests to run in parallel, per repo"),
-    batch_size: int = typer.Option(1, "--batch-size", help="Group this many nodes into a single LLM request instead of one call per node -- fewer requests (helps with provider rate limits), at the cost of shared fault isolation: a bad/malformed response fails every node in that batch, not just one. Caching stays per-node either way."),
+    batch_size: int = typer.Option(1, "--batch-size", help="Group this many symbols into a single LLM request instead of one call per symbol -- fewer requests (helps with provider rate limits), at the cost of shared fault isolation: a bad/malformed response fails every symbol in that batch, not just one. Caching stays per-symbol either way."),
     repo_concurrency: int = typer.Option(1, "--repo-concurrency", help="Multi-repo mode: how many repos to scan in parallel"),
-    cache: bool = typer.Option(True, "--cache/--no-cache", help="Cache LLM findings by content hash to skip re-scanning unchanged nodes across runs"),
+    cache: bool = typer.Option(True, "--cache/--no-cache", help="Cache LLM findings by content hash to skip re-scanning unchanged symbols across runs"),
     max_tokens: int = typer.Option(4096, "--max-tokens", help="Max output tokens per LLM scan request. Reasoning models count internal thinking against this budget too — too low can cause empty responses"),
     tokens: bool = typer.Option(False, "--tokens", help="Show total LLM tokens used across real API calls (cache hits don't count)"),
     fail_on: Severity = typer.Option(None, "--fail-on", help="Exit with a non-zero status if any finding at or above this severity is found -- for gating CI/PR checks. Errors if combined with --graph-only."),
     continue_on_error: bool = typer.Option(True, "--continue-on-error/--stop-on-error", help="Multi-repo mode: keep scanning remaining repos if one fails (default), instead of aborting the run"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Print detailed diagnostic output (git commands, worktree setup, node matching, per-node LLM scan progress)"),
-    debug: bool = typer.Option(False, "-vv", "--debug", help="Maximum verbosity: everything --verbose prints, plus the exact prompt sent to the LLM and its raw response for every node -- written to <output>/debug.log (too much to print to the console). Implies --verbose."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Print detailed diagnostic output (git commands, worktree setup, symbol matching, per-symbol LLM scan progress)"),
+    debug: bool = typer.Option(False, "-vv", "--debug", help="Maximum verbosity: everything --verbose prints, plus the exact prompt sent to the LLM and its raw response for every symbol -- written to <output>/debug.log (too much to print to the console). Implies --verbose."),
 ):
     """Diffs one or more repos, builds the impact graph around what changed, and runs an LLM vulnerability scan on it. Pass --graph-only to skip the scan and only build the graph.
 

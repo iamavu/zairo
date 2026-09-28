@@ -125,7 +125,7 @@ ROLLUP_HTML_TEMPLATE = """
                     <td></td>
                 {% else %}
                   {% if r.scan_complete is sameas false %}
-                    <td><span class="badge status-incomplete" title="{{ r.num_failed_nodes }} node(s) could not be assessed">incomplete</span></td>
+                    <td><span class="badge status-incomplete" title="{{ r.num_failed_nodes }} symbol(s) could not be assessed">incomplete</span></td>
                   {% else %}
                     <td><span class="badge status-ok">ok</span></td>
                   {% endif %}

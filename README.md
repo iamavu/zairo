@@ -47,7 +47,7 @@ zairo backend frontend infra --from main --fail-on high -o zairo_multi_out
 - `--graph-only` *(off)*: skip the vulnerability scan and only build the impact graph -- no findings, no `report.sarif`.
 - `--model` *(`gemini/gemini-2.5-pro`)*: any [LiteLLM model string](https://docs.litellm.ai/docs/providers).
 - `--concurrency`, `-c` *(5)*: parallel LLM requests, within one repo's scan.
-- `--batch-size` *(1)*: group this many nodes into a single LLM request instead of one call per node -- fewer requests (helps with provider rate limits), at the cost of shared fault isolation: a bad/malformed response fails every node in that batch, not just one. Caching stays per-node either way.
+- `--batch-size` *(1)*: group this many symbols into a single LLM request instead of one call per symbol -- fewer requests (helps with provider rate limits), at the cost of shared fault isolation: a bad/malformed response fails every symbol in that batch, not just one. Caching stays per-symbol either way.
 - `--max-tokens` *(4096)*: output budget per request. Reasoning models burn this on internal thinking too, so raise it if you see empty responses.
 - `--cache` / `--no-cache` *(cache on)*: skip re-scanning code that's unchanged since the last run (cached by content hash in `<output>/.llm_cache.json`).
 - `--tokens` *(off)*: print how many tokens the scan actually used (cache hits don't count, since they made no call).
@@ -55,9 +55,9 @@ zairo backend frontend infra --from main --fail-on high -o zairo_multi_out
 **Output & gating**
 
 - `--output`, `-o` *(`zairo_out`)*: where the reports go. Multi-repo mode: each repo gets its own `<output>/<repo-slug>/`, plus a combined `rollup.*` here too.
-- `--fail-on` *(none)*: exit non-zero if a finding at or above this severity turns up (`low`/`medium`/`high`/`critical`), or if the scan is incomplete (any node the model couldn't assess). Errors if combined with `--graph-only` (nothing to gate on). Multi-repo mode: checked across all repos combined. See [CI / PR gating](#ci--pr-gating).
-- `--verbose`, `-v` *(off)*: print what's happening step by step (git commands, worktree setup, per-node scan progress).
-- `--debug`, `-vv` *(off)*: everything `--verbose` prints, plus the exact prompt sent to the LLM and its raw response for every node -- written to `<output>/debug.log` (per-repo in multi-repo mode), since it's too much to print to the console.
+- `--fail-on` *(none)*: exit non-zero if a finding at or above this severity turns up (`low`/`medium`/`high`/`critical`), or if the scan is incomplete (any symbol the model couldn't assess). Errors if combined with `--graph-only` (nothing to gate on). Multi-repo mode: checked across all repos combined. See [CI / PR gating](#ci--pr-gating).
+- `--verbose`, `-v` *(off)*: print what's happening step by step (git commands, worktree setup, per-symbol scan progress).
+- `--debug`, `-vv` *(off)*: everything `--verbose` prints, plus the exact prompt sent to the LLM and its raw response for every symbol -- written to `<output>/debug.log` (per-repo in multi-repo mode), since it's too much to print to the console.
 
 **Multi-repo mode only**
 
