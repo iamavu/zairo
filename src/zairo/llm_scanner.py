@@ -30,7 +30,8 @@ def _ensure_litellm():
 from ._util import display_name as _display_name, normalize_confidence, normalize_cwe, normalize_severity
 from .git_utils import hunk_lines
 from .notes import (
-    build_notes_prompt, format_note, is_notable, is_partial, load_notes, note_key, save_notes, validated_note,
+    NOTE_MAX_LINES, build_notes_prompt, format_note, is_notable, is_partial, load_notes, note_key, save_notes,
+    validated_note,
 )
 
 # Comment/blank-only diffs (docs, version bumps, log messages) can't produce a
@@ -1161,8 +1162,50 @@ def scan_graph_for_vulnerabilities(
 
 
 # Functions noted per --warm-up request: notes are short, so batching them
-# saves most of the requests' repeated instructions.
+# saves most of the requests' repeated instructions. Capped by lines of
+# code too: ten long methods make a big request, and a reasoning model
+# thinks at length about it, out of the same --max-tokens as the answer.
 _NOTES_PER_REQUEST = 10
+_NOTES_LINES_PER_REQUEST = 400
+
+
+def _note_groups(items: List[Tuple[str, Tuple[Dict[str, Any], str]]]) -> List[list]:
+    """(key, (node, code)) items split into requests of at most
+    _NOTES_PER_REQUEST functions and, past the first one in each,
+    _NOTES_LINES_PER_REQUEST lines."""
+    groups, lines_in_group = [], 0
+    for item in items:
+        lines = min(len(item[1][1].splitlines()), NOTE_MAX_LINES)
+        if groups and len(groups[-1]) < _NOTES_PER_REQUEST and lines_in_group + lines <= _NOTES_LINES_PER_REQUEST:
+            groups[-1].append(item)
+            lines_in_group += lines
+        else:
+            groups.append([item])
+            lines_in_group = lines
+    return groups
+
+
+_NOTE_LABEL_RE = re.compile(r'"(F\d+)"\s*:\s*(?=\{)')
+
+
+def _note_objects(content: str) -> Tuple[Dict[str, Any], Optional[str]]:
+    """The notes in a --warm-up response, by label -- and why, if it isn't
+    one whole JSON object. Each "F<n>": {...} is also read on its own, so a
+    response cut off partway still gives every note before the cut."""
+    try:
+        return _extract_json(content), None
+    except ValueError as e:
+        error = _summarize_error(e)
+    fixed = _fix_invalid_escapes(content)
+    found: Dict[str, Any] = {}
+    for m in _NOTE_LABEL_RE.finditer(fixed):
+        try:
+            value, _end = _JSON_DECODER.raw_decode(fixed, m.end())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            found.setdefault(m.group(1), value)
+    return found, error
 
 
 def write_notes(
@@ -1176,9 +1219,12 @@ def write_notes(
     on_event: Optional[Callable[..., None]] = None,
 ) -> Dict[str, Any]:
     """--warm-up: writes a note (see notes.py) for every function and method
-    in `nodes` that doesn't have one yet, _NOTES_PER_REQUEST to a request,
-    and saves them to `notes_path` -- also when interrupted, keeping the
-    ones done so far. Identical functions share one note. Returns counts:
+    in `nodes` that doesn't have one yet, several to a request (see
+    _note_groups), and saves them to `notes_path` -- also when interrupted,
+    keeping the ones done so far. Identical functions share one note. A
+    response cut off at max_tokens keeps the notes it finished, and the
+    functions it didn't get to go again in a request of their own, as long
+    as each such request still gets some written. Returns counts:
     written, cached (already had one), failed, requests, total_tokens, and
     errors ({message: number of functions it cost a note}).
 
@@ -1211,37 +1257,60 @@ def write_notes(
 
     stats = {"written": 0, "cached": cached, "failed": 0, "requests": 0, "total_tokens": 0, "errors": {}}
     on_event("notes_started", model=model, to_write=len(todo), cached=cached)
-    items = list(todo.items())
-    groups = [items[i:i + _NOTES_PER_REQUEST] for i in range(0, len(items), _NOTES_PER_REQUEST)]
+    groups = _note_groups(list(todo.items()))
+    cut_off_reason = (
+        f"response cut off at --max-tokens={max_tokens} (reasoning models spend it on thinking too) "
+        f"-- raise --max-tokens, e.g. to 16384, or use a model that thinks less"
+    )
 
-    def run(group):
-        """Returns ([(key, note or None, error or None)], total tokens)."""
-        prompt = build_notes_prompt([(n['name'], code) for _key, (n, code) in group])
-        label = f"notes for {len(group)} function(s): " + ", ".join(_display_name(n['name']) for _key, (n, _code) in group)
+    def ask(batch):
+        """One request for `batch`: (notes by label, parse error, whether the
+        response was cut off at max_tokens, tokens)."""
+        prompt = build_notes_prompt([(n['name'], code) for _key, (n, code) in batch])
+        label = f"notes for {len(batch)} function(s): " + ", ".join(_display_name(n['name']) for _key, (n, _code) in batch)
         if debug_log:
             debug_log(f"\n{'='*80}\nPROMPT -- {label}\n{'='*80}\n{prompt}\n")
-        tokens = 0
-        try:
-            response = litellm.completion(model=model, messages=[{"role": "user", "content": prompt}], max_tokens=max_tokens)
-            usage = getattr(response, 'usage', None)
-            tokens = (getattr(usage, 'total_tokens', 0) or 0) if usage is not None else 0
-            content = response.choices[0].message.content or ""
-            if debug_log:
-                debug_log(f"\n{'-'*80}\nRESPONSE -- {label}\n{'-'*80}\n{content}\n")
-            if not content.strip():
-                raise ValueError("model returned empty content -- try a higher --max-tokens")
-            parsed = _extract_json(content)
-        except Exception as e:
-            safe_log(f"  error writing {label}: {e}")
-            return [(key, None, _summarize_error(e)) for key, _ in group], tokens
-        results = []
-        for i, (key, (n, code)) in enumerate(group, 1):
-            note = validated_note(parsed.get(f"F{i}"))
-            if note is None:
-                results.append((key, None, "model gave no usable note for this function"))
-            else:
-                results.append((key, dict(note, partial=is_partial(code), model=model), None))
-        return results, tokens
+        response = litellm.completion(model=model, messages=[{"role": "user", "content": prompt}], max_tokens=max_tokens)
+        usage = getattr(response, 'usage', None)
+        tokens = (getattr(usage, 'total_tokens', 0) or 0) if usage is not None else 0
+        content = response.choices[0].message.content or ""
+        finish_reason = getattr(response.choices[0], 'finish_reason', None)
+        if debug_log:
+            debug_log(f"\n{'-'*80}\nRESPONSE -- {label} (finish_reason={finish_reason})\n{'-'*80}\n{content}\n")
+        if not content.strip():
+            return {}, "model returned empty content", finish_reason == "length", tokens
+        parsed, error = _note_objects(content)
+        return parsed, error, finish_reason == "length", tokens
+
+    def run(group):
+        """Returns ([(key, note or None, error or None)], tokens, requests)."""
+        results, tokens, requests, batch = [], 0, 0, group
+        while batch:
+            requests += 1
+            try:
+                parsed, error, cut_off, used = ask(batch)
+            except Exception as e:
+                safe_log(f"  error writing notes for {len(batch)} function(s): {e}")
+                results += [(key, None, _summarize_error(e)) for key, _ in batch]
+                break
+            tokens += used
+            left = []
+            for i, (key, (n, code)) in enumerate(batch, 1):
+                note = validated_note(parsed.get(f"F{i}"))
+                if note is None:
+                    left.append((key, (n, code)))
+                else:
+                    results.append((key, dict(note, partial=is_partial(code), model=model), None))
+            if left and cut_off and len(left) < len(batch):
+                safe_log(f"  response cut off after {len(batch) - len(left)} note(s); asking again for the other {len(left)}")
+                batch = left
+                continue
+            if left:
+                reason = cut_off_reason if cut_off else (error or "model gave no usable note for this function")
+                safe_log(f"  no note for {len(left)} function(s): {reason}")
+                results += [(key, None, reason) for key, _ in left]
+            break
+        return results, tokens, requests
 
     try:
         if groups:
@@ -1251,8 +1320,8 @@ def write_notes(
                 futures = [pool.submit(run, group) for group in groups]
                 try:
                     for done, future in enumerate(as_completed(futures), 1):
-                        results, tokens = future.result()
-                        stats["requests"] += 1
+                        results, tokens, requests = future.result()
+                        stats["requests"] += requests
                         stats["total_tokens"] += tokens
                         for key, note, error in results:
                             if note is None:
@@ -1261,7 +1330,7 @@ def write_notes(
                             else:
                                 notes[key] = note
                                 stats["written"] += 1
-                        safe_log(f"  notes: {done}/{len(groups)} request(s) done")
+                        safe_log(f"  notes: {done}/{len(groups)} batch(es) done")
                         on_event("notes_progress", done=stats["written"] + stats["failed"], total=len(todo))
                 except BaseException:
                     # Interrupted (Ctrl-C): leaving the pool waits for every

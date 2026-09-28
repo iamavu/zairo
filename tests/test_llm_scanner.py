@@ -834,6 +834,75 @@ def test_scan_reports_progress_per_request(monkeypatch):
     assert progress == [(0, 3), (1, 3), (2, 3), (3, 3)]
 
 
+def _note_json(labels) -> str:
+    return "{\n" + ",\n".join(f'  "{label}": {json.dumps(dict(_NOTE, does=f"note {label}"))}' for label in labels) + "\n}"
+
+
+def _cut_off_llm(monkeypatch, cut_after: int) -> MagicMock:
+    """Answers each note request with notes for all its labels, cut off (as
+    at max_tokens) partway into note number `cut_after + 1` -- unless that
+    covers them all."""
+    fake_litellm = MagicMock()
+
+    def complete(model, messages, max_tokens):
+        labels = re.findall(r"^=== (F\d+): ", messages[0]["content"], re.M)
+        response = MagicMock()
+        response.usage = None
+        full = _note_json(labels)
+        if len(labels) > cut_after:
+            cut = full.index(f'"{labels[cut_after]}"') + 30
+            response.choices[0].message.content, response.choices[0].finish_reason = full[:cut], "length"
+        else:
+            response.choices[0].message.content, response.choices[0].finish_reason = full, "stop"
+        return response
+
+    fake_litellm.completion.side_effect = complete
+    monkeypatch.setattr(llm_scanner, "litellm", fake_litellm)
+    monkeypatch.setattr(llm_scanner, "_ensure_litellm", lambda: fake_litellm)
+    return fake_litellm
+
+
+def test_note_objects_keeps_the_notes_before_a_cut():
+    content = _note_json(["F1", "F2", "F3"])
+    cut = content[:content.index('"F3"') + 40]
+
+    notes, error = llm_scanner._note_objects(cut)
+
+    assert set(notes) == {"F1", "F2"} and notes["F2"]["does"] == "note F2"
+    assert "could not find valid JSON" in error
+
+
+def test_warm_up_asks_again_for_the_functions_a_cut_off_response_missed(monkeypatch, tmp_path):
+    """A response cut off at max_tokens loses the notes after the cut, not
+    the whole batch -- and those get a request of their own."""
+    fake_litellm = _cut_off_llm(monkeypatch, cut_after=4)
+    notes_path = str(tmp_path / "notes.json")
+
+    stats = llm_scanner.write_notes(_functions(tmp_path, 10), "cheap-model", notes_path)
+
+    assert (stats["written"], stats["failed"], stats["requests"]) == (10, 0, 3)  # 4, then 4 of the other 6, then 2
+    assert [len(re.findall(r"^=== F\d+: ", p, re.M)) for p in _prompts(fake_litellm)] == [10, 6, 2]
+    assert len(notes.load_notes(notes_path)) == 10
+
+
+def test_warm_up_says_to_raise_max_tokens_when_nothing_fits(monkeypatch, tmp_path):
+    _cut_off_llm(monkeypatch, cut_after=0)
+
+    stats = llm_scanner.write_notes(_functions(tmp_path, 3), "cheap-model", str(tmp_path / "notes.json"), max_tokens=4096)
+
+    assert (stats["written"], stats["failed"], stats["requests"]) == (0, 3, 1)
+    [message] = stats["errors"]
+    assert "cut off at --max-tokens=4096" in message and "raise --max-tokens" in message
+
+
+def test_long_functions_are_noted_fewer_to_a_request():
+    items = [(f"k{i}", ({"id": f"f{i}", "name": f"f_{i}"}, "\n".join(["line"] * 150))) for i in range(4)]
+    small = [(f"s{i}", ({"id": f"s{i}", "name": f"s_{i}"}, "def s():\n    pass")) for i in range(12)]
+
+    assert [len(g) for g in llm_scanner._note_groups(items)] == [2, 2]  # 300 lines each, under 400
+    assert [len(g) for g in llm_scanner._note_groups(small)] == [10, 2]
+
+
 def test_warm_up_counts_functions_the_model_gave_no_note_for(monkeypatch, tmp_path):
     _fake_llm(monkeypatch, drop_labels=("F2",))
     notes_path = str(tmp_path / "notes.json")
