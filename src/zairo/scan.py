@@ -103,6 +103,7 @@ def run_scan(
         # structure, the resulting relative paths are the same either way.
         json_path, html_path, sarif_path = generate_reports(
             graph_data, output_dir, vulnerabilities, repo_root=analysis_root, tool_version=__version__,
+            repo_name=os.path.basename(abs_repo),
         )
 
         return ScanResult(

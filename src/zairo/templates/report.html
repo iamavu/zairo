@@ -1,0 +1,1192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Zairo Impact Analysis</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23191f21'/%3E%3Cpath d='M8 9h16L8 23h16M8 16h16' fill='none' stroke='%23b4dfc4' stroke-width='2'/%3E%3C/svg%3E">
+    <style>
+        :root {
+            --canvas: #111617;
+            --surface: #191f21;
+            --raised: #222b2d;
+            --hover: #283234;
+            --border: #303b3e;
+            --border-soft: #263033;
+            --text: #e8eeec;
+            --muted: #a3b0b2;
+            --quiet: #819295;
+            --accent: #b4dfc4;
+            --accent-wash: #263c32;
+            --status-added: #7ed4ac;
+            --status-modified: #82b7ef;
+            --status-unchanged: #85969b;
+            --status-deleted: #bfa1e7;
+            /* Fills and severity rings must remain distinct on the same node. */
+            --sev-critical: #ff949c;
+            --sev-high: #f5b783;
+            --sev-medium: #e5cf87;
+            --sev-low: #b4c2d5;
+            --shadow: 0 12px 36px #0005, 0 2px 8px #0003;
+            --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        }
+        * { box-sizing: border-box; }
+        [hidden] { display: none !important; }
+        body {
+            margin: 0; height: 100vh; height: 100dvh; overflow: hidden;
+            display: flex; flex-direction: column; background: var(--canvas); color: var(--text);
+            font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            -webkit-font-smoothing: antialiased;
+        }
+        button, input, select { font: inherit; }
+        button, summary, select { -webkit-tap-highlight-color: transparent; }
+        button { color: inherit; cursor: pointer; }
+        button:disabled { cursor: default; opacity: .35; }
+        button, a, summary, input, select { touch-action: manipulation; }
+        button, summary { transition: background 140ms ease, color 140ms ease, border-color 140ms ease; }
+        :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+        button:active:not(:disabled) { transform: translateY(1px); }
+        svg { width: 18px; height: 18px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+        h1, h2, h3, p { margin: 0; }
+        .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+        .muted { color: var(--muted); }
+        .workspace { flex: 1; min-height: 0; overflow: hidden; display: flex; position: relative; }
+        .navigator { flex: 0 0 312px; min-width: 0; display: flex; flex-direction: column; background: var(--surface); border-right: 1px solid var(--border); }
+        .review-head { padding: 24px 20px 0; }
+        .section-eyebrow { font-size: 11px; font-weight: 550; color: var(--muted); }
+        .search-box { display: flex; align-items: center; gap: 9px; padding: 0 10px; height: 40px; border: 1px solid var(--border); border-radius: 7px; background: var(--canvas); color: var(--quiet); }
+        .search-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px #b4dfc410; }
+        .search-box svg { width: 16px; height: 16px; }
+        #search { min-width: 0; width: 100%; color: var(--text); border: 0; background: transparent; outline: none; font-size: 12px; }
+        #search::placeholder { color: var(--quiet); opacity: 1; }
+        kbd { min-width: 18px; padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; font: 11px/19px var(--mono); color: var(--quiet); text-align: center; }
+        .search-box .icon-button { width: 26px; height: 28px; margin-right: -4px; }
+        .tabs { display: flex; gap: 20px; margin-top: 18px; border-bottom: 1px solid var(--border); }
+        .tab { display: flex; gap: 7px; align-items: center; position: relative; padding: 10px 0 13px; border: 0; background: none; color: var(--muted); font-size: 12px; }
+        .tab[aria-selected="true"] { color: var(--text); }
+        .tab[aria-selected="true"]::after { position: absolute; bottom: -1px; left: 0; right: 0; height: 2px; content: ''; background: var(--accent); }
+        .tab:hover { color: var(--text); }
+        .count { padding: 1px 6px; border-radius: 4px; font: 10px/17px var(--mono); color: var(--muted); background: var(--raised); }
+        .tab[aria-selected="true"] .count { background: var(--accent-wash); color: var(--accent); }
+        .list-toolbar { padding: 13px 20px 11px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+        select { color: var(--muted); background: var(--surface); border: 1px solid transparent; border-radius: 4px; padding: 5px 2px; max-width: 180px; cursor: pointer; font-size: 11px; }
+        select:hover { color: var(--text); border-color: var(--border); }
+        .result-count { color: var(--quiet); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+        .results { overflow-y: auto; flex: 1; padding: 0 10px 12px; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+        .result-item { display: block; width: 100%; padding: 14px 10px; text-align: left; border: 1px solid transparent; border-bottom-color: var(--border-soft); border-radius: 6px; background: none; }
+        .result-item:hover { background: var(--raised); }
+        .result-item[aria-current="true"] { background: var(--accent-wash); border-color: #456153; }
+        .result-topline { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; }
+        .result-title { font-size: 13px; line-height: 1.5; font-weight: 550; margin-bottom: 6px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+        .result-symbol, .result-path { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px/1.7 var(--mono); }
+        .result-symbol { color: var(--muted); }
+        .result-path { color: var(--quiet); }
+        .result-item[aria-current="true"] .result-path { color: var(--muted); }
+        .symbol-topline { display: flex; gap: 9px; align-items: center; margin-bottom: 6px; }
+        .symbol-topline .result-title { min-width: 0; margin: 0; font-family: var(--mono); font-size: 11px; }
+        .status-mark { width: 20px; height: 20px; border-radius: 5px; flex-shrink: 0; display: inline-grid; place-items: center; font: 12px var(--mono); background: var(--raised); }
+        .status-added, .badge.status-added { color: var(--status-added); }
+        .status-modified, .badge.status-modified { color: var(--status-modified); }
+        .status-deleted, .badge.status-deleted { color: var(--status-deleted); }
+        .status-unchanged, .badge.status-unchanged { color: var(--status-unchanged); }
+        .symbol-meta { display: block; padding-left: 29px; }
+        .symbol-meta .badge { margin-top: 7px; }
+        .map-panel { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+        .map-stage { flex: 1; min-height: 0; position: relative; background: var(--canvas); }
+        #cy { position: absolute; inset: 0; }
+        .button { display: inline-flex; justify-content: center; align-items: center; gap: 7px; background: var(--raised); border: 1px solid var(--border); border-radius: 6px; color: var(--text); min-height: 34px; padding: 7px 11px; font-size: 11px; font-weight: 500; white-space: nowrap; }
+        .button:hover:not(:disabled) { background: var(--hover); border-color: #4b5b5f; }
+        .button svg { width: 15px; height: 15px; }
+        .button.quiet { background: transparent; color: var(--muted); }
+        .icon-button { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 5px; color: var(--muted); background: transparent; flex-shrink: 0; }
+        .icon-button:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+        .popover { position: relative; }
+        .popover summary { list-style: none; cursor: pointer; }
+        .popover summary::-webkit-details-marker { display: none; }
+        .popover[open] > summary { background: var(--hover); color: var(--text); border-color: #4b5b5f; }
+        .popover-content { position: absolute; z-index: 20; padding: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 9px; box-shadow: var(--shadow); }
+        .view-menu { left: 0; bottom: calc(100% + 10px); width: 232px; }
+        .view-menu .section-eyebrow { margin-bottom: 10px; }
+        .check-row { display: flex; align-items: center; gap: 9px; min-height: 37px; cursor: pointer; color: var(--muted); font-size: 12px; }
+        .check-row input { accent-color: var(--accent); width: 15px; height: 15px; margin: 0; }
+        .check-row span:last-child { margin-left: auto; color: var(--quiet); font: 10px var(--mono); }
+        .menu-divider { height: 1px; background: var(--border); margin: 8px 0; }
+        .map-bottom { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 24px 20px; }
+        .map-options { display: flex; align-items: center; gap: 8px; }
+        .map-hint { color: var(--quiet); font-size: 10px; }
+        .workspace.inspecting .map-hint { display: none; }
+        .legend-menu { bottom: calc(100% + 10px); left: 0; width: 300px; }
+        .legend-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        .legend-items { margin-top: 10px; display: grid; gap: 8px; }
+        .legend-item { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; }
+        .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex-shrink: 0; background: currentColor; }
+        .ring { background: transparent; border: 2px solid currentColor; }
+        .legend-note { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; color: var(--muted); font-size: 11px; line-height: 1.7; }
+        .legend-note p + p { margin-top: 7px; }
+        .zoom-controls { display: flex; align-items: center; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }
+        .zoom-controls .zoom-label { min-width: 48px; font: 10px var(--mono); }
+        .control-divider { width: 1px; height: 17px; background: var(--border); margin: 0 4px; }
+        .focus-bar { position: absolute; top: 8px; left: 24px; z-index: 5; }
+        .focus-bar .button { background: var(--surface); box-shadow: 0 4px 16px #0003; }
+        .layout-note { position: absolute; top: 10px; left: 24px; right: 24px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--muted); font-size: 11px; z-index: 4; }
+        .focus-bar:not([hidden]) ~ .layout-note { top: 54px; }
+        .canvas-state { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 32px; z-index: 2; }
+        .empty-state { padding: 40px 18px; text-align: center; max-width: 360px; margin: 0 auto; }
+        .empty-state > svg { width: 30px; height: 30px; color: var(--quiet); margin-bottom: 16px; stroke-width: 1.2; }
+        .empty-state h2 { font-size: 14px; font-weight: 550; margin-bottom: 7px; }
+        .empty-state p { color: var(--muted); font-size: 12px; line-height: 1.7; }
+        .empty-state .button { margin-top: 18px; }
+        .load-more { display: flex; width: calc(100% - 20px); margin: 14px 10px 0; }
+        .inspector { width: 368px; flex-shrink: 0; display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--border); background: var(--surface); animation: panel-enter 180ms ease-out; }
+        .inspector-toolbar { display: flex; align-items: center; gap: 4px; min-height: 62px; padding: 14px 18px; border-bottom: 1px solid var(--border-soft); }
+        .inspector-toolbar .section-eyebrow { margin-right: auto; }
+        .position-label { font: 10px var(--mono); color: var(--quiet); min-width: 38px; text-align: center; }
+        .inspector-body { overflow-y: auto; flex: 1; padding: 24px; scrollbar-width: thin; scrollbar-color: var(--border) transparent; overflow-wrap: anywhere; }
+        .detail-title { font: 550 17px/1.5 var(--mono); letter-spacing: -.3px; margin: 10px 0 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .detail-title:focus { outline: none; }
+        .badge-row { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+        .badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 6px; border-radius: 4px; font-size: 10px; line-height: 16px; font-weight: 550; background: var(--raised); color: var(--muted); }
+        .badge .dot { width: 5px; height: 5px; }
+        .sev-critical { color: var(--sev-critical); }
+        .sev-high { color: var(--sev-high); }
+        .sev-medium { color: var(--sev-medium); }
+        .sev-low { color: var(--sev-low); }
+        .badge.sev-critical { background: #ff949c12; }
+        .badge.sev-high { background: #f5b78312; }
+        .badge.sev-medium { background: #e5cf8712; }
+        .badge.sev-low { background: #b4c2d512; }
+        .location { display: flex; gap: 10px; align-items: flex-start; padding: 12px; margin-top: 18px; background: var(--canvas); border: 1px solid var(--border-soft); border-radius: 6px; }
+        .location > div { min-width: 0; flex: 1; }
+        .location .file-path { color: var(--muted); font: 11px/1.8 var(--mono); }
+        .location .line-range { margin-top: 5px; font-size: 10px; color: var(--quiet); }
+        .location .icon-button { width: 32px; height: 32px; margin: -4px -4px 0 0; }
+        .location .icon-button svg { width: 14px; height: 14px; }
+        .focus-action { width: 100%; margin-top: 12px; }
+        .detail-section { margin-top: 28px; }
+        .detail-section-heading { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+        .detail-section-heading h3 { font-size: 12px; font-weight: 550; }
+        .finding-card { border: 1px solid var(--border); background: var(--canvas); border-radius: 6px; padding: 15px; margin-top: 10px; scroll-margin-top: 14px; }
+        .finding-card.is-current { box-shadow: 0 0 0 2px #b4dfc418; }
+        .finding-card h3 { font-size: 13px; line-height: 1.55; font-weight: 550; color: var(--text); margin: 11px 0 8px; }
+        .finding-card p { font-size: 12px; line-height: 1.8; color: var(--muted); white-space: pre-wrap; }
+        .finding-impact { margin-top: 13px; padding-top: 12px; border-top: 1px solid var(--border-soft); }
+        .finding-impact .section-eyebrow { margin-bottom: 6px; display: block; }
+        .detail-note { padding: 16px 0; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border-soft); margin-top: 24px; }
+        .connection-group + .connection-group { margin-top: 20px; }
+        .connection-label { color: var(--quiet); font-size: 10px; display: flex; justify-content: space-between; margin-bottom: 6px; }
+        .connection { width: 100%; text-align: left; display: flex; gap: 9px; align-items: center; padding: 10px 0; border: 0; border-bottom: 1px solid var(--border-soft); background: transparent; }
+        .connection:hover { color: var(--accent); }
+        .connection > span { flex: 1; min-width: 0; }
+        .connection-name { display: block; font: 11px/1.6 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .connection-kind { display: block; font-size: 10px; color: var(--quiet); }
+        .connection > svg { width: 14px; height: 14px; color: var(--quiet); }
+        .more-connections summary { font-size: 11px; color: var(--muted); cursor: pointer; padding: 10px 0; }
+        .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: calc(100% - 32px); padding: 10px 16px; border: 1px solid #486153; border-radius: 7px; background: var(--accent-wash); color: var(--accent); box-shadow: var(--shadow); font-size: 12px; z-index: 50; }
+        @keyframes panel-enter { from { opacity: 0; transform: translateX(8px); } to { opacity: 1; transform: translateX(0); } }
+        @media (min-width: 1600px) { .navigator { flex-basis: 336px; } .inspector { width: 400px; } }
+        @media (max-width: 1200px) { .navigator { flex-basis: 280px; } .inspector { width: 330px; } .map-hint { display: none; } .map-bottom { padding: 16px 16px 20px; } }
+        @media (max-width: 1040px) { .workspace.inspecting .navigator { display: none; } }
+        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+    </style>
+</head>
+<body>
+    <svg aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+            <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
+            <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+            <symbol id="i-graph" viewBox="0 0 24 24"><rect x="3" y="3" width="6" height="6" rx="1.5"/><rect x="15" y="15" width="6" height="6" rx="1.5"/><rect x="3" y="15" width="6" height="6" rx="1.5"/><path d="M6 9v6m3-9h5a4 4 0 0 1 4 4v5"/></symbol>
+            <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9m4 0h3M4 17h3m4 0h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></symbol>
+            <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+            <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+            <symbol id="i-fit" viewBox="0 0 24 24"><path d="M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5"/><rect x="8" y="8" width="8" height="8" rx="1"/></symbol>
+            <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></symbol>
+            <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5m5-5-5 5 5 5"/></symbol>
+            <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6"/></symbol>
+            <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m10 6 6 6-6 6"/></symbol>
+            <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M15 8V4H4v11h4"/></symbol>
+            <symbol id="i-key" viewBox="0 0 24 24"><circle cx="7" cy="7" r="3"/><rect x="14" y="4" width="6" height="6" rx="1"/><path d="m7 14 3 3-3 3-3-3Z"/><circle cx="17" cy="17" r="3"/></symbol>
+            <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 4-5 8-8 9-3-1-8-5-8-9V6Z"/><path d="m8 12 3 3 5-6"/></symbol>
+            <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+        </defs>
+    </svg>
+    <main class="workspace" id="workspace">
+        <h1 class="sr-only">Impact report</h1>
+        <section class="navigator" aria-label="Review findings and symbols">
+            <div class="review-head">
+                <div class="search-box">
+                    <svg aria-hidden="true"><use href="#i-search"/></svg>
+                    <label class="sr-only" for="search">Search names, files, or findings</label>
+                    <input id="search" type="text" placeholder="Search symbols or findings…" autocomplete="off" spellcheck="false" aria-keyshortcuts="/" aria-controls="results">
+                    <kbd id="search-shortcut" aria-hidden="true">/</kbd>
+                    <button id="clear-search" class="icon-button" aria-label="Clear search" hidden><svg aria-hidden="true"><use href="#i-close"/></svg></button>
+                </div>
+                <div class="tabs" role="tablist" aria-label="Review view">
+                    <button id="tab-findings" class="tab" role="tab" aria-controls="review-panel" aria-selected="true">Findings <span class="count" id="finding-count">0</span></button>
+                    <button id="tab-symbols" class="tab" role="tab" aria-controls="review-panel" aria-selected="false" tabindex="-1">Symbols <span class="count" id="symbol-count">0</span></button>
+                </div>
+            </div>
+            <div id="review-panel" role="tabpanel" aria-labelledby="tab-findings" style="display:flex;flex-direction:column;flex:1;min-height:0">
+                <div class="list-toolbar">
+                    <label class="sr-only" for="severity-filter">Filter findings by severity</label>
+                    <select id="severity-filter"><option value="all">All severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select>
+                    <label class="sr-only" for="status-filter">Filter symbols by change</label>
+                    <select id="status-filter" hidden><option value="changed">Changed symbols</option><option value="all">All symbols</option><option value="modified">Modified</option><option value="added">Added</option><option value="deleted">Deleted</option><option value="unchanged">Unchanged</option></select>
+                    <span class="result-count" id="result-count" role="status" aria-live="polite"></span>
+                </div>
+                <div id="results" class="results" role="region" aria-label="Review results"></div>
+            </div>
+        </section>
+        <section class="map-panel" aria-label="Dependency map">
+            <div class="map-stage">
+                <div id="cy" role="img" aria-label="Interactive dependency map. Use the review list to inspect symbols and their connections with a keyboard."></div>
+                <div class="focus-bar" id="focus-bar" hidden><button class="button" id="exit-focus"><svg aria-hidden="true"><use href="#i-back"/></svg>Full graph</button></div>
+                <div class="layout-note" id="layout-note" role="status" hidden></div>
+                <div id="canvas-state" class="canvas-state"><div class="empty-state"><svg aria-hidden="true"><use href="#i-graph"/></svg><h2>Preparing map</h2></div></div>
+            </div>
+            <div class="map-bottom">
+                <div class="map-options">
+                    <details class="popover" id="view-options">
+                        <summary class="button quiet"><svg aria-hidden="true"><use href="#i-sliders"/></svg>View</summary>
+                        <div class="popover-content view-menu">
+                            <div id="context-options"><p class="section-eyebrow">Include in map</p>
+                            <label class="check-row"><input type="checkbox" id="toggle-unchanged">Unchanged <span id="unchanged-count"></span></label>
+                            <label class="check-row"><input type="checkbox" id="toggle-deleted" checked>Deleted <span id="deleted-count"></span></label>
+                            <div class="menu-divider"></div></div>
+                            <label class="check-row"><input type="checkbox" id="toggle-labels">Relationship labels</label>
+                        </div>
+                    </details>
+                    <details class="popover" id="map-key">
+                        <summary class="button quiet"><svg aria-hidden="true"><use href="#i-key"/></svg>Map key</summary>
+                        <div class="popover-content legend-menu">
+                            <div class="legend-columns">
+                                <div><p class="section-eyebrow">Fill · Change</p><div class="legend-items">
+                                    <span class="legend-item"><i class="dot status-added"></i>Added</span><span class="legend-item"><i class="dot status-modified"></i>Modified</span><span class="legend-item"><i class="dot status-unchanged"></i>Unchanged</span><span class="legend-item"><i class="dot ring status-deleted" style="border-style:dashed"></i>Deleted</span>
+                                </div></div>
+                                <div><p class="section-eyebrow">Ring · Severity</p><div class="legend-items">
+                                    <span class="legend-item"><i class="dot ring sev-critical"></i>Critical</span><span class="legend-item"><i class="dot ring sev-high"></i>High</span><span class="legend-item"><i class="dot ring sev-medium"></i>Medium</span><span class="legend-item"><i class="dot ring sev-low"></i>Low</span>
+                                </div></div>
+                            </div>
+                            <div class="legend-note"><p>Boxes group symbols. Diamonds mark external references. Arrows point to dependencies; dashed arrows are inferred.</p><p><kbd>/</kbd> Search &nbsp; <kbd>F</kbd> Fit &nbsp; <kbd>Esc</kbd> Close</p></div>
+                        </div>
+                    </details>
+                </div>
+                <span class="map-hint">Drag to pan · Scroll to zoom</span>
+                <div class="zoom-controls" role="group" aria-label="Map zoom">
+                    <button id="zoom-out" class="icon-button" aria-label="Zoom out" title="Zoom out"><svg aria-hidden="true"><use href="#i-minus"/></svg></button>
+                    <button id="zoom-reset" class="icon-button zoom-label" aria-label="Reset zoom to 100 percent" title="Reset to 100%">100%</button>
+                    <button id="zoom-in" class="icon-button" aria-label="Zoom in" title="Zoom in"><svg aria-hidden="true"><use href="#i-plus"/></svg></button>
+                    <span class="control-divider"></span>
+                    <button id="fit-graph" class="icon-button" aria-label="Fit graph" title="Fit graph (F)" aria-keyshortcuts="F"><svg aria-hidden="true"><use href="#i-fit"/></svg></button>
+                </div>
+            </div>
+        </section>
+        <aside id="inspector" class="inspector" aria-label="Symbol details" hidden>
+            <div class="inspector-toolbar"><span class="section-eyebrow">Symbol details</span><span id="detail-position" class="position-label" role="status"></span><button id="previous-result" class="icon-button" aria-label="Previous result" title="Previous result"><svg aria-hidden="true"><use href="#i-chevron-left"/></svg></button><button id="next-result" class="icon-button" aria-label="Next result" title="Next result"><svg aria-hidden="true"><use href="#i-chevron-right"/></svg></button><span class="control-divider"></span><button id="close-details" class="icon-button" aria-label="Close details" title="Close details (Esc)"><svg aria-hidden="true"><use href="#i-close"/></svg></button></div>
+            <div class="inspector-body" id="node-details"></div>
+        </aside>
+    </main>
+    <div class="toast" id="toast" role="status" hidden></div>
+    <noscript><style>#canvas-state { display: none; }</style><p style="position:fixed;inset:0 0 auto;padding:24px;background:#191f21;z-index:50">Enable JavaScript to explore this report. The same data is available in report.json.</p></noscript>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js" integrity="sha512-RcuA+PEnJcg1caTn53YLhZ3bYVFXphzcPL1BjBoAwFiA3bErav+AndZz1xrqpAtv/8Waep2X+9zn8KWpwacUSA==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dagre/0.8.5/dagre.min.js" integrity="sha512-psLUZfcgPmi012lcpVHkWoOqyztollwCGu4w/mXijFMK/YcdUdP06voJNVOJ7f/dUIlO2tGlDLuypRyXX2lcvQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script>
+        const graphData = {{ graph_json }};
+        const reportMeta = {{ report_meta_json }};
+        const $ = id => document.getElementById(id);
+        const icon = name => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
+        // Source code, paths, and model output are untrusted, including in attributes.
+        function escapeHtml(s) {
+            return String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+        }
+        const SEVERITY_RANK = { critical: 3, high: 2, medium: 1, low: 0 };
+        function severity(v) {
+            const value = String(v.severity || '').trim().toLowerCase();
+            // Match the scanner and SARIF's fail-safe handling of malformed severity.
+            return Object.hasOwn(SEVERITY_RANK, value) ? value : 'critical';
+        }
+        const css = getComputedStyle(document.documentElement);
+        const color = token => css.getPropertyValue('--' + token).trim();
+        const STATUS_COLOR = Object.fromEntries(['added', 'modified', 'unchanged', 'deleted'].map(s => [s, color('status-' + s)]));
+        const SEVERITY_COLOR = Object.fromEntries(Object.keys(SEVERITY_RANK).map(s => [s, color('sev-' + s)]));
+        const tint = hex => '#' + [1, 3, 5].map(i => Math.round(parseInt(hex.slice(i, i + 2), 16) * .13 + parseInt(color('canvas').slice(i, i + 2), 16) * .87).toString(16).padStart(2, '0')).join('');
+        const statusMark = { added: '+', modified: '~', deleted: '−', unchanged: '·' };
+        const nodes = graphData.nodes.map((n, index) => ({...n, index, name: String(n.name || n.id), kind: n.kind || 'symbol', file: n.file || '', status: Object.hasOwn(STATUS_COLOR, n.status) ? n.status : 'unchanged', vulnerabilities: n.vulnerabilities || []}));
+        const nodeById = new Map(nodes.map(n => [n.id, n]));
+        const edges = graphData.edges.filter(e => nodeById.has(e.source) && nodeById.has(e.target));
+        const dependencies = edges.filter(e => e.kind !== 'contains');
+        const parentOf = new Map();
+        // Ignore malformed containment cycles rather than losing the entire report.
+        edges.filter(e => e.kind === 'contains').forEach(e => {
+            let ancestor = e.source;
+            while (ancestor !== e.target && parentOf.has(ancestor)) ancestor = parentOf.get(ancestor);
+            if (ancestor !== e.target) parentOf.set(e.target, e.source);
+        });
+        const incoming = new Map(nodes.map(n => [n.id, []]));
+        const outgoing = new Map(nodes.map(n => [n.id, []]));
+        dependencies.forEach(e => { incoming.get(e.target).push(e); outgoing.get(e.source).push(e); });
+        const scannedIds = new Set(reportMeta.scanned_node_ids);
+        const oneLine = value => String(value).replace(/\s+/g, ' ').trim();
+        const shortName = n => oneLine(n.name).split(':').pop();
+        function relativeFile(n) {
+            const file = n.file.replace(/\\/g, '/');
+            const root = reportMeta.repo_root.replace(/\\/g, '/').replace(/\/$/, '');
+            return root && file.startsWith(root + '/') ? file.slice(root.length + 1) : file;
+        }
+        const findings = nodes.flatMap(n => n.vulnerabilities.map((v, index) => ({node: n, finding: v, findingIndex: index, key: `${n.index}:${index}`})))
+            .sort((a, b) => SEVERITY_RANK[severity(b.finding)] - SEVERITY_RANK[severity(a.finding)] || relativeFile(a.node).localeCompare(relativeFile(b.node)) || a.node.name.localeCompare(b.node.name));
+        const sortedNodes = [...nodes].sort((a, b) => relativeFile(a).localeCompare(relativeFile(b)) || (a.start_line || 0) - (b.start_line || 0) || a.name.localeCompare(b.name));
+        nodes.forEach(n => { n.searchText = [n.name, n.id, relativeFile(n)].join(' ').toLowerCase(); });
+        $('toggle-unchanged').checked = nodes.length <= 80;
+        const formatNumber = n => n.toLocaleString();
+        const plural = (n, singular, multiple = singular + 's') => `${formatNumber(n)} ${n === 1 ? singular : multiple}`;
+        document.title = reportMeta.repo_name ? `${reportMeta.repo_name} · Zairo Impact Analysis` : 'Zairo Impact Analysis';
+        $('finding-count').textContent = formatNumber(findings.length);
+        $('symbol-count').textContent = formatNumber(nodes.length);
+        ['unchanged', 'deleted'].forEach(s => $(s + '-count').textContent = formatNumber(nodes.filter(n => n.status === s).length));
+        for (const option of $('severity-filter').options) {
+            if (option.value !== 'all') option.textContent += ` (${findings.filter(r => severity(r.finding) === option.value).length})`;
+        }
+        let activeTab = findings.length ? 'findings' : 'symbols';
+        let results = [], resultLimit = 80, selectedId = null, selectedKey = null, focusId = null, returnFocus = null, cy = null;
+        let queryTimer, toastTimer, routingVersion = 0;
+        const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+        const severityBadge = sev => `<span class="badge sev-${sev}"><i class="dot"></i>${sev[0].toUpperCase() + sev.slice(1)}</span>`;
+        function notify(message) {
+            clearTimeout(toastTimer); $('toast').textContent = message; $('toast').hidden = false;
+            toastTimer = setTimeout(() => $('toast').hidden = true, 2800);
+        }
+        function emptyState(title, message, action = '', symbol = 'search') {
+            return `<div class="empty-state">${icon(symbol)}<h2>${escapeHtml(title)}</h2>${message ? `<p>${escapeHtml(message)}</p>` : ''}${action}</div>`;
+        }
+        function setTab(tab, moveFocus = false) {
+            clearTimeout(queryTimer); activeTab = tab; resultLimit = 80;
+            ['findings', 'symbols'].forEach(name => {
+                const el = $('tab-' + name); el.setAttribute('aria-selected', name === tab); el.tabIndex = name === tab ? 0 : -1;
+            });
+            $('review-panel').setAttribute('aria-labelledby', 'tab-' + tab);
+            $('severity-filter').hidden = tab !== 'findings'; $('status-filter').hidden = tab !== 'symbols';
+            if (moveFocus) $('tab-' + tab).focus();
+            updateResults(); $('results').scrollTop = 0;
+        }
+        function updateResults() {
+            const query = $('search').value.trim().toLowerCase();
+            $('clear-search').hidden = !query; $('search-shortcut').hidden = Boolean(query);
+            if (activeTab === 'findings') {
+                const filter = $('severity-filter').value;
+                results = findings.filter(r => (filter === 'all' || severity(r.finding) === filter) && (!query || [r.node.searchText, r.finding.title, r.finding.description, r.finding.cwe].join(' ').toLowerCase().includes(query)));
+            } else {
+                const filter = $('status-filter').value;
+                results = sortedNodes.filter(n => (filter === 'all' || (filter === 'changed' ? n.status !== 'unchanged' : n.status === filter)) && (!query || n.searchText.includes(query))).map(n => ({node: n, key: `${n.index}`}));
+            }
+            $('result-count').textContent = plural(results.length, 'result');
+            renderResults(); updateDetailNavigation(); applyEmphasis();
+        }
+        function renderResults() {
+            if (!results.length) {
+                const filtered = $('search').value.trim() || (activeTab === 'findings' ? $('severity-filter').value !== 'all' : $('status-filter').value !== 'changed');
+                if (filtered) $('results').innerHTML = emptyState('No matches', 'Try another search or reset the filters.', '<button class="button" data-action="reset-filters">Reset filters</button>');
+                else if (activeTab === 'findings') $('results').innerHTML = emptyState(reportMeta.scan_performed ? 'No findings reported' : 'Security scan not run', '', '<button class="button" data-action="show-symbols">Explore symbols</button>', reportMeta.scan_performed ? 'check' : 'shield');
+                else $('results').innerHTML = emptyState(nodes.length ? 'No changed symbols' : 'No symbols to show', '', nodes.length ? '<button class="button" data-action="all-symbols">Show all symbols</button>' : '', 'graph');
+                return;
+            }
+            $('results').innerHTML = results.slice(0, resultLimit).map((r, index) => {
+                const d = r.node;
+                const current = r.key === selectedKey;
+                const path = relativeFile(d) || 'External reference';
+                if (r.finding) {
+                    const v = r.finding;
+                    return `<button class="result-item" data-result-index="${index}" aria-current="${current}" aria-controls="inspector"><span class="result-topline">${severityBadge(severity(v))}</span><span class="result-title">${escapeHtml(v.title)}</span><span class="result-symbol">${escapeHtml(shortName(d))}</span><span class="result-path" title="${escapeHtml(d.file)}">${escapeHtml(path)}${d.start_line ? ':' + escapeHtml(d.start_line) : ''}</span></button>`;
+                }
+                return `<button class="result-item" data-result-index="${index}" aria-current="${current}" aria-controls="inspector"><span class="symbol-topline"><span class="status-mark status-${d.status}" role="img" aria-label="${escapeHtml(d.status)}">${statusMark[d.status]}</span><span class="result-title">${escapeHtml(shortName(d))}</span></span><span class="symbol-meta"><span class="result-path" title="${escapeHtml(d.file)}">${escapeHtml(path)}${d.start_line ? ':' + escapeHtml(d.start_line) : ''}</span>${d.vulnerabilities.length ? `<span class="badge">${plural(d.vulnerabilities.length, 'finding')}</span>` : ''}</span></button>`;
+            }).join('') + (results.length > resultLimit ? `<button class="button quiet load-more" data-action="load-more">Show ${Math.min(80, results.length - resultLimit)} more</button>` : '');
+        }
+        function resetFilters() {
+            $('search').value = ''; $('severity-filter').value = 'all'; $('status-filter').value = 'all'; resultLimit = 80;
+            updateResults(); $('search').focus();
+        }
+        function updateDetailNavigation() {
+            const index = results.findIndex(r => r.key === selectedKey);
+            $('detail-position').textContent = index >= 0 ? `${index + 1} / ${results.length}` : '';
+            $('previous-result').disabled = index <= 0;
+            $('next-result').disabled = index < 0 || index >= results.length - 1;
+        }
+        function selectResult(index) {
+            clearTimeout(queryTimer); const r = results[index]; if (!r) return;
+            if (index >= resultLimit) resultLimit = Math.ceil((index + 1) / 80) * 80;
+            selectedKey = r.key; selectNode(r.node.id, r.findingIndex);
+        }
+        function connectionRows(list, direction) {
+            const seen = new Set();
+            const unique = list.filter(e => { const key = `${direction === 'in' ? e.source : e.target}\u0000${e.kind}`; if (seen.has(key)) return false; seen.add(key); return true; });
+            const render = e => {
+                const n = nodeById.get(direction === 'in' ? e.source : e.target);
+                return `<button class="connection" data-node-index="${n.index}"><span><span class="connection-name">${escapeHtml(shortName(n))}</span><span class="connection-kind">${escapeHtml(e.kind || 'dependency')}${e.confidence && e.confidence !== 'certain' ? ' · inferred' : ''}</span></span>${icon('arrow')}</button>`;
+            };
+            if (!unique.length) return '';
+            return `<div class="connection-group"><div class="connection-label"><span>${direction === 'in' ? 'Referenced by' : 'References'}</span><span>${unique.length}</span></div>${unique.slice(0, 6).map(render).join('')}${unique.length > 6 ? `<details class="more-connections"><summary>${unique.length - 6} more connections</summary>${unique.slice(6).map(render).join('')}</details>` : ''}</div>`;
+        }
+        function selectNode(id, findingIndex) {
+            const d = nodeById.get(id); if (!d) return;
+            if ($('inspector').hidden) returnFocus = document.activeElement;
+            selectedId = id;
+            if (!results.some(r => r.key === selectedKey && r.node.id === id)) selectedKey = results.find(r => r.node.id === id)?.key || null;
+            if (focusId) focusId = id;
+            // A list or connection click must reveal even a currently hidden symbol.
+            const needsReveal = !focusId && (d.status === 'unchanged' || d.status === 'deleted') && !$('toggle-' + d.status).checked;
+            if (needsReveal) $('toggle-' + d.status).checked = true;
+            $('inspector').hidden = false; $('workspace').classList.add('inspecting');
+            let findingHtml = '';
+            if (d.vulnerabilities.length) {
+                findingHtml = `<section class="detail-section"><div class="detail-section-heading"><h3>Findings</h3><span class="count">${d.vulnerabilities.length}</span></div>`;
+                [...d.vulnerabilities.entries()].sort((a, b) => SEVERITY_RANK[severity(b[1])] - SEVERITY_RANK[severity(a[1])]).forEach(([index, v]) => {
+                    findingHtml += `<article class="finding-card sev-${severity(v)}${index === findingIndex ? ' is-current' : ''}" id="finding-${index}"><div class="badge-row">${severityBadge(severity(v))}${v.cwe ? `<span class="badge">${escapeHtml(v.cwe)}</span>` : ''}</div><h3>${escapeHtml(v.title)}</h3><p>${escapeHtml(v.description)}</p>${v.impact ? `<div class="finding-impact"><span class="section-eyebrow">Impact</span><p>${escapeHtml(v.impact)}</p></div>` : ''}</article>`;
+                });
+                findingHtml += '</section>';
+            } else {
+                const note = !reportMeta.scan_performed ? 'Security scan not run.' : d.status === 'deleted' ? 'Deleted symbols are not scanned.' : scannedIds.has(d.id) ? 'No findings reported.' : 'Not scanned.';
+                findingHtml = `<p class="detail-note">${note}</p>`;
+            }
+            const ins = incoming.get(id), outs = outgoing.get(id);
+            $('node-details').innerHTML = `<div class="badge-row"><span class="badge">${escapeHtml(d.kind)}</span><span class="badge status-${d.status}">${escapeHtml(d.status)}</span></div><h2 class="detail-title" id="detail-title" tabindex="-1">${escapeHtml(d.name)}</h2>${d.file ? `<div class="location"><div><div class="file-path">${escapeHtml(relativeFile(d))}</div><div class="line-range">${d.status === 'deleted' ? 'Former location · ' : ''}${d.start_line ? 'Line ' + escapeHtml(d.start_line) + (d.end_line && d.end_line !== d.start_line ? '–' + escapeHtml(d.end_line) : '') : 'Line unavailable'}</div></div><button class="icon-button" data-action="copy-location" aria-label="Copy file location" title="Copy file location">${icon('copy')}</button></div>` : '<p class="muted">External reference</p>'}<button class="button focus-action" data-action="focus-connections" aria-pressed="${Boolean(focusId)}" ${!cy ? 'disabled' : ''}>${icon('graph')}${focusId ? 'Show full graph' : 'Focus connections'}</button>${findingHtml}${ins.length || outs.length ? `<section class="detail-section"><div class="detail-section-heading"><h3>Connections</h3><span class="count">${ins.length + outs.length}</span></div>${connectionRows(ins, 'in')}${connectionRows(outs, 'out')}</section>` : '<p class="detail-note">No direct connections.</p>'}`;
+            $('node-details').scrollTop = 0; $('detail-title').focus({preventScroll: true});
+            renderResults(); updateDetailNavigation();
+            if (cy) {
+                if (needsReveal || focusId) applyVisibility();
+                cy.nodes().unselect(); cy.getElementById(id).select();
+                applyEmphasis();
+                requestAnimationFrame(() => { cy.resize(); centerSelection(); });
+            }
+            if (findingIndex > 0) requestAnimationFrame(() => $('finding-' + findingIndex)?.scrollIntoView({block: 'nearest', behavior: reducedMotion.matches ? 'instant' : 'smooth'}));
+        }
+        function closeDetails(restore = true, clear = true) {
+            const resultIndex = results.findIndex(r => r.key === selectedKey);
+            $('inspector').hidden = true; $('workspace').classList.remove('inspecting');
+            if (clear) { selectedId = null; selectedKey = null; if (cy) cy.nodes().unselect(); renderResults(); applyEmphasis(); }
+            if (cy) requestAnimationFrame(() => { cy.resize(); if (!selectedId) fitGraph(true); });
+            if (restore) {
+                const row = $('results').querySelector(`[data-result-index="${resultIndex}"]`);
+                const target = row?.offsetParent !== null && row ? row : returnFocus?.isConnected && returnFocus.offsetParent !== null ? returnFocus : $('search');
+                target.focus({preventScroll: true});
+            }
+        }
+        async function copyLocation() {
+            const d = nodeById.get(selectedId); if (!d) return;
+            const text = relativeFile(d) + (d.start_line ? ':' + d.start_line : '');
+            try { await navigator.clipboard.writeText(text); notify('File location copied'); }
+            catch {
+                const input = document.createElement('textarea'); input.value = text; input.setAttribute('aria-label', 'File location');
+                input.style.cssText = 'position:fixed;left:0;top:0;opacity:0'; document.body.append(input); input.select();
+                const copied = document.execCommand('copy'); input.remove();
+                $('node-details').querySelector('[data-action="copy-location"]').focus();
+                notify(copied ? 'File location copied' : 'Could not copy. Select the path to copy it.');
+            }
+        }
+        function neighborhood(id) {
+            const ids = new Set([id]);
+            incoming.get(id).forEach(e => ids.add(e.source)); outgoing.get(id).forEach(e => ids.add(e.target));
+            if (cy) cy.getElementById(id).descendants().forEach(n => ids.add(n.id()));
+            return ids;
+        }
+        function includeAncestors(ids) {
+            [...ids].forEach(id => { while (parentOf.has(id)) { id = parentOf.get(id); ids.add(id); } });
+            return ids;
+        }
+        function applyEmphasis() {
+            if (!cy) return;
+            let ids = null;
+            if (selectedId) ids = neighborhood(selectedId);
+            else if ($('search').value.trim() || (activeTab === 'findings' && $('severity-filter').value !== 'all') || (activeTab === 'symbols' && !['all', 'changed'].includes($('status-filter').value))) ids = new Set(results.map(r => r.node.id));
+            if (ids) includeAncestors(ids);
+            cy.batch(() => {
+                cy.nodes().forEach(n => n.toggleClass('dimmed', Boolean(ids && !ids.has(n.id()))));
+                cy.edges().forEach(e => {
+                    e.toggleClass('dimmed', Boolean(ids && (!ids.has(e.source().id()) || !ids.has(e.target().id()))));
+                    e.toggleClass('related', Boolean(selectedId && (e.source().id() === selectedId || e.target().id() === selectedId)));
+                });
+            });
+        }
+        function canvasState(title, description, action = '') {
+            $('canvas-state').hidden = false; $('canvas-state').innerHTML = emptyState(title, description, action, 'graph');
+        }
+        function applyVisibility() {
+            if (!cy) return;
+            const allowed = focusId ? neighborhood(focusId) : new Set(nodes.filter(n => (n.status !== 'unchanged' || $('toggle-unchanged').checked) && (n.status !== 'deleted' || $('toggle-deleted').checked)).map(n => n.id));
+            // Keep every ancestor of a visible child, including nested classes.
+            includeAncestors(allowed);
+            cy.batch(() => {
+                cy.nodes().forEach(n => n.style('display', allowed.has(n.id()) ? 'element' : 'none'));
+            });
+            $('focus-bar').hidden = !focusId;
+            const visible = cy.nodes(':visible');
+            const symbolCount = visible.length === nodes.length ? plural(nodes.length, 'symbol') : `${formatNumber(visible.length)} of ${plural(nodes.length, 'symbol')}`;
+            $('cy').setAttribute('aria-label', `${focusId ? 'Direct connections' : 'Dependency map'}: ${symbolCount}, ${plural(cy.edges(':visible').length, 'connection')}. Use the review list to inspect symbols and connections with a keyboard.`);
+            if (!visible.length) canvasState(nodes.length ? 'No symbols in this view' : 'No symbols to map', nodes.length ? 'Include unchanged or deleted symbols.' : 'No symbols were found for this analysis.', nodes.length ? '<button class="button" data-action="show-all-map">Show all symbols</button>' : '');
+            else $('canvas-state').hidden = true;
+            $('context-options').hidden = Boolean(focusId);
+            runLayout(); applyEmphasis();
+        }
+        function fitGraph(initial = false) {
+            if (!cy || !cy.nodes(':visible').length || !cy.width() || !cy.height()) return;
+            cy.resize(); cy.stop(); cy.fit(cy.elements(':visible'), 48);
+            const targetZoom = Math.min(cy.zoom(), 1.2);
+            const needsDetail = initial && targetZoom < .5;
+            cy.zoom(needsDetail ? .8 : targetZoom);
+            if (needsDetail) {
+                const changedNodes = cy.nodes(':visible').not(':parent').filter(n => ['modified', 'added'].includes(n.data('status')));
+                const central = changedNodes.sort((a, b) => b.degree() - a.degree()).first();
+                const anchor = selectedId ? cy.getElementById(selectedId) : findings.length ? cy.getElementById(findings[0].node.id) : central.length ? central : cy.nodes(':visible').first();
+                if (anchor.visible()) cy.center(anchor); else cy.center(cy.elements(':visible'));
+            } else cy.center(cy.elements(':visible'));
+        }
+        // Lay out groups as units. A global leaf layout can stretch a file's
+        // container around unrelated files and make even small graphs unreadable.
+        function packBoxes(boxes, columns, padding = 0, snake = false) {
+            const gap = 28, rows = Math.ceil(boxes.length / columns);
+            const widths = Array(columns).fill(0), heights = Array(rows).fill(0);
+            const columnOf = i => snake && Math.floor(i / columns) % 2 ? columns - 1 - i % columns : i % columns;
+            boxes.forEach((b, i) => { const column = columnOf(i); widths[column] = Math.max(widths[column], b.width); heights[Math.floor(i / columns)] = Math.max(heights[Math.floor(i / columns)], b.height); });
+            const width = widths.reduce((a, b) => a + b, 0) + gap * (columns - 1) + padding * 2;
+            const height = heights.reduce((a, b) => a + b, 0) + gap * (rows - 1) + padding * 2;
+            const positions = [];
+            boxes.forEach((b, i) => {
+                const column = columnOf(i), row = Math.floor(i / columns);
+                const x = -width / 2 + padding + widths.slice(0, column).reduce((a, b) => a + b, 0) + gap * column + widths[column] / 2;
+                const y = -height / 2 + padding + heights.slice(0, row).reduce((a, b) => a + b, 0) + gap * row + heights[row] / 2;
+                b.positions.forEach(p => positions.push({id: p.id, x: p.x + x, y: p.y + y}));
+            });
+            return {width, height, positions};
+        }
+        function packGroup(node) {
+            const children = node.children(':visible');
+            if (!children.length) {
+                const bounds = node.boundingBox();
+                return {width: Math.max(node.outerWidth(), bounds.w), height: Math.max(node.outerHeight(), bounds.h), positions: [{id: node.id(), x: 0, y: 0}]};
+            }
+            const boxes = children.map(packGroup);
+            return packBoxes(boxes, boxes.length <= 5 ? 1 : Math.ceil(Math.sqrt(boxes.length / 2)), 38);
+        }
+        function runLayout() {
+            const visible = cy.nodes(':visible');
+            routingVersion++;
+            $('layout-note').hidden = true;
+            if (!visible.length) { $('cy').setAttribute('aria-busy', 'false'); return; }
+            cy.nodes(':parent').style('min-height', 0);
+            const roots = visible.filter(n => !n.parent().length);
+            const boxes = roots.map(packGroup);
+            let positions;
+            const useGrid = visible.length > 700;
+            try {
+                if (useGrid) {
+                    positions = packBoxes(connectedOrder(roots, boxes), Math.ceil(Math.sqrt(boxes.length)), 0, true).positions;
+                } else {
+                    const layout = new dagre.graphlib.Graph().setGraph({rankdir: 'LR', nodesep: 48, ranksep: 76}).setDefaultEdgeLabel(() => ({}));
+                    const rootIndex = new Map(roots.map((n, i) => [n.id(), String(i)]));
+                    const rootOf = id => { while (parentOf.has(id)) id = parentOf.get(id); return rootIndex.get(id); };
+                    boxes.forEach((b, i) => layout.setNode(String(i), {width: b.width, height: b.height}));
+                    cy.edges(':visible').forEach(e => { const source = rootOf(e.source().id()), target = rootOf(e.target().id()); if (source !== target) layout.setEdge(source, target); });
+                    dagre.layout(layout);
+                    positions = boxes.flatMap((b, i) => { const center = layout.node(String(i)); return b.positions.map(p => ({id: p.id, x: p.x + center.x, y: p.y + center.y})); });
+                }
+            } catch (error) {
+                console.warn('zairo: hierarchical layout unavailable; using grid', error);
+                positions = packBoxes(connectedOrder(roots, boxes), Math.ceil(Math.sqrt(boxes.length)), 0, true).positions;
+            }
+            cy.batch(() => positions.forEach(p => cy.getElementById(p.id).position({x: p.x, y: p.y})));
+            alignGroupLabels(); compactGroups(); orderSiblings(); alignGroupLabels(); separateNodes(); packComponents(); fitGraph(true);
+            const view = {zoom: cy.zoom(), pan: {...cy.pan()}};
+            routeEdges(() => {
+                // Keep any pan or zoom the reader made while a large map was routing.
+                if (cy.zoom() === view.zoom && cy.pan('x') === view.pan.x && cy.pan('y') === view.pan.y) fitGraph(true);
+            });
+        }
+        function alignGroupLabels() {
+            // Reserve a header inside each frame, including nested containers.
+            // Extra height goes above the children instead of widening every side.
+            cy.nodes(':parent:visible').sort((a, b) => b.ancestors().length - a.ancestors().length).forEach(n => {
+                const children = n.children(':visible');
+                n.style({'min-height': children.length ? children.boundingBox({includeOverlays: false}).h + 24 : 0,
+                    'padding': children.length ? 24 : 12, 'text-valign': children.length ? 'top' : 'center',
+                    'text-halign': children.length ? 'left' : 'center', 'text-margin-x': 0, 'text-margin-y': 0});
+                const body = n.boundingBox({includeLabels: false, includeOverlays: false});
+                n.style('text-max-width', body.w - 28);
+                if (children.length) {
+                    const label = n.boundingBox({includeNodes: false, includeEdges: false, includeLabels: true, includeOverlays: false, includeUnderlays: false});
+                    n.style({'text-margin-x': body.x1 + 12 - label.x1, 'text-margin-y': body.y1 + 10 - label.y1});
+                }
+            });
+        }
+        function separateNodes(anchor = null) {
+            // Resolve collisions among peers only: a container is meant to enclose
+            // its descendants. Run bottom-up so expanded groups are checked too.
+            const groups = cy.nodes(':parent:visible').sort((a, b) => b.ancestors().length - a.ancestors().length).map(n => n.children(':visible'));
+            groups.push(cy.nodes(':visible').filter(n => !n.parent().length));
+            const fixed = anchor ? new Set([anchor.id(), ...anchor.ancestors().map(n => n.id())]) : new Set();
+            for (const group of groups) {
+                for (let pass = 0; pass < 24; pass++) {
+                    const boxes = group.map(node => ({node, ...node.boundingBox({includeOverlays: false})})).sort((a, b) => a.x1 - b.x1);
+                    let moved = false;
+                    for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length && boxes[j].x1 < boxes[i].x2 + 20; j++) {
+                        const a = boxes[i], b = boxes[j];
+                        const dx = Math.min(a.x2 + 20 - b.x1, b.x2 + 20 - a.x1);
+                        const dy = Math.min(a.y2 + 20 - b.y1, b.y2 + 20 - a.y1);
+                        if (dx <= 0 || dy <= 0) continue;
+                        const axis = dx < dy ? 'x' : 'y', amount = Math.min(dx, dy) + 1;
+                        const sign = (axis === 'x' ? b.x1 - a.x1 : b.y1 - a.y1) >= 0 ? 1 : -1;
+                        const share = fixed.has(a.node.id()) ? 0 : fixed.has(b.node.id()) ? 1 : .5;
+                        a.node.position(axis, a.node.position(axis) - amount * sign * share);
+                        b.node.position(axis, b.node.position(axis) + amount * sign * (1 - share));
+                        moved = true;
+                    }
+                    if (!moved) break;
+                }
+            }
+            alignGroupLabels();
+        }
+        function connectedOrder(roots, boxes) {
+            const rootIndex = new Map(roots.map((n, i) => [n.id(), i]));
+            const top = node => { while (node.parent().length) node = node.parent(); return rootIndex.get(node.id()); };
+            const adjacent = roots.map(() => new Set());
+            cy.edges(':visible').forEach(e => { const a = top(e.source()), b = top(e.target()); if (a !== b) { adjacent[a].add(b); adjacent[b].add(a); } });
+            const seen = new Set(), order = [];
+            roots.forEach((_, start) => {
+                if (seen.has(start)) return;
+                const queue = [start]; seen.add(start);
+                for (let i = 0; i < queue.length; i++) {
+                    const id = queue[i]; order.push(boxes[id]);
+                    adjacent[id].forEach(next => { if (!seen.has(next)) { seen.add(next); queue.push(next); } });
+                }
+            });
+            return order;
+        }
+        function rootComponents() {
+            const roots = cy.nodes(':visible').filter(n => !n.parent().length);
+            const rootIndex = new Map(roots.map((n, i) => [n.id(), i]));
+            const top = node => { while (node.parent().length) node = node.parent(); return rootIndex.get(node.id()); };
+            const adjacent = roots.map(() => new Set());
+            cy.edges(':visible').forEach(e => { const a = top(e.source()), b = top(e.target()); if (a !== b) { adjacent[a].add(b); adjacent[b].add(a); } });
+            const seen = new Set(), components = [];
+            roots.forEach((_, start) => {
+                if (seen.has(start)) return;
+                const queue = [start]; seen.add(start);
+                for (let i = 0; i < queue.length; i++) adjacent[queue[i]].forEach(next => { if (!seen.has(next)) { seen.add(next); queue.push(next); } });
+                components.push(cy.collection(queue.map(i => roots[i])));
+            });
+            return components;
+        }
+        function packComponents() {
+            const components = rootComponents();
+            if (components.length < 2) return;
+            const boxes = components.map(roots => {
+                const bounds = roots.boundingBox({includeEdges: false});
+                return {roots, width: bounds.w, height: bounds.h, x: bounds.x1, y: bounds.y1};
+            }).sort((a, b) => b.height - a.height);
+            const gap = 40, ratio = Math.max(.8, Math.min(2, cy.width() / (cy.height() || 1)));
+            const area = boxes.reduce((sum, b) => sum + (b.width + gap) * (b.height + gap), 0);
+            const widest = Math.max(...boxes.map(b => b.width));
+            let best;
+            // Try a few shelf widths. This avoids both a single tall column and
+            // uniform grid cells that waste space around differently sized groups.
+            for (const factor of [.7, .85, 1, 1.15, 1.3, 1.5]) {
+                const limit = Math.max(widest, Math.sqrt(area * ratio) * factor);
+                const shelves = [], placed = [];
+                boxes.forEach(box => {
+                    let shelf = shelves.filter(row => row.used + box.width <= limit).sort((a, b) => b.used - a.used)[0];
+                    if (!shelf) { shelf = {y: shelves.reduce((sum, row) => sum + row.height + gap, 0), height: box.height, used: 0}; shelves.push(shelf); }
+                    placed.push({box, x: shelf.used, y: shelf.y}); shelf.used += box.width + gap;
+                });
+                const width = Math.max(...shelves.map(s => s.used - gap));
+                const height = shelves[shelves.length - 1].y + shelves[shelves.length - 1].height;
+                const score = Math.max(width / ratio, height);
+                if (!best || score < best.score) best = {score, placed};
+            }
+            cy.batch(() => best.placed.forEach(({box, x, y}) => box.roots.forEach(n => n.position({x: n.position('x') + x - box.x, y: n.position('y') + y - box.y}))));
+        }
+        function compactGroups() {
+            for (const roots of rootComponents()) {
+                // Large overviews already use a connected, alternating grid. Keep the
+                // more expensive group relaxation bounded independently of symbol count.
+                if (roots.length < 2 || roots.length > 80) continue;
+                const blocks = roots.map(node => {
+                    const bounds = node.boundingBox();
+                    const x = (bounds.x1 + bounds.x2) / 2, y = (bounds.y1 + bounds.y2) / 2;
+                    return {node, x, y, width: bounds.w + 16, height: bounds.h + 16, offsetX: node.position('x') - x, offsetY: node.position('y') - y};
+                });
+                const index = new Map(blocks.map((b, i) => [b.node.id(), i]));
+                const top = node => { while (node.parent().length) node = node.parent(); return index.get(node.id()); };
+                const links = cy.edges(':visible').map(e => ({a: top(e.source()), b: top(e.target())})).filter(e => e.a !== e.b);
+                const separate = () => {
+                    for (let pass = 0; pass < 4; pass++) {
+                        for (let i = 0; i < blocks.length; i++) for (let j = i + 1; j < blocks.length; j++) {
+                            const a = blocks[i], b = blocks[j], dx = b.x - a.x, dy = b.y - a.y;
+                            const overlapX = (a.width + b.width) / 2 + 24 - Math.abs(dx);
+                            const overlapY = (a.height + b.height) / 2 + 24 - Math.abs(dy);
+                            if (overlapX <= 0 || overlapY <= 0) continue;
+                            if (overlapX < overlapY) {
+                                const push = (overlapX + .1) / 2 * (dx >= 0 ? 1 : -1); a.x -= push; b.x += push;
+                            } else {
+                                const push = (overlapY + .1) / 2 * (dy >= 0 ? 1 : -1); a.y -= push; b.y += push;
+                            }
+                        }
+                    }
+                };
+                for (let iteration = 0; iteration < 200; iteration++) {
+                    const forces = blocks.map(() => ({x: 0, y: 0}));
+                    links.forEach(({a: ai, b: bi}) => {
+                        const a = blocks[ai], b = blocks[bi], dx = b.x - a.x, dy = b.y - a.y;
+                        const length = Math.hypot(dx, dy) || 1, nx = dx / length, ny = dy / length;
+                        const ideal = Math.min(((a.width + b.width) / 2 + 38) / (Math.abs(nx) || .0001), ((a.height + b.height) / 2 + 38) / (Math.abs(ny) || .0001));
+                        const pull = (length - ideal) * .045;
+                        forces[ai].x += nx * pull; forces[ai].y += ny * pull;
+                        forces[bi].x -= nx * pull; forces[bi].y -= ny * pull;
+                    });
+                    const centerX = blocks.reduce((sum, b) => sum + b.x, 0) / blocks.length;
+                    const centerY = blocks.reduce((sum, b) => sum + b.y, 0) / blocks.length;
+                    blocks.forEach((b, i) => {
+                        b.x += Math.max(-20, Math.min(20, forces[i].x + (centerX - b.x) * .008));
+                        b.y += Math.max(-20, Math.min(20, forces[i].y + (centerY - b.y) * .008));
+                    });
+                    separate();
+                }
+                separate();
+                cy.batch(() => blocks.forEach(b => b.node.position({x: b.x + b.offsetX, y: b.y + b.offsetY})));
+            }
+        }
+        function orderSiblings() {
+            const positions = new Map(cy.nodes(':visible').map(n => [n.id(), {...n.position()}]));
+            const links = cy.edges(':visible').map(e => ({source: e.source().id(), target: e.target().id()}));
+            const adjacent = new Map([...positions.keys()].map(id => [id, new Set()]));
+            links.forEach(e => { adjacent.get(e.source).add(e); adjacent.get(e.target).add(e); });
+            cy.nodes(':parent:visible').forEach(parent => {
+                const children = parent.children(':visible');
+                if (children.length < 2 || children.length > 32 || children.some(n => n.isParent())) return;
+                // Swap existing slots only when the actual dependencies get shorter.
+                // Group bounds and spacing stay stable, while callers align with callees.
+                for (let pass = 0; pass < 4; pass++) {
+                    let changed = false;
+                    for (let i = 0; i < children.length; i++) for (let j = i + 1; j < children.length; j++) {
+                        const a = children[i].id(), b = children[j].id();
+                        const affected = new Set([...adjacent.get(a), ...adjacent.get(b)]);
+                        const cost = swapped => {
+                            const at = id => positions.get(swapped && id === a ? b : swapped && id === b ? a : id);
+                            let total = 0;
+                            affected.forEach(e => { const p = at(e.source), q = at(e.target); total += Math.hypot(p.x - q.x, p.y - q.y); });
+                            return total;
+                        };
+                        if (cost(true) + 2 < cost(false)) { const p = positions.get(a); positions.set(a, positions.get(b)); positions.set(b, p); changed = true; }
+                    }
+                    if (!changed) break;
+                }
+            });
+            cy.batch(() => cy.nodes(':visible').not(':parent').forEach(n => n.position(positions.get(n.id()))));
+        }
+        function routeEdges(onComplete = () => {}) {
+            const version = ++routingVersion;
+            $('cy').setAttribute('aria-busy', 'true');
+            const cellSize = 160, cells = new Map(), lineCells = new Map(), obstacles = [];
+            const eachCell = (box, visit) => {
+                for (let x = Math.floor(box.x1 / cellSize); x <= Math.floor(box.x2 / cellSize); x++)
+                    for (let y = Math.floor(box.y1 / cellSize); y <= Math.floor(box.y2 / cellSize); y++) visit(`${x},${y}`);
+            };
+            const segmentBox = (a, b, margin = 0) => ({x1: Math.min(a.x, b.x) - margin, x2: Math.max(a.x, b.x) + margin, y1: Math.min(a.y, b.y) - margin, y2: Math.max(a.y, b.y) + margin});
+            const distance = (a, b) => Math.hypot(b.x - a.x, b.y - a.y);
+            cy.nodes(':visible').forEach(node => {
+                const add = (box, type, margin) => {
+                    const rect = {id: node.id(), ancestors: node.ancestors().map(n => n.id()), key: node.id() + ':' + type, type, raw: box, x1: box.x1 - margin, y1: box.y1 - margin, x2: box.x2 + margin, y2: box.y2 + margin};
+                    obstacles.push(rect);
+                    eachCell(rect, key => { if (!cells.has(key)) cells.set(key, []); cells.get(key).push(rect); });
+                };
+                const body = node.boundingBox({includeLabels: false, includeOverlays: false});
+                const label = node.boundingBox({includeNodes: false, includeEdges: false, includeLabels: true, includeOverlays: false, includeUnderlays: false});
+                add(body, node.isParent() ? 'container' : 'symbol', 7);
+                if (node.isParent()) add(label, 'title', 6);
+                else if (label.x1 < body.x1 || label.x2 > body.x2 || label.y1 < body.y1 || label.y2 > body.y2) add(label, 'label', 6);
+            });
+            // Segment/rectangle intersections catch thin labels and corners that
+            // point-only sampling can miss. Curves are flattened to short segments.
+            function intersectsRect(a, b, r) {
+                let low = 0, high = 1;
+                for (const axis of ['x', 'y']) {
+                    const delta = b[axis] - a[axis];
+                    if (Math.abs(delta) < .001) { if (a[axis] <= r[axis + '1'] || a[axis] >= r[axis + '2']) return false; }
+                    else {
+                        const p = (r[axis + '1'] - a[axis]) / delta, q = (r[axis + '2'] - a[axis]) / delta;
+                        low = Math.max(low, Math.min(p, q)); high = Math.min(high, Math.max(p, q));
+                        if (low >= high) return false;
+                    }
+                }
+                return true;
+            }
+            function curvePoints(start, end, controls) {
+                const points = [start]; let from = start;
+                controls.forEach((control, index) => {
+                    const next = controls[index + 1], to = next ? {x: (control.x + next.x) / 2, y: (control.y + next.y) / 2} : end;
+                    const steps = Math.min(240, Math.max(4, Math.ceil((distance(from, control) + distance(control, to)) / 20)));
+                    for (let i = 1; i <= steps; i++) {
+                        const t = i / steps, u = 1 - t;
+                        points.push({x: u * u * from.x + 2 * u * t * control.x + t * t * to.x, y: u * u * from.y + 2 * u * t * control.y + t * t * to.y});
+                    }
+                    from = to;
+                });
+                return points;
+            }
+            function roundedCorners(points) {
+                const controls = points.slice(1, -1).flatMap((p, i) => {
+                    const before = points[i], after = points[i + 2], inLength = distance(before, p) || 1, outLength = distance(p, after) || 1;
+                    const radius = Math.min(8, inLength / 2, outLength / 2);
+                    return [{x: p.x - (p.x - before.x) / inLength * radius, y: p.y - (p.y - before.y) / inLength * radius}, p, {x: p.x + (after.x - p.x) / outLength * radius, y: p.y + (after.y - p.y) / outLength * radius}];
+                });
+                return controls.length ? controls : [{x: (points[0].x + points.at(-1).x) / 2, y: (points[0].y + points.at(-1).y) / 2}];
+            }
+            function lineConflict(a, b, c, d) {
+                const ux = b.x - a.x, uy = b.y - a.y, vx = d.x - c.x, vy = d.y - c.y;
+                const cross = ux * vy - uy * vx;
+                if (Math.abs(cross) > .01) {
+                    const t = ((c.x - a.x) * vy - (c.y - a.y) * vx) / cross;
+                    const u = ((c.x - a.x) * uy - (c.y - a.y) * ux) / cross;
+                    if (t >= 0 && t <= 1 && u >= 0 && u <= 1) return 'crossing';
+                }
+                const length = Math.hypot(ux, uy) || 1, otherLength = Math.hypot(vx, vy) || 1;
+                if (Math.abs(cross) / (length * otherLength) > .18) return null;
+                const separation = Math.abs((c.x - a.x) * uy - (c.y - a.y) * ux) / length;
+                const p = ((c.x - a.x) * ux + (c.y - a.y) * uy) / length, q = ((d.x - a.x) * ux + (d.y - a.y) * uy) / length;
+                return separation < 7 && Math.min(length, Math.max(p, q)) - Math.max(0, Math.min(p, q)) > 3 ? 'overlap' : null;
+            }
+            const routes = new Map();
+            function assess(points, context) {
+                const hits = new Set(), crossing = new Set(), overlap = new Set(); let length = 0;
+                for (let i = 1; i < points.length; i++) {
+                    const a = points[i - 1], b = points[i]; length += distance(a, b);
+                    const rectangles = new Set();
+                    eachCell(segmentBox(a, b, 7), key => {
+                        (cells.get(key) || []).forEach(r => rectangles.add(r));
+                    });
+                    for (const r of rectangles) {
+                        if (r.ancestors.some(id => !context.allowed.has(id))) continue;
+                        if (r.type === 'container' && context.allowed.has(r.id)) continue;
+                        let box = r;
+                        if (context.ids.has(r.id) && r.type !== 'label') {
+                            if (r.type === 'title') continue;
+                            box = {x1: r.raw.x1 + 2, y1: r.raw.y1 + 2, x2: r.raw.x2 - 2, y2: r.raw.y2 - 2};
+                        }
+                        if (!hits.has(r.key) && intersectsRect(a, b, box)) hits.add(r.key);
+                    }
+                }
+                // Arrow comparisons are only useful once a path clears the nodes.
+                // This also bounds the work around dense clusters of connections.
+                if (!hits.size) for (let i = 1; i < points.length; i++) {
+                    const a = points[i - 1], b = points[i], lines = new Set();
+                    eachCell(segmentBox(a, b, 7), key => (lineCells.get(key) || []).forEach(s => lines.add(s)));
+                    for (const line of lines) {
+                        if (overlap.has(line.id) && crossing.has(line.id)) continue;
+                        const route = routes.get(line.id);
+                        // Shared endpoints naturally converge. Penalize overlaps
+                        // beyond that short attachment area, not the junction itself.
+                        if ((route.ids.has(context.source) && distance(b, points[0]) < 28) || (route.ids.has(context.target) && distance(a, points.at(-1)) < 28)) continue;
+                        const conflict = lineConflict(a, b, line.a, line.b);
+                        if (conflict === 'overlap') overlap.add(line.id);
+                        if (conflict === 'crossing') crossing.add(line.id);
+                    }
+                }
+                return {hits: hits.size, crossing: crossing.size, overlap: overlap.size, length, score: hits.size * 1e6 + crossing.size * 64 + overlap.size * 120 + length};
+            }
+            function corridorPath(start, end, context) {
+                const p = {x: start.x + start.vx * 12, y: start.y + start.vy * 12}, q = {x: end.x + end.vx * 12, y: end.y + end.vy * 12};
+                // An unrelated container blocks its whole area. Its descendants
+                // add no new obstacles, so keep them out of the path search.
+                const relevant = obstacles.filter(r => !r.ancestors.some(id => !context.allowed.has(id)) && !(r.type === 'container' && context.allowed.has(r.id)) && !(r.type === 'title' && context.ids.has(r.id)));
+                let area = segmentBox(p, q, 200), nearby = [];
+                // A detour around a tall container can leave the initial search
+                // area. Include obstacles along that detour before solving it.
+                for (let pass = 0; pass < 3; pass++) {
+                    nearby = relevant.filter(r => r.x2 > area.x1 && r.x1 < area.x2 && r.y2 > area.y1 && r.y1 < area.y2);
+                    nearby.forEach(r => { area.x1 = Math.min(area.x1, r.x1 - 12); area.x2 = Math.max(area.x2, r.x2 + 12); area.y1 = Math.min(area.y1, r.y1 - 12); area.y2 = Math.max(area.y2, r.y2 + 12); });
+                }
+                if (nearby.some(r => (p.x > r.x1 && p.x < r.x2 && p.y > r.y1 && p.y < r.y2) || (q.x > r.x1 && q.x < r.x2 && q.y > r.y1 && q.y < r.y2))) return null;
+                const coordinates = (values, fixed) => {
+                    const lanes = [];
+                    values.sort((a, b) => a - b).forEach(value => { if (!lanes.length || value - lanes.at(-1) > 1.5) lanes.push(value); });
+                    return [...new Set([...lanes, ...fixed])].sort((a, b) => a - b);
+                };
+                const xs = coordinates(nearby.flatMap(r => [r.x1 - 4, r.x2 + 4]), [p.x, q.x]);
+                const ys = coordinates(nearby.flatMap(r => [r.y1 - 4, r.y2 + 4]), [p.y, q.y]);
+                const height = ys.length, size = xs.length * height;
+                if (size > 500000) return null;
+                const first = xs.indexOf(p.x) * height + ys.indexOf(p.y), last = xs.indexOf(q.x) * height + ys.indexOf(q.y);
+                const costs = new Float64Array(size).fill(Infinity), previous = new Int32Array(size).fill(-1);
+                const point = index => ({x: xs[Math.floor(index / height)], y: ys[index % height]});
+                const horizontal = new Uint8Array(size), vertical = new Uint8Array(size);
+                relevant.forEach(r => {
+                    const columns = [], rows = [], crossingColumns = [], crossingRows = [];
+                    xs.forEach((x, i) => { if (x > r.x1 && x < r.x2) columns.push(i); if (i + 1 < xs.length && x < r.x2 && xs[i + 1] > r.x1) crossingColumns.push(i); });
+                    ys.forEach((y, i) => { if (y > r.y1 && y < r.y2) rows.push(i); if (i + 1 < ys.length && y < r.y2 && ys[i + 1] > r.y1) crossingRows.push(i); });
+                    for (const x of columns) for (const y of crossingRows) vertical[x * height + y] = 1;
+                    for (const y of rows) for (const x of crossingColumns) horizontal[x * height + y] = 1;
+                });
+                const heap = [];
+                const push = item => {
+                    let i = heap.length; heap.push(item);
+                    while (i) { const parent = (i - 1) >> 1; if (heap[parent].score <= item.score) break; heap[i] = heap[parent]; i = parent; }
+                    heap[i] = item;
+                };
+                const pop = () => {
+                    const first = heap[0], last = heap.pop();
+                    if (heap.length) {
+                        let i = 0;
+                        while (i * 2 + 1 < heap.length) {
+                            let child = i * 2 + 1;
+                            if (child + 1 < heap.length && heap[child + 1].score < heap[child].score) child++;
+                            if (last.score <= heap[child].score) break;
+                            heap[i] = heap[child]; i = child;
+                        }
+                        heap[i] = last;
+                    }
+                    return first;
+                };
+                costs[first] = 0; push({index: first, cost: 0, score: 0});
+                while (heap.length) {
+                    const current = pop(); if (current.cost !== costs[current.index]) continue;
+                    if (current.index === last) break;
+                    const x = Math.floor(current.index / height), y = current.index % height, from = point(current.index);
+                    for (const [nx, ny] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
+                        if (nx < 0 || nx >= xs.length || ny < 0 || ny >= ys.length) continue;
+                        const next = nx * height + ny, to = point(next);
+                        if (x === nx ? vertical[x * height + Math.min(y, ny)] : horizontal[Math.min(x, nx) * height + y]) continue;
+                        const before = previous[current.index] < 0 ? null : point(previous[current.index]);
+                        const turn = before && ((before.x === from.x) !== (from.x === to.x)) ? 16 : 0;
+                        const cost = current.cost + Math.abs(to.x - from.x) + Math.abs(to.y - from.y) + turn;
+                        if (cost >= costs[next]) continue;
+                        costs[next] = cost; previous[next] = current.index;
+                        push({index: next, cost, score: cost + Math.abs(to.x - q.x) + Math.abs(to.y - q.y)});
+                    }
+                }
+                if (!Number.isFinite(costs[last])) return null;
+                const path = [];
+                for (let at = last; at !== -1; at = previous[at]) path.push(point(at));
+                path.reverse(); path.unshift(start); path.push(end);
+                return path.filter((p, i) => !i || i === path.length - 1 || !((path[i - 1].x === p.x && p.x === path[i + 1].x) || (path[i - 1].y === p.y && p.y === path[i + 1].y)));
+            }
+            const ports = node => {
+                const p = node.position(), w = node.outerWidth() / 2, h = node.outerHeight() / 2;
+                return [[1, 0], [0, 1], [-1, 0], [0, -1]].map(([vx, vy]) => ({x: p.x + vx * w, y: p.y + vy * h, vx, vy, endpoint: `${vx * 50}% ${vy * 50}%`}));
+            };
+            const sorted = cy.edges(':visible').sort((a, b) => distance(a.source().position(), a.target().position()) - distance(b.source().position(), b.target().position()));
+            const dense = sorted.length > 200;
+            const parallel = new Map();
+            const register = (edge, points, context) => {
+                routes.set(edge.id(), {ids: context.ids});
+                for (let i = 1; i < points.length; i += 2) {
+                    const segment = {a: points[i - 1], b: points[Math.min(i + 1, points.length - 1)], id: edge.id()};
+                    eachCell(segmentBox(segment.a, segment.b, 7), key => { if (!lineCells.has(key)) lineCells.set(key, []); lineCells.get(key).push(segment); });
+                }
+            };
+            const route = edge => {
+                const source = edge.source(), target = edge.target();
+                const context = {source: source.id(), target: target.id(), ids: new Set([source.id(), target.id()]), allowed: new Set([source.id(), target.id(), ...source.ancestors().map(n => n.id()), ...target.ancestors().map(n => n.id())])};
+                if (source.id() === target.id()) {
+                    let best;
+                    for (const size of [80, 110, 150]) for (const direction of [90, 270, 180, 0]) {
+                        const style = {'control-point-step-size': size, 'loop-direction': direction + 'deg', 'loop-sweep': '40deg'};
+                        edge.style(style);
+                        const start = edge.sourceEndpoint(), end = edge.targetEndpoint();
+                        if (!Number.isFinite(start?.x) || !Number.isFinite(end?.x)) continue;
+                        const points = curvePoints(start, end, edge.controlPoints()), result = assess(points, context);
+                        if (!best || result.score < best.score) best = {...result, style, points};
+                    }
+                    if (best) {
+                        edge.style(best.style); edge.data({routeCollisions: best.hits, routeCrossings: best.crossing, routeOverlaps: best.overlap});
+                        register(edge, best.points, context);
+                    }
+                    return;
+                }
+                const pairs = ports(source).flatMap(start => ports(target).map(end => ({start, end, span: distance(start, end)}))).filter(p => p.span > 1).sort((a, b) => a.span - b.span);
+                const pair = JSON.stringify([source.id(), target.id()].sort()), lane = parallel.get(pair) || 0; parallel.set(pair, lane + 1);
+                let best = null, attempts = 0;
+                const consider = (start, end, controls) => {
+                    const first = controls[0], last = controls.at(-1);
+                    if ((first.x - start.x) * start.vx + (first.y - start.y) * start.vy < 1 || (last.x - end.x) * end.vx + (last.y - end.y) * end.vy < 1) return;
+                    attempts++;
+                    const points = curvePoints(start, end, controls), result = assess(points, context);
+                    result.score += Math.max(0, controls.length - 1) * 2;
+                    if (!best || result.score < best.score) best = {...result, start, end, controls, points};
+                };
+                for (const {start, end, span} of pairs) {
+                    if (attempts >= (dense ? 40 : 160)) break;
+                    if (best && !best.hits && span > best.score) break;
+                    const dx = end.x - start.x, dy = end.y - start.y;
+                    for (const bend of [lane ? 24 + lane * 20 : 0, 24, -24, 56, -56, 96, -96, 156, -156, 240, -240, 360, -360, 520, -520, 760, -760]) {
+                        if (best && !best.hits && span + Math.abs(bend) * .6 > best.score) continue;
+                        for (const weight of dense ? [.5] : [.5, .3, .7]) {
+                            consider(start, end, [{x: start.x + dx * weight - dy / span * bend, y: start.y + dy * weight + dx / span * bend}]);
+                            if (best && !best.hits && !best.crossing && !best.overlap) break;
+                        }
+                        if (best && !best.hits && !best.crossing && !best.overlap) break;
+                    }
+                }
+                // Use rounded corridors when a single curve cannot clear a group.
+                if (!best || best.hits || best.overlap || best.crossing > 1) {
+                    for (const {start, end, span} of pairs.slice(0, 8)) {
+                        if (best && !best.hits && span > best.score) continue;
+                        const path = corridorPath(start, end, context);
+                        if (path) consider(start, end, roundedCorners(path));
+                        if (best && !best.hits && (dense || (!best.crossing && !best.overlap))) break;
+                    }
+                }
+                if (!best) return;
+                const {start, end, controls, points} = best, dx = end.x - start.x, dy = end.y - start.y, squared = dx * dx + dy * dy, span = Math.sqrt(squared);
+                // Stable, subpixel values avoid long floating-point style strings.
+                edge.data({bends: controls.map(p => +(((p.x - start.x) * -dy + (p.y - start.y) * dx) / span).toFixed(3)), weights: controls.map(p => +(((p.x - start.x) * dx + (p.y - start.y) * dy) / squared).toFixed(9)), sourceEndpoint: start.endpoint, targetEndpoint: end.endpoint, routeCollisions: best.hits, routeCrossings: best.crossing, routeOverlaps: best.overlap});
+                edge.addClass('routed');
+                register(edge, points, context);
+            };
+            const finish = () => {
+                $('cy').setAttribute('aria-busy', 'false');
+                $('layout-note').hidden = true;
+                onComplete();
+            };
+            if (!dense) { sorted.forEach(route); finish(); return; }
+            $('layout-note').textContent = 'Arranging connections…'; $('layout-note').hidden = false;
+            let next = 0;
+            const step = () => {
+                if (version !== routingVersion) return;
+                const deadline = performance.now() + 12;
+                do { route(sorted[next++]); } while (next < sorted.length && performance.now() < deadline);
+                if (next < sorted.length) requestAnimationFrame(step); else finish();
+            };
+            requestAnimationFrame(step);
+        }
+
+        function centerSelection() {
+            if (!cy || !selectedId || !cy.width() || !cy.height()) return;
+            const node = cy.getElementById(selectedId); if (!node.visible()) return;
+            cy.stop();
+            const ids = neighborhood(selectedId);
+            let nearby = focusId ? cy.elements(':visible') : cy.collection([...ids].map(id => cy.getElementById(id))).filter(':visible');
+            if (!focusId) nearby = nearby.union(cy.edges(':visible').filter(e => ids.has(e.source().id()) && ids.has(e.target().id())));
+            const bounds = nearby.boundingBox();
+            const zoom = Math.max(.5, Math.min(1.2, (cy.width() - 112) / bounds.w, (cy.height() - 112) / bounds.h));
+            const pan = {x: cy.width() / 2 - (bounds.x1 + bounds.x2) / 2 * zoom, y: cy.height() / 2 - (bounds.y1 + bounds.y2) / 2 * zoom};
+            if (reducedMotion.matches) cy.viewport({zoom, pan});
+            else cy.animate({zoom, pan}, {duration: 220, easing: 'ease-out-cubic'});
+        }
+        function changeZoom(value) {
+            if (!cy) return;
+            cy.stop(); cy.zoom({level: Math.max(cy.minZoom(), Math.min(cy.maxZoom(), value)), renderedPosition: {x: cy.width() / 2, y: cy.height() / 2}});
+        }
+        function toggleFocus() {
+            if (!cy || !selectedId) return;
+            focusId = focusId ? null : selectedId; applyVisibility();
+            const button = $('node-details').querySelector('[data-action="focus-connections"]');
+            if (button) { button.innerHTML = icon('graph') + (focusId ? 'Show full graph' : 'Focus connections'); button.setAttribute('aria-pressed', Boolean(focusId)); }
+        }
+        function exitFocus() {
+            focusId = null; applyVisibility();
+            const button = $('node-details').querySelector('[data-action="focus-connections"]');
+            if (button) { button.innerHTML = icon('graph') + 'Focus connections'; button.setAttribute('aria-pressed', 'false'); }
+            $('fit-graph').focus();
+        }
+        function initializeGraph() {
+            if (typeof cytoscape === 'undefined') {
+                canvasState('Map could not load', 'Findings and symbols remain available.', '<button class="button" data-action="reload">Reload report</button>');
+                document.querySelectorAll('.zoom-controls button, #view-options input').forEach(el => el.disabled = true);
+                return;
+            }
+            const elements = nodes.map(n => {
+                const worst = n.vulnerabilities.reduce((best, v) => !best || SEVERITY_RANK[severity(v)] > SEVERITY_RANK[best] ? severity(v) : best, null);
+                const data = {id: n.id, kind: n.kind, status: n.status, name: shortName(n), containerLabel: n.kind === 'module' && n.file ? relativeFile(n).split('/').pop() : shortName(n), label: `${statusMark[n.status]} ${shortName(n)}`, color: STATUS_COLOR[n.status], fill: tint(STATUS_COLOR[n.status]), shape: 'round-rectangle', borderColor: worst ? SEVERITY_COLOR[worst] : STATUS_COLOR[n.status], borderWidth: worst ? 3 : 1, deleted: n.status === 'deleted'};
+                if (parentOf.has(n.id)) data.parent = parentOf.get(n.id);
+                return {data};
+            });
+            let edgePrefix = 'zairo-edge-';
+            while (nodes.some(n => String(n.id).startsWith(edgePrefix))) edgePrefix = '_' + edgePrefix;
+            dependencies.forEach((e, i) => elements.push({data: {id: `${edgePrefix}${i}`, source: e.source, target: e.target, kind: e.kind || 'dependency', inferred: Boolean(e.confidence && e.confidence !== 'certain')}}));
+            cy = cytoscape({
+                container: $('cy'), elements, layout: {name: 'preset'}, minZoom: .04, maxZoom: 3, boxSelectionEnabled: false, selectionType: 'single',
+                style: [
+                    {selector: 'node', style: {'background-color': 'data(fill)', 'shape': 'data(shape)', 'width': 184, 'height': 40, 'border-width': 'data(borderWidth)', 'border-color': 'data(borderColor)', 'label': 'data(label)', 'color': color('text'), 'font-family': 'monospace', 'font-size': 12, 'text-valign': 'center', 'text-margin-y': 0, 'text-wrap': 'ellipsis', 'text-max-width': 170, 'text-background-color': color('canvas'), 'text-background-opacity': 0, 'text-background-padding': 3, 'text-background-shape': 'round-rectangle', 'min-zoomed-font-size': 8, 'text-events': 'yes'}},
+                    {selector: ':parent', style: {'background-color': color('surface'), 'background-opacity': .5, 'label': 'data(containerLabel)', 'min-height-bias-top': '100%', 'min-height-bias-bottom': '0%', 'compound-sizing-wrt-labels': 'exclude', 'border-width': 1, 'border-opacity': .35, 'shape': 'round-rectangle', 'text-valign': 'top', 'text-halign': 'left', 'text-margin-x': 12, 'text-margin-y': -10, 'font-size': 11, 'color': color('muted'), 'padding': 24}},
+                    {selector: 'node[borderWidth = 3]:parent', style: {'border-width': 2, 'border-opacity': .85}},
+                    {selector: 'node[kind = "proxy"]', style: {'shape': 'diamond', 'width': 30, 'height': 30, 'label': 'data(name)', 'text-valign': 'bottom', 'text-margin-y': 10}},
+                    {selector: 'node[?deleted]', style: {'background-opacity': .08, 'border-style': 'dashed', 'border-width': 2}},
+                    {selector: 'node:selected', style: {'overlay-color': color('accent'), 'overlay-opacity': .14, 'overlay-padding': 8, 'font-weight': 'bold', 'color': color('accent')}},
+                    {selector: 'node.hovered', style: {'overlay-color': color('accent'), 'overlay-opacity': .08, 'overlay-padding': 7}},
+                    {selector: 'edge', style: {'width': 1.25, 'line-color': '#687c82', 'target-arrow-color': '#687c82', 'target-arrow-shape': 'triangle', 'arrow-scale': .7, 'curve-style': 'bezier', 'control-point-step-size': 100, 'opacity': .9, 'font-size': 9, 'color': color('muted'), 'text-rotation': 'autorotate', 'text-background-color': color('canvas'), 'text-background-opacity': 1, 'text-background-padding': 3}},
+                    {selector: 'edge.routed', style: {'curve-style': 'unbundled-bezier', 'edge-distances': 'endpoints', 'control-point-distances': e => e.data('bends'), 'control-point-weights': e => e.data('weights'), 'source-endpoint': e => e.data('sourceEndpoint'), 'target-endpoint': e => e.data('targetEndpoint')}},
+                    {selector: 'edge[?inferred]', style: {'line-style': 'dashed'}},
+                    {selector: 'edge.related', style: {'width': 1.8, 'line-color': color('accent'), 'target-arrow-color': color('accent'), 'opacity': .9}},
+                    {selector: 'edge.show-label', style: {'label': 'data(kind)'}},
+                    {selector: '.dimmed', style: {'opacity': .13}}
+                ]
+            });
+            window.cy = cy;
+            cy.on('dragfree', 'node', e => { alignGroupLabels(); separateNodes(e.target); routeEdges(); });
+            cy.on('tap', 'node', e => { selectedKey = null; selectNode(e.target.id()); });
+            cy.on('tap', e => { if (e.target === cy && selectedId) closeDetails(false); });
+            cy.on('mouseover', 'node', e => { e.target.addClass('hovered'); $('cy').style.cursor = 'pointer'; });
+            cy.on('mouseout', 'node', e => { e.target.removeClass('hovered'); $('cy').style.cursor = ''; });
+            cy.on('zoom', () => {
+                $('zoom-reset').textContent = Math.round(cy.zoom() * 100) + '%';
+                $('zoom-in').disabled = cy.zoom() >= cy.maxZoom(); $('zoom-out').disabled = cy.zoom() <= cy.minZoom();
+            });
+            applyVisibility();
+            new ResizeObserver(entries => {
+                const {width, height} = entries[0].contentRect;
+                if (width && height) { cy.resize(); selectedId ? centerSelection() : fitGraph(true); }
+            }).observe($('cy'));
+        }
+        $('search').addEventListener('input', () => {
+            clearTimeout(queryTimer); queryTimer = setTimeout(() => { resultLimit = 80; selectedId = null; selectedKey = null; closeDetails(false); updateResults(); $('results').scrollTop = 0; }, 100);
+        });
+        $('clear-search').addEventListener('click', () => { clearTimeout(queryTimer); $('search').value = ''; resultLimit = 80; updateResults(); $('search').focus(); });
+        $('search').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === 'ArrowDown') { e.preventDefault(); clearTimeout(queryTimer); updateResults(); $('results').querySelector('[data-result-index]')?.focus(); } });
+        ['findings', 'symbols'].forEach(tab => $('tab-' + tab).addEventListener('click', () => setTab(tab)));
+        document.querySelector('.tabs').addEventListener('keydown', e => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) { e.preventDefault(); setTab(e.key === 'Home' ? 'findings' : e.key === 'End' ? 'symbols' : activeTab === 'findings' ? 'symbols' : 'findings', true); } });
+        ['severity-filter', 'status-filter'].forEach(id => $(id).addEventListener('change', () => { clearTimeout(queryTimer); closeDetails(false); resultLimit = 80; updateResults(); $('results').scrollTop = 0; }));
+        $('results').addEventListener('click', e => { const row = e.target.closest('[data-result-index]'); if (row) selectResult(Number(row.dataset.resultIndex)); });
+        $('results').addEventListener('keydown', e => {
+            const row = e.target.closest('[data-result-index]'); if (!row || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+            e.preventDefault(); const index = Number(row.dataset.resultIndex);
+            const next = e.key === 'Home' ? 0 : e.key === 'End' ? Math.min(results.length, resultLimit) - 1 : index + (e.key === 'ArrowDown' ? 1 : -1);
+            $('results').querySelector(`[data-result-index="${next}"]`)?.focus();
+        });
+        $('node-details').addEventListener('click', e => { const el = e.target.closest('[data-node-index]'); if (el) { selectedKey = null; selectNode(nodes[Number(el.dataset.nodeIndex)].id); } });
+        $('close-details').addEventListener('click', () => closeDetails());
+        ['previous-result', 'next-result'].forEach((id, i) => $(id).addEventListener('click', () => { selectResult(results.findIndex(r => r.key === selectedKey) + (i ? 1 : -1)); if (!$(id).disabled) $(id).focus(); }));
+        $('exit-focus').addEventListener('click', exitFocus);
+        ['toggle-unchanged', 'toggle-deleted'].forEach(id => $(id).addEventListener('change', () => { if (!$('inspector').hidden) closeDetails(false); applyVisibility(); }));
+        $('toggle-labels').addEventListener('change', e => cy?.edges().toggleClass('show-label', e.target.checked));
+        $('zoom-in').addEventListener('click', () => changeZoom(cy?.zoom() * 1.3));
+        $('zoom-out').addEventListener('click', () => changeZoom(cy?.zoom() / 1.3));
+        $('zoom-reset').addEventListener('click', () => changeZoom(1));
+        $('fit-graph').addEventListener('click', () => fitGraph());
+        document.addEventListener('click', e => {
+            document.querySelectorAll('.popover[open]').forEach(el => { if (!el.contains(e.target)) el.open = false; });
+            const action = e.target.closest('[data-action]')?.dataset.action;
+            if (action === 'reset-filters') resetFilters();
+            if (action === 'show-symbols') setTab('symbols', true);
+            if (action === 'all-symbols') { $('status-filter').value = 'all'; updateResults(); $('status-filter').focus(); }
+            if (action === 'load-more') { const previous = resultLimit; resultLimit += 80; renderResults(); $('results').querySelector(`[data-result-index="${previous}"]`)?.focus(); }
+            if (action === 'copy-location') copyLocation();
+            if (action === 'focus-connections') toggleFocus();
+            if (action === 'show-all-map') { $('toggle-unchanged').checked = true; $('toggle-deleted').checked = true; applyVisibility(); $('fit-graph').focus(); }
+            if (action === 'reload') location.reload();
+        });
+        document.addEventListener('keydown', e => {
+            const editing = e.target.matches('input, textarea, select, [contenteditable="true"]');
+            if (e.key === 'Escape') {
+                const open = document.querySelector('.popover[open]');
+                if (open) { open.open = false; open.querySelector('summary').focus(); }
+                else if (!$('inspector').hidden) closeDetails();
+                else if (focusId) exitFocus();
+                else if ($('search').value) { $('search').value = ''; updateResults(); $('search').focus(); }
+            }
+            if (editing || e.metaKey || e.ctrlKey || e.altKey) return;
+            if (e.key === '/') { e.preventDefault(); if (window.innerWidth <= 1040 && !$('inspector').hidden) closeDetails(false); $('search').focus(); }
+            if (e.key.toLowerCase() === 'f') { e.preventDefault(); fitGraph(); }
+        });
+        setTab(activeTab);
+        // Let the review list render before arranging a large graph.
+        requestAnimationFrame(() => requestAnimationFrame(initializeGraph));
+    </script>
+</body>
+</html>
