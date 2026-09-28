@@ -46,6 +46,28 @@ def test_missing_file_omits_location_but_keeps_result():
     assert "locations" not in result
 
 
+def test_result_points_at_the_line_its_finding_cites():
+    vulnerabilities = {"n1": [{
+        "title": "X", "description": "d", "severity": "high", "line": 7, "introduced_by_change": True,
+        "trigger": "any logged-in user", "impact": "i", "confidence": "medium",
+    }]}
+    sarif = build_sarif(_graph("/repo/src/app.py"), vulnerabilities, repo_root="/repo")
+
+    result = sarif["runs"][0]["results"][0]
+    assert result["locations"][0]["physicalLocation"]["region"]["startLine"] == 7
+    assert result["properties"]["introducedByChange"] is True
+    assert result["properties"]["confidence"] == "medium"
+    assert "Who can trigger it: any logged-in user" in result["message"]["text"]
+
+
+def test_result_without_a_cited_line_points_at_the_node():
+    vulnerabilities = {"n1": [{"title": "X", "severity": "high", "line": None}, {"title": "Y", "severity": "high", "line": True}]}
+    sarif = build_sarif(_graph("/repo/src/app.py"), vulnerabilities, repo_root="/repo")
+
+    lines = [r["locations"][0]["physicalLocation"]["region"]["startLine"] for r in sarif["runs"][0]["results"]]
+    assert lines == [4, 4]  # the node's start_line
+
+
 def test_complete_scan_records_a_successful_invocation():
     sarif = build_sarif(_graph("/repo/src/app.py"), {}, repo_root="/repo")
     assert sarif["runs"][0]["invocations"] == [{"executionSuccessful": True}]

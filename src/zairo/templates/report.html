@@ -360,6 +360,11 @@
         let queryTimer, toastTimer, routingVersion = 0;
         const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
         const severityBadge = sev => `<span class="badge sev-${sev}"><i class="dot"></i>${sev[0].toUpperCase() + sev.slice(1)}</span>`;
+        // Whether the change caused it is the first thing a reviewer of a diff needs to know.
+        const originBadge = v => v.introduced_by_change === true ? '<span class="badge">New in this change</span>' : v.introduced_by_change === false ? '<span class="badge">Pre-existing</span>' : '';
+        const confidenceBadge = v => ['high', 'medium', 'low'].includes(v.confidence) ? `<span class="badge">${v.confidence[0].toUpperCase() + v.confidence.slice(1)} confidence</span>` : '';
+        // The line the finding cites (the scanner keeps only lines the model was shown), else where the symbol starts.
+        const findingLine = (v, d) => v.line || d.start_line;
         function notify(message) {
             clearTimeout(toastTimer); $('toast').textContent = message; $('toast').hidden = false;
             toastTimer = setTimeout(() => $('toast').hidden = true, 2800);
@@ -404,7 +409,7 @@
                 const path = relativeFile(d) || 'External reference';
                 if (r.finding) {
                     const v = r.finding;
-                    return `<button class="result-item" data-result-index="${index}" aria-current="${current}" aria-controls="inspector"><span class="result-topline">${severityBadge(severity(v))}</span><span class="result-title">${escapeHtml(v.title)}</span><span class="result-symbol">${escapeHtml(shortName(d))}</span><span class="result-path" title="${escapeHtml(d.file)}">${escapeHtml(path)}${d.start_line ? ':' + escapeHtml(d.start_line) : ''}</span></button>`;
+                    return `<button class="result-item" data-result-index="${index}" aria-current="${current}" aria-controls="inspector"><span class="result-topline">${severityBadge(severity(v))}${originBadge(v)}</span><span class="result-title">${escapeHtml(v.title)}</span><span class="result-symbol">${escapeHtml(shortName(d))}</span><span class="result-path" title="${escapeHtml(d.file)}">${escapeHtml(path)}${findingLine(v, d) ? ':' + escapeHtml(findingLine(v, d)) : ''}</span></button>`;
                 }
                 return `<button class="result-item" data-result-index="${index}" aria-current="${current}" aria-controls="inspector"><span class="symbol-topline"><span class="status-mark status-${d.status}" role="img" aria-label="${escapeHtml(d.status)}">${statusMark[d.status]}</span><span class="result-title">${escapeHtml(shortName(d))}</span></span><span class="symbol-meta"><span class="result-path" title="${escapeHtml(d.file)}">${escapeHtml(path)}${d.start_line ? ':' + escapeHtml(d.start_line) : ''}</span>${d.vulnerabilities.length ? `<span class="badge">${plural(d.vulnerabilities.length, 'finding')}</span>` : ''}</span></button>`;
             }).join('') + (results.length > resultLimit ? `<button class="button quiet load-more" data-action="load-more">Show ${Math.min(80, results.length - resultLimit)} more</button>` : '');
@@ -448,7 +453,7 @@
             if (d.vulnerabilities.length) {
                 findingHtml = `<section class="detail-section"><div class="detail-section-heading"><h3>Findings</h3><span class="count">${d.vulnerabilities.length}</span></div>`;
                 [...d.vulnerabilities.entries()].sort((a, b) => SEVERITY_RANK[severity(b[1])] - SEVERITY_RANK[severity(a[1])]).forEach(([index, v]) => {
-                    findingHtml += `<article class="finding-card sev-${severity(v)}${index === findingIndex ? ' is-current' : ''}" id="finding-${index}"><div class="badge-row">${severityBadge(severity(v))}${v.cwe ? `<span class="badge">${escapeHtml(v.cwe)}</span>` : ''}</div><h3>${escapeHtml(v.title)}</h3><p>${escapeHtml(v.description)}</p>${v.impact ? `<div class="finding-impact"><span class="section-eyebrow">Impact</span><p>${escapeHtml(v.impact)}</p></div>` : ''}</article>`;
+                    findingHtml += `<article class="finding-card sev-${severity(v)}${index === findingIndex ? ' is-current' : ''}" id="finding-${index}"><div class="badge-row">${severityBadge(severity(v))}${originBadge(v)}${confidenceBadge(v)}${v.cwe ? `<span class="badge">${escapeHtml(v.cwe)}</span>` : ''}${v.line ? `<span class="badge">Line ${escapeHtml(v.line)}</span>` : ''}</div><h3>${escapeHtml(v.title)}</h3><p>${escapeHtml(v.description)}</p>${v.trigger ? `<div class="finding-impact"><span class="section-eyebrow">Who can trigger it</span><p>${escapeHtml(v.trigger)}</p></div>` : ''}${v.impact ? `<div class="finding-impact"><span class="section-eyebrow">Impact</span><p>${escapeHtml(v.impact)}</p></div>` : ''}</article>`;
                 });
                 findingHtml += '</section>';
             } else {

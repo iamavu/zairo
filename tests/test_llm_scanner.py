@@ -494,6 +494,91 @@ def test_module_diff_leaves_out_its_functions_lines(monkeypatch, tmp_path):
     assert "os.system" not in diff
 
 
+def test_code_is_numbered_so_findings_can_cite_lines(monkeypatch):
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+
+    llm_scanner.scan_graph_for_vulnerabilities({"nodes": [_node("n1", "fn_one")], "edges": []}, "fake-model", cache_path=None)
+
+    [prompt] = _prompts(fake_litellm)
+    assert "    1 | __version__" in prompt
+    assert "'introduced_by_change'" in prompt and "'confidence'" in prompt
+
+
+def test_finding_fields_are_normalized_and_lines_checked_against_what_was_shown(monkeypatch):
+    """_node shows line 1 only: a finding citing it keeps it; one citing a
+    line the model never saw gets None -- but keeps the finding itself."""
+    _mock_litellm_response(monkeypatch, json.dumps({"vulnerabilities": [
+        {"title": "A", "severity": "high", "line": "1", "introduced_by_change": "yes",
+         "trigger": "any logged-in user", "confidence": "HIGH"},
+        {"title": "B", "severity": "low", "line": 99, "introduced_by_change": "maybe", "confidence": "certain"},
+        {"title": "C", "severity": "low", "line": True, "introduced_by_change": False},
+    ]}))
+
+    vulnerabilities, _ = llm_scanner.scan_graph_for_vulnerabilities(
+        {"nodes": [_node("n1", "fn_one")], "edges": []}, "fake-model", cache_path=None,
+    )
+
+    a, b, c = vulnerabilities["n1"]
+    assert (a["line"], a["introduced_by_change"], a["trigger"], a["confidence"]) == (1, True, "any logged-in user", "high")
+    assert (b["line"], b["introduced_by_change"], b["trigger"], b["confidence"]) == (None, None, None, None)
+    assert (c["line"], c["introduced_by_change"]) == (None, False)
+
+
+def test_module_code_is_numbered_and_collapsed_lines_cannot_be_cited(monkeypatch, tmp_path):
+    """The placeholder for a nested body has no line number and sits on its
+    own line; a finding citing a line inside that body -- which the model
+    never saw -- loses its line."""
+    src = tmp_path / "app.py"
+    src.write_text("import os\n\ndef f(x):\n    return os.system(x)\n\nX = 1\n")
+    module = {"id": "m", "name": "app", "kind": "module", "file": str(src), "start_line": 1, "end_line": 6,
+              "status": "modified", "diff_hunks": [{"start": 6, "removed": ["X = 0"], "added": ["X = 1"]}]}
+    function = {"id": "f", "name": "f", "kind": "function", "file": str(src), "start_line": 3, "end_line": 4,
+                "status": "unchanged"}
+    fake_litellm = _mock_litellm_response(monkeypatch, json.dumps({"vulnerabilities": [
+        {"title": "in f", "severity": "high", "line": 4},
+        {"title": "module level", "severity": "low", "line": 6},
+    ]}))
+
+    vulnerabilities, _ = llm_scanner.scan_graph_for_vulnerabilities(
+        {"nodes": [module, function], "edges": []}, "fake-model", cache_path=None,
+    )
+
+    [prompt] = _prompts(fake_litellm)
+    assert "do not guess its contents) ...\n    5 | " in prompt
+    assert "    4 | " not in prompt
+    assert [finding["line"] for finding in vulnerabilities["m"]] == [None, 6]
+
+
+def test_large_function_lines_outside_its_windows_cannot_be_cited(monkeypatch, tmp_path):
+    src = tmp_path / "big.py"
+    src.write_text("def big(x):\n" + "".join(f"    x += {i}\n" for i in range(2, 151)))
+    node = {"id": "b", "name": "big", "kind": "function", "file": str(src), "start_line": 1, "end_line": 150,
+            "status": "modified", "diff_hunks": [{"start": 120, "removed": ["    x += 0"], "added": ["    x += 120"]}]}
+    _mock_litellm_response(monkeypatch, json.dumps({"vulnerabilities": [
+        {"title": "near the change", "severity": "high", "line": 120},
+        {"title": "between windows", "severity": "high", "line": 50},
+    ]}))
+
+    vulnerabilities, _ = llm_scanner.scan_graph_for_vulnerabilities({"nodes": [node], "edges": []}, "fake-model", cache_path=None)
+
+    assert [finding["line"] for finding in vulnerabilities["b"]] == [120, None]
+
+
+def test_batch_prompt_spells_out_the_finding_format(monkeypatch):
+    """It used to say "using the same rules as before" -- with no "before" in
+    a batch prompt, which is a standalone request."""
+    fake_litellm = _mock_litellm_response(monkeypatch, json.dumps({"n1": [], "n2": []}))
+
+    llm_scanner.scan_graph_for_vulnerabilities(
+        {"nodes": [_node("n1", "fn_one"), _node("n2", "fn_two")], "edges": []}, "fake-model", cache_path=None, batch_size=2,
+    )
+
+    [prompt] = _prompts(fake_litellm)
+    assert "same rules as before" not in prompt
+    for field in ("'severity'", "'line'", "'introduced_by_change'", "'trigger'", "'confidence'"):
+        assert field in prompt
+
+
 def test_replacing_module_code_with_a_comment_is_not_trivial(monkeypatch, tmp_path):
     """Only comments were *added* -- but real code was removed, which is
     exactly the kind of change that must not be skipped."""

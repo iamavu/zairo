@@ -2,7 +2,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ._util import normalize_cwe, normalize_severity
+from ._util import normalize_confidence, normalize_cwe, normalize_severity
 
 SARIF_SCHEMA_URI = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
 
@@ -87,16 +87,17 @@ def _relative_uri(file_path: Optional[str], repo_root: str) -> Optional[str]:
     return rel.replace(os.sep, "/")
 
 
-def _location(node: Dict[str, Any], repo_root: str) -> Optional[Dict[str, Any]]:
+def _location(node: Dict[str, Any], repo_root: str, line: Optional[int] = None) -> Optional[Dict[str, Any]]:
     """A fresh SARIF location for a node every call -- never share one
-    between results, since the rollup rewrites each URI in place."""
+    between results, since the rollup rewrites each URI in place. Points at
+    `line` when given (the line a finding cited), else the node's start."""
     uri = _relative_uri(node.get("file"), repo_root)
     if not uri:
         return None
     return {
         "physicalLocation": {
             "artifactLocation": {"uri": uri},
-            "region": {"startLine": node.get("start_line") or 1},
+            "region": {"startLine": line or node.get("start_line") or 1},
         }
     }
 
@@ -168,16 +169,28 @@ def build_sarif(
                 rules[rule_id] = rule
 
             message = finding.get("description") or title
+            if finding.get("trigger"):
+                message = f"{message} Who can trigger it: {finding['trigger']}"
             if finding.get("impact"):
                 message = f"{message} Impact: {finding['impact']}"
 
+            introduced = finding.get("introduced_by_change")
             result: Dict[str, Any] = {
                 "ruleId": rule_id,
                 "level": level,
                 "message": {"text": message},
-                "properties": {"severity": severity, "cwe": cwe, "node": node.get("name")},
+                "properties": {
+                    "severity": severity,
+                    "cwe": cwe,
+                    "node": node.get("name"),
+                    "introducedByChange": introduced if isinstance(introduced, bool) else None,
+                    "confidence": normalize_confidence(finding.get("confidence")),
+                },
             }
-            location = _location(node, repo_root)
+            # The scanner only keeps a line the model was actually shown;
+            # anything else falls back to where the node starts.
+            line = finding.get("line")
+            location = _location(node, repo_root, line if isinstance(line, int) and not isinstance(line, bool) else None)
             if location:
                 result["locations"] = [location]
             results.append(result)

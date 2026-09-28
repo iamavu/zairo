@@ -27,7 +27,7 @@ def _ensure_litellm():
         litellm = _litellm
     return litellm
 
-from ._util import display_name as _display_name, normalize_cwe, normalize_severity
+from ._util import display_name as _display_name, normalize_confidence, normalize_cwe, normalize_severity
 from .git_utils import hunk_lines
 
 # Comment/blank-only diffs (docs, version bumps, log messages) can't produce a
@@ -104,13 +104,29 @@ def _is_trivial_change(hunks: List[Dict[str, Any]]) -> bool:
     return all(not text.strip() or text.strip().startswith(_COMMENT_PREFIXES) for text in lines)
 
 
-def _windowed_source(file_path: str, start_line: int, end_line: int, changed_line_numbers: List[int]) -> str:
+# Width of the line-number gutter in code shown to the model ("   12 | ...").
+_GUTTER = 5
+
+
+def _numbered_source(file_path: Optional[str], start_line: Optional[int], end_line: Optional[int]) -> Tuple[List[str], List[int]]:
+    """Lines start..end of a file, each prefixed with its line number, so the
+    model can cite the exact line a finding is about -- plus the numbers
+    shown, so every citation can be checked against what it actually saw."""
+    lines = get_source_code(file_path, start_line, end_line).splitlines()
+    first = start_line if start_line is not None else 1
+    numbers = list(range(first, first + len(lines)))
+    return [f"{n:>{_GUTTER}} | {text}" for n, text in zip(numbers, lines)], numbers
+
+
+def _windowed_source(file_path: str, start_line: int, end_line: int, changed_line_numbers: List[int]) -> Tuple[str, List[int]]:
     """Full body for small functions; a padded window around changed lines for
     large ones, plus the function's head (signature + early guard clauses)
     unconditionally — a check made there determines whether a flagged line
-    further down is actually reachable/dangerous."""
+    further down is actually reachable/dangerous. Returns the numbered code
+    and the line numbers in it."""
     if (end_line - start_line + 1) <= _LARGE_FUNCTION_LINES or not changed_line_numbers:
-        return get_source_code(file_path, start_line, end_line)
+        lines, shown = _numbered_source(file_path, start_line, end_line)
+        return "\n".join(lines), shown
 
     ranges = []
 
@@ -126,8 +142,12 @@ def _windowed_source(file_path: str, start_line: int, end_line: int, changed_lin
         hi = min(end_line, ln + _WINDOW_PADDING)
         add_range(lo, hi)
 
-    chunks = [f"# lines {lo}-{hi}\n{get_source_code(file_path, lo, hi)}" for lo, hi in ranges]
-    return "\n...\n".join(chunks)
+    chunks, shown = [], []
+    for lo, hi in ranges:
+        lines, numbers = _numbered_source(file_path, lo, hi)
+        chunks.append("\n".join(lines))
+        shown += numbers
+    return "\n...\n".join(chunks), shown
 
 
 def _outside_nested(hunks: List[Dict[str, Any]], nested: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -213,7 +233,7 @@ def _sibling_outline(mod_node: Dict[str, Any], nodes: Dict[str, Dict[str, Any]])
 
 def _collapse_nested_definitions(
     file_path: str, start_line: int, end_line: int, nested: List[Dict[str, Any]]
-) -> str:
+) -> Tuple[str, List[int]]:
     """For a module/file-level node, replace the body of each nested
     top-level function/class with a one-line placeholder instead of sending
     it in full. A nested definition that changed is already covered by its
@@ -221,9 +241,12 @@ def _collapse_nested_definitions(
     the same vulnerable line gets independently re-flagged under the
     enclosing module as well: wasted cost, and a confusing/duplicate
     attribution in the report (e.g. a vulnerability inside `parse` showing
-    up as "module X is vulnerable" instead of "parse is vulnerable")."""
+    up as "module X is vulnerable" instead of "parse is vulnerable").
+    Returns the numbered code and the line numbers in it -- placeholders
+    have none, so a finding can't cite a line the model never saw."""
     if not nested:
-        return get_source_code(file_path, start_line, end_line)
+        lines, shown = _numbered_source(file_path, start_line, end_line)
+        return "\n".join(lines), shown
 
     skip_ranges = sorted(
         (max(start_line, n['start_line']), min(end_line, n['end_line']), n['name'])
@@ -232,20 +255,26 @@ def _collapse_nested_definitions(
         and n['end_line'] >= start_line and n['start_line'] <= end_line
     )
 
-    chunks = []
+    out, shown = [], []
+
+    def show(lo: int, hi: int) -> None:
+        lines, numbers = _numbered_source(file_path, lo, hi)
+        out.extend(lines)
+        shown.extend(numbers)
+
     cursor = start_line
     for lo, hi, name in skip_ranges:
         if lo < cursor:
             continue  # nested-within-nested overlap already covered by a prior placeholder
         if lo > cursor:
-            chunks.append(get_source_code(file_path, cursor, lo - 1))
-        chunks.append(f"    # ... body of `{name}` NOT SHOWN (reviewed separately -- do not guess its contents) ...")
+            show(cursor, lo - 1)
+        out.append(f"{'':>{_GUTTER}} |     # ... body of `{name}` NOT SHOWN (reviewed separately -- do not guess its contents) ...")
         cursor = hi + 1
 
     if cursor <= end_line:
-        chunks.append(get_source_code(file_path, cursor, end_line))
+        show(cursor, end_line)
 
-    return "".join(chunks)
+    return "\n".join(out), shown
 
 
 def _neighbor_snippet(n: Dict[str, Any]) -> Optional[str]:
@@ -388,18 +417,59 @@ def _extract_json(content: str) -> dict:
     raise ValueError(f"could not find a JSON object in model response: {content[:200]!r}")
 
 
-def _validated_findings(value: Any, error_message: str) -> List[Dict[str, Any]]:
+def _cited_line(raw: Any, shown_lines: set) -> Optional[int]:
+    """A finding's line, if it's one the model was actually shown -- else
+    None. A made-up or misread number would send a reviewer, and SARIF, to
+    the wrong place, which is worse than falling back to the function."""
+    if isinstance(raw, bool):
+        return None
+    try:
+        line = int(str(raw).strip())
+    except ValueError:
+        return None
+    return line if line in shown_lines else None
+
+
+def _as_bool(raw: Any) -> Optional[bool]:
+    """true/false as the model wrote it (a JSON bool, or "yes"/"true"/...),
+    or None when it didn't give a usable answer."""
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower() if raw is not None else ""
+    return {"true": True, "yes": True, "false": False, "no": False}.get(text)
+
+
+def _validated_findings(value: Any, error_message: str, shown_lines: List[int]) -> List[Dict[str, Any]]:
     """A model answer only counts as a scan result if it's a list of finding
     objects. Anything else -- a refusal, {"message": "unable to assess"}, a
     question back -- is a failed scan, never an empty one: an empty result
     gets cached and reported as "no vulnerabilities" for code nobody
-    actually assessed. Normalizes each finding's severity/CWE in place."""
+    actually assessed. Normalizes each finding's fields in place; a finding
+    with a bad field keeps the rest of itself -- dropping a possibly real
+    vulnerability over, say, a wrong line number would be the worse error."""
     if not isinstance(value, list) or not all(isinstance(f, dict) for f in value):
         raise ValueError(error_message)
+    shown = set(shown_lines)
     for finding in value:
         finding["severity"] = normalize_severity(finding.get("severity"))
         finding["cwe"] = normalize_cwe(finding.get("cwe"))
+        finding["line"] = _cited_line(finding.get("line"), shown)
+        finding["introduced_by_change"] = _as_bool(finding.get("introduced_by_change"))
+        finding["trigger"] = str(finding["trigger"]) if finding.get("trigger") else None
+        finding["confidence"] = normalize_confidence(finding.get("confidence"))
     return value
+
+
+# The finding format both prompts ask for -- defined once, so the single-
+# node and batch prompts can't drift apart.
+_FINDING_FORMAT = """Each finding is an object with these keys:
+- 'title', 'description', 'impact': 1-2 sentences each.
+- 'severity': exactly one of "critical" (remote code execution, full system/data compromise), "high" (significant data exposure or privilege escalation), "medium" (real but limited impact, or requires specific conditions to exploit), "low" (minor or defense-in-depth).
+- 'cwe': the single most applicable CWE identifier in the form "CWE-<number>" (e.g. "CWE-78" for OS command injection, "CWE-89" for SQL injection), or null if none clearly applies -- don't guess one that doesn't fit.
+- 'line': the line number (from the numbered code, the number before the "|") of the one line that most directly shows the problem -- for a removed protection, the line where it used to apply.
+- 'introduced_by_change': true if this change introduced the vulnerability or made it reachable, including by removing or weakening a protection; false if it was already there before the change.
+- 'trigger': one sentence on who can trigger it and how, based on the code shown (e.g. "any logged-in user, by changing invoice_id in the URL").
+- 'confidence': how sure you are that it's real and exploitable as described -- "high", "medium", or "low". This is separate from severity: a critical-if-real issue you're unsure about is severity "critical", confidence "low"."""
 
 
 def _node_section(mod_node: Dict[str, Any], mod_code: str, diff_text: str, neighbor_contexts: List[str]) -> str:
@@ -424,11 +494,13 @@ You are an expert security auditor reviewing a code change. Analyze the followin
 
 Base every finding strictly on the code actually shown above. Do not speculate about the contents of omitted/NOT-SHOWN function bodies, imports, or third-party libraries based on their name alone — if you haven't seen the code, don't report a vulnerability in it.
 
-Return ONLY a JSON object with a single key 'vulnerabilities' — no markdown code fence, no prose before or after it. The value should be a list of objects containing 'title', 'description', 'impact', 'severity', and 'cwe'. Keep 'title'/'description'/'impact' to 1-2 sentences each. 'severity' must be exactly one of: "critical" (remote code execution, full system/data compromise), "high" (significant data exposure or privilege escalation), "medium" (real but limited impact, or requires specific conditions to exploit), "low" (minor or defense-in-depth). 'cwe' is the single most applicable CWE identifier in the form "CWE-<number>" (e.g. "CWE-78" for OS command injection, "CWE-89" for SQL injection) — use null if none clearly applies, don't guess one that doesn't fit. If no vulnerabilities are found, return {{"vulnerabilities": []}}.
+Return ONLY a JSON object with a single key 'vulnerabilities' — no markdown code fence, no prose before or after it — whose value is a list of findings. If no vulnerabilities are found, return {{"vulnerabilities": []}}.
+
+{_FINDING_FORMAT}
 """
 
 
-def _build_batch_prompt(jobs: List[Tuple[Dict[str, Any], str, str]]) -> str:
+def _build_batch_prompt(jobs: List[Tuple[Dict[str, Any], str, str, List[int]]]) -> str:
     """Same content and instructions as _build_prompt, but covering several
     nodes in one request -- each node's section is labeled with its graph
     node id, and the model is asked to return one JSON object keyed by
@@ -436,7 +508,7 @@ def _build_batch_prompt(jobs: List[Tuple[Dict[str, Any], str, str]]) -> str:
     together. Used only for --batch-size > 1; a batch of 1 uses
     _build_prompt instead so the default, unbatched path sends the exact
     prompt shape it always has."""
-    sections = [f"=== Node id: {mod_node['id']} ===\n{section}" for mod_node, _prompt_hash, section in jobs]
+    sections = [f"=== Node id: {mod_node['id']} ===\n{section}" for mod_node, _prompt_hash, section, _shown in jobs]
 
     ids = ", ".join(f'"{job[0]["id"]}"' for job in jobs)
     return f"""
@@ -446,7 +518,9 @@ You are an expert security auditor reviewing a code change. Analyze each of the 
 
 Base every finding strictly on the code actually shown for its own node above. Do not speculate about the contents of omitted/NOT-SHOWN function bodies, imports, or third-party libraries based on their name alone — if you haven't seen the code, don't report a vulnerability in it.
 
-Return ONLY a JSON object with exactly one key per node id listed above ({ids}) — no markdown code fence, no prose before or after it. Each key's value is a list of finding objects with 'title', 'description', 'impact', 'severity', and 'cwe', using the same rules as before: 'severity' must be exactly one of: "critical" (remote code execution, full system/data compromise), "high" (significant data exposure or privilege escalation), "medium" (real but limited impact, or requires specific conditions to exploit), "low" (minor or defense-in-depth). 'cwe' is the single most applicable CWE identifier in the form "CWE-<number>", or null if none clearly applies. A node with no vulnerabilities still needs its key present, mapped to an empty list. Example shape for two nodes: {{"<id1>": [], "<id2>": [...]}}
+Return ONLY a JSON object with exactly one key per node id listed above ({ids}) — no markdown code fence, no prose before or after it. Each key's value is that node's list of findings; a node with no vulnerabilities still needs its key present, mapped to an empty list. Example shape for two nodes: {{"<id1>": [], "<id2>": [...]}}
+
+{_FINDING_FORMAT}
 """
 
 
@@ -567,11 +641,12 @@ def scan_graph_for_vulnerabilities(
             continue
 
         if is_module:
-            mod_code = _collapse_nested_definitions(mod_node['file'], start, end, nested)
+            mod_code, shown_lines = _collapse_nested_definitions(mod_node['file'], start, end, nested)
         elif hunks and start is not None and end is not None:
-            mod_code = _windowed_source(mod_node['file'], start, end, [ln for hunk in hunks for ln in hunk_lines(hunk)])
+            mod_code, shown_lines = _windowed_source(mod_node['file'], start, end, [ln for hunk in hunks for ln in hunk_lines(hunk)])
         else:
-            mod_code = get_source_code(mod_node['file'], start, end)
+            code_lines, shown_lines = _numbered_source(mod_node['file'], start, end)
+            mod_code = "\n".join(code_lines)
 
         if not mod_code.strip():
             log(f"  skip (no source found): {_display_name(mod_node['name'])}")
@@ -626,14 +701,14 @@ def scan_graph_for_vulnerabilities(
                 vulnerabilities[mod_node['id']] = cached
             continue
 
-        jobs.append((mod_node, prompt_hash, section))
+        jobs.append((mod_node, prompt_hash, section, shown_lines))
 
     def run_single(job):
         """The one-node-per-call path -- used whenever a group has exactly
         one job, so batch_size=1 (the default) sends the single-node prompt,
         never the multi-node batch format. Returns a one-element list so
         callers can treat every group's result uniformly."""
-        mod_node, prompt_hash, section = job
+        mod_node, prompt_hash, section, shown_lines = job
         node_label = f"{_display_name(mod_node['name'])} ({mod_node['id']})"
         prompt = _build_prompt(mod_node, section)
         if debug_log:
@@ -671,6 +746,7 @@ def scan_graph_for_vulnerabilities(
                 findings = _validated_findings(
                     _extract_json(content).get("vulnerabilities"),
                     "model response has no 'vulnerabilities' list of findings, so it isn't a scan result",
+                    shown_lines,
                 )
             except ValueError as e:
                 safe_log(f"  error scanning {_display_name(mod_node['name'])}: {e}")
@@ -731,11 +807,12 @@ def scan_graph_for_vulnerabilities(
                 return [(j[0]['id'], j[1], None, usage, _summarize_error(e)) for j in group]
 
             results = []
-            for mod_node, prompt_hash, _section in group:
+            for mod_node, prompt_hash, _section, shown_lines in group:
                 try:
                     findings = _validated_findings(
                         parsed.get(mod_node['id']),
                         "model response has no findings list for this node (batch response incomplete or malformed)",
+                        shown_lines,
                     )
                 except ValueError as e:
                     safe_log(f"  error scanning {_display_name(mod_node['name'])}: {e}")

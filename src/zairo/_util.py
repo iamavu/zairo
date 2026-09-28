@@ -53,6 +53,19 @@ def max_severity(vulnerabilities: Dict[str, List[Dict[str, Any]]]) -> Optional[s
     return best
 
 
+CONFIDENCE_LEVELS = ("low", "medium", "high")
+
+
+def normalize_confidence(raw: Any) -> Optional[str]:
+    """One of CONFIDENCE_LEVELS -- how sure the model is a finding is real,
+    kept apart from how bad it would be -- or None if it didn't give a
+    usable one. Unlike severity there's no fail-safe value to fall back on:
+    confidence gates nothing, and guessing one would only misstate how sure
+    the model actually was."""
+    value = str(raw).strip().lower() if raw else ""
+    return value if value in CONFIDENCE_LEVELS else None
+
+
 _CWE_DIGITS_RE = re.compile(r'(\d+)')
 
 
