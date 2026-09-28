@@ -14,7 +14,8 @@ _FAKE_FILE = zairo.__file__
 def _node(node_id: str, name: str) -> dict:
     return {
         "id": node_id, "name": name, "kind": "function", "file": _FAKE_FILE,
-        "start_line": 1, "end_line": 1, "status": "modified", "changed_lines": {1: "__version__ = ..."},
+        "start_line": 1, "end_line": 1, "status": "modified",
+        "diff_hunks": [{"start": 1, "removed": [], "added": ["__version__ = ..."]}],
     }
 
 
@@ -418,3 +419,91 @@ def test_assessed_nodes_lists_every_node_with_a_valid_answer(monkeypatch, tmp_pa
 
     assert sorted(first["assessed_nodes"]) == ["n1", "n2"]
     assert sorted(second["assessed_nodes"]) == ["n1", "n2"]  # this time from the cache
+
+
+def _prompts(fake_litellm: MagicMock) -> list:
+    return [call.kwargs["messages"][0]["content"] for call in fake_litellm.completion.call_args_list]
+
+
+def test_prompt_shows_what_the_change_removed(monkeypatch):
+    """The code after a change can't show a check that was taken out --
+    only the diff can."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    node = dict(_node("n1", "fn_one"), diff_hunks=[
+        {"start": 1, "removed": ["require_same_tenant(user, invoice)"], "added": ["__version__ = ..."]},
+    ])
+
+    llm_scanner.scan_graph_for_vulnerabilities({"nodes": [node], "edges": []}, "fake-model", cache_path=None)
+
+    [prompt] = _prompts(fake_litellm)
+    assert "-require_same_tenant(user, invoice)" in prompt
+    assert "+__version__ = ..." in prompt
+    assert "what this change makes newly possible" in prompt
+
+
+def test_entirely_new_node_says_so_instead_of_repeating_its_code(monkeypatch):
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+
+    llm_scanner.scan_graph_for_vulnerabilities({"nodes": [_node("n1", "fn_one")], "edges": []}, "fake-model", cache_path=None)
+
+    [prompt] = _prompts(fake_litellm)
+    assert "entirely new in this change" in prompt
+    assert "```diff" not in prompt
+
+
+def _module_and_function(tmp_path, module_hunks, function_hunks):
+    """app.py: a module-level import, then f() on lines 3-4."""
+    src = tmp_path / "app.py"
+    src.write_text("import os\n\ndef f(x):\n    return os.system(x)\n")
+    module = {"id": "m", "name": "app", "kind": "module", "file": str(src), "start_line": 1, "end_line": 4,
+              "status": "modified", "diff_hunks": module_hunks}
+    function = {"id": "f", "name": "f", "kind": "function", "file": str(src), "start_line": 3, "end_line": 4,
+                "status": "modified", "diff_hunks": function_hunks}
+    return {"nodes": [module, function], "edges": []}
+
+
+def test_module_is_not_scanned_again_for_changes_inside_its_functions(monkeypatch, tmp_path):
+    """f's change is f's own scan -- the module has nothing of its own to review."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    hunk = {"start": 4, "removed": ["    return x"], "added": ["    return os.system(x)"]}
+
+    llm_scanner.scan_graph_for_vulnerabilities(
+        _module_and_function(tmp_path, [hunk], [hunk]), "fake-model", cache_path=None,
+    )
+
+    [prompt] = _prompts(fake_litellm)
+    assert "Modified Function: f" in prompt
+
+
+def test_module_diff_leaves_out_its_functions_lines(monkeypatch, tmp_path):
+    """One hunk adding the import and f together: the module's diff shows
+    the import, but f's body stays in f's own scan -- the same reason the
+    module's code collapses nested bodies."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    added = ["import os", "", "def f(x):", "    return os.system(x)"]
+    whole = {"start": 1, "removed": ["import shlex"], "added": added}
+    in_f = {"start": 3, "removed": ["import shlex"], "added": added[2:]}
+
+    llm_scanner.scan_graph_for_vulnerabilities(
+        _module_and_function(tmp_path, [whole], [in_f]), "fake-model", cache_path=None,
+    )
+
+    [module_prompt] = [p for p in _prompts(fake_litellm) if "Modified Module: app" in p]
+    diff = module_prompt.split("```diff")[1]
+    assert "+import os" in diff and "-import shlex" in diff
+    assert "os.system" not in diff
+
+
+def test_replacing_module_code_with_a_comment_is_not_trivial(monkeypatch, tmp_path):
+    """Only comments were *added* -- but real code was removed, which is
+    exactly the kind of change that must not be skipped."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    src = tmp_path / "settings.py"
+    src.write_text("# auth disabled for now\nDEBUG = True\n")
+    module = {"id": "m", "name": "settings", "kind": "module", "file": str(src), "start_line": 1, "end_line": 2,
+              "status": "modified",
+              "diff_hunks": [{"start": 1, "removed": ["require_auth(app)"], "added": ["# auth disabled for now"]}]}
+
+    llm_scanner.scan_graph_for_vulnerabilities({"nodes": [module], "edges": []}, "fake-model", cache_path=None)
+
+    assert fake_litellm.completion.call_count == 1

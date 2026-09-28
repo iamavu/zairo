@@ -28,6 +28,7 @@ def _ensure_litellm():
     return litellm
 
 from ._util import display_name as _display_name, normalize_cwe, normalize_severity
+from .git_utils import hunk_lines
 
 # Comment/blank-only diffs (docs, version bumps, log messages) can't produce a
 # real vulnerability finding — skip them before spending an LLM call.
@@ -93,30 +94,22 @@ def get_source_code(file_path: str, start_line: Optional[int], end_line: Optiona
         return f"// Error reading file: {e}"
 
 
-def _is_trivial_change(changed_lines: Optional[Dict[int, str]]) -> bool:
-    """True if every added/removed line is blank or a comment — not worth an
-    LLM call. A pure-deletion marker can bundle several removed lines into
-    one multi-line value, so check each physical line within it, not just
-    the value as a whole."""
-    if not changed_lines:
+def _is_trivial_change(hunks: List[Dict[str, Any]]) -> bool:
+    """True if every line a change added or removed is blank or a comment —
+    not worth an LLM call. Removed lines count too: replacing real code
+    with a comment is anything but trivial."""
+    lines = [text for hunk in hunks for text in hunk["removed"] + hunk["added"]]
+    if not lines:
         return False  # no diff info available; don't risk a false skip
-    for text in changed_lines.values():
-        for physical_line in (text.splitlines() or [text]):
-            stripped = physical_line.strip()
-            if not stripped:
-                continue
-            if stripped.startswith(_COMMENT_PREFIXES):
-                continue
-            return False
-    return True
+    return all(not text.strip() or text.strip().startswith(_COMMENT_PREFIXES) for text in lines)
 
 
-def _windowed_source(file_path: str, start_line: int, end_line: int, changed_lines: Dict[int, str]) -> str:
+def _windowed_source(file_path: str, start_line: int, end_line: int, changed_line_numbers: List[int]) -> str:
     """Full body for small functions; a padded window around changed lines for
     large ones, plus the function's head (signature + early guard clauses)
     unconditionally — a check made there determines whether a flagged line
     further down is actually reachable/dangerous."""
-    if (end_line - start_line + 1) <= _LARGE_FUNCTION_LINES or not changed_lines:
+    if (end_line - start_line + 1) <= _LARGE_FUNCTION_LINES or not changed_line_numbers:
         return get_source_code(file_path, start_line, end_line)
 
     ranges = []
@@ -128,13 +121,76 @@ def _windowed_source(file_path: str, start_line: int, end_line: int, changed_lin
             ranges.append((lo, hi))
 
     add_range(start_line, min(end_line, start_line + _GUARD_HEAD_LINES - 1))
-    for ln in sorted(changed_lines.keys()):
+    for ln in sorted(set(changed_line_numbers)):
         lo = max(start_line, ln - _WINDOW_PADDING)
         hi = min(end_line, ln + _WINDOW_PADDING)
         add_range(lo, hi)
 
     chunks = [f"# lines {lo}-{hi}\n{get_source_code(file_path, lo, hi)}" for lo, hi in ranges]
     return "\n...\n".join(chunks)
+
+
+def _outside_nested(hunks: List[Dict[str, Any]], nested: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """A module's own changes: the parts of its hunks outside any nested
+    definition. Like the code collapse below, this keeps a nested function's
+    changes in that function's own scan only -- otherwise they'd show up
+    again, and be attributed again, under the enclosing module. Removed
+    lines stay with the first surviving part of their hunk; a hunk wholly
+    inside a nested definition belongs to that definition."""
+    def inside(ln: int) -> bool:
+        return any(n['start_line'] <= ln <= n['end_line'] for n in nested)
+
+    own = []
+    for hunk in hunks:
+        if not hunk["added"]:
+            if not inside(hunk_lines(hunk)[0]):
+                own.append(hunk)
+            continue
+        runs = []  # consecutive added lines outside every nested definition
+        for ln, text in zip(hunk_lines(hunk), hunk["added"]):
+            if inside(ln):
+                continue
+            if runs and runs[-1]["start"] + len(runs[-1]["added"]) == ln:
+                runs[-1]["added"].append(text)
+            else:
+                runs.append({"start": ln, "removed": [], "added": [text]})
+        if runs:
+            runs[0]["removed"] = hunk["removed"]
+        own.extend(runs)
+    return own
+
+
+# A diff longer than this is cut off -- a rewrite of a huge function
+# shouldn't cost thousands of prompt lines on top of its code.
+_MAX_DIFF_LINES = 200
+
+
+def _diff_section(hunks: List[Dict[str, Any]], fully_added: bool, kind_label: str) -> str:
+    """What the change did to a node, as a compact diff for the prompt --
+    above all the removed lines, which the code after the change can't show:
+    a dropped authorization check simply isn't there to see. A node that's
+    new in its entirety just says so rather than repeating its code as "+"
+    lines. Empty when there's no diff info for it at all."""
+    if fully_added:
+        return f"This {kind_label} is entirely new in this change: every line shown above was added."
+    if not hunks:
+        return ""
+    lines = []
+    for hunk in sorted(hunks, key=lambda h: h["start"]):
+        if hunk["added"]:
+            last = hunk["start"] + len(hunk["added"]) - 1
+            where = f"line {hunk['start']}" if last == hunk["start"] else f"lines {hunk['start']}-{last}"
+        else:
+            where = f"removed after line {hunk['start']}" if hunk["start"] else "removed at the top of the file"
+        lines.append(f"@@ {where} @@")
+        lines += ["-" + text for text in hunk["removed"]]
+        lines += ["+" + text for text in hunk["added"]]
+    if len(lines) > _MAX_DIFF_LINES:
+        lines = lines[:_MAX_DIFF_LINES] + [f"... ({len(lines) - _MAX_DIFF_LINES} more diff line(s) not shown)"]
+    return (
+        'What this change did here ("-" lines were removed, "+" lines added; '
+        "line numbers are in the file after the change):\n```diff\n" + "\n".join(lines) + "\n```"
+    )
 
 
 def _sibling_outline(mod_node: Dict[str, Any], nodes: Dict[str, Dict[str, Any]]) -> str:
@@ -346,16 +402,25 @@ def _validated_findings(value: Any, error_message: str) -> List[Dict[str, Any]]:
     return value
 
 
-def _build_prompt(mod_node: Dict[str, Any], mod_code: str, neighbor_contexts: List[str]) -> str:
+def _node_section(mod_node: Dict[str, Any], mod_code: str, diff_text: str, neighbor_contexts: List[str]) -> str:
+    """One node's part of a prompt -- its code after the change, what the
+    change did to it, and its callers/callees -- shared by the single-node
+    and batch prompts so both always describe a node the same way."""
     kind_label = mod_node.get('kind') or 'function'
-    return f"""
-You are an expert security auditor. Analyze the following modified {kind_label} for vulnerabilities.
-Modified {kind_label.capitalize()}: {mod_node['name']}
+    diff_part = f"\n{diff_text}" if diff_text else ""
+    return f"""Modified {kind_label.capitalize()}: {mod_node['name']} (after the change)
 ```
 {mod_code}
-```
+```{diff_part}
 Context Functions (Callers/Callees):
-{chr(10).join(neighbor_contexts)}
+{chr(10).join(neighbor_contexts)}"""
+
+
+def _build_prompt(mod_node: Dict[str, Any], section: str) -> str:
+    kind_label = mod_node.get('kind') or 'function'
+    return f"""
+You are an expert security auditor reviewing a code change. Analyze the following modified {kind_label} for vulnerabilities -- above all, what this change makes newly possible, including any protection it removes or weakens, which the code after the change can't show on its own.
+{section}
 
 Base every finding strictly on the code actually shown above. Do not speculate about the contents of omitted/NOT-SHOWN function bodies, imports, or third-party libraries based on their name alone — if you haven't seen the code, don't report a vulnerability in it.
 
@@ -363,7 +428,7 @@ Return ONLY a JSON object with a single key 'vulnerabilities' — no markdown co
 """
 
 
-def _build_batch_prompt(jobs: List[Tuple[Dict[str, Any], str, str, List[str]]]) -> str:
+def _build_batch_prompt(jobs: List[Tuple[Dict[str, Any], str, str]]) -> str:
     """Same content and instructions as _build_prompt, but covering several
     nodes in one request -- each node's section is labeled with its graph
     node id, and the model is asked to return one JSON object keyed by
@@ -371,20 +436,11 @@ def _build_batch_prompt(jobs: List[Tuple[Dict[str, Any], str, str, List[str]]]) 
     together. Used only for --batch-size > 1; a batch of 1 uses
     _build_prompt instead so the default, unbatched path sends the exact
     prompt shape it always has."""
-    sections = []
-    for mod_node, _prompt_hash, mod_code, neighbor_contexts in jobs:
-        kind_label = mod_node.get('kind') or 'function'
-        sections.append(f"""=== Node id: {mod_node['id']} ===
-Modified {kind_label.capitalize()}: {mod_node['name']}
-```
-{mod_code}
-```
-Context Functions (Callers/Callees):
-{chr(10).join(neighbor_contexts)}""")
+    sections = [f"=== Node id: {mod_node['id']} ===\n{section}" for mod_node, _prompt_hash, section in jobs]
 
     ids = ", ".join(f'"{job[0]["id"]}"' for job in jobs)
     return f"""
-You are an expert security auditor. Analyze each of the following {len(jobs)} modified code units for vulnerabilities. Assess each one independently -- a finding in one must not be influenced by, or attributed to, another.
+You are an expert security auditor reviewing a code change. Analyze each of the following {len(jobs)} modified code units for vulnerabilities -- above all, what the change makes newly possible in each, including any protection it removes or weakens, which the code after the change can't show on its own. Assess each one independently -- a finding in one must not be influenced by, or attributed to, another.
 
 {chr(10).join(sections)}
 
@@ -467,20 +523,19 @@ def scan_graph_for_vulnerabilities(
         if _is_test_file(mod_node.get('file')):
             log(f"  skip (test file, not shipped attack surface): {_display_name(mod_node['name'])} ({mod_node.get('file')})")
             continue
-        changed_lines = mod_node.get('changed_lines')
-        # Trivial-skip only applies to module-level edits (e.g. a version
-        # bump, a standalone doc comment). Skipping a function-kind node
-        # because its own diff happens to be comment-only would also skip
-        # scanning whatever pre-existing vulnerable code the rest of that
-        # (possibly still-unfixed) function contains -- and small functions
-        # cost nothing extra to scan in full anyway, so there's no real
-        # savings being traded away by not skipping them.
-        if mod_node.get('kind') == 'module' and _is_trivial_change(changed_lines):
-            log(f"  skip (trivial diff): {_display_name(mod_node['name'])} ({mod_node.get('file')})")
-            continue
-
+        hunks = mod_node.get('diff_hunks') or []
         start, end = mod_node.get('start_line'), mod_node.get('end_line')
-        if mod_node.get('kind') == 'module' and start is not None and end is not None:
+        is_module = mod_node.get('kind') == 'module' and start is not None and end is not None
+        # Every line added and nothing removed: the node is new, and a diff
+        # would only repeat its code as "+" lines.
+        added = {ln for hunk in hunks if hunk["added"] for ln in hunk_lines(hunk)}
+        fully_added = (
+            start is not None and end is not None
+            and not any(hunk["removed"] for hunk in hunks) and added >= set(range(start, end + 1))
+        )
+
+        nested = []
+        if is_module:
             # A module/file node's own scan shouldn't re-send full bodies of
             # nested functions/classes -- those are already covered by their
             # own, more specific seed node when they change, and including
@@ -494,9 +549,27 @@ def scan_graph_for_vulnerabilities(
                 and n.get('start_line') is not None and n.get('end_line') is not None
                 and n['start_line'] >= start and n['end_line'] <= end
             ]
+            own_hunks = _outside_nested(hunks, nested)
+            if hunks and not own_hunks:
+                log(f"  skip (every change is inside a nested definition, scanned on its own): {_display_name(mod_node['name'])} ({mod_node.get('file')})")
+                continue
+            hunks = own_hunks
+
+        # Trivial-skip only applies to module-level edits (e.g. a version
+        # bump, a standalone doc comment). Skipping a function-kind node
+        # because its own diff happens to be comment-only would also skip
+        # scanning whatever pre-existing vulnerable code the rest of that
+        # (possibly still-unfixed) function contains -- and small functions
+        # cost nothing extra to scan in full anyway, so there's no real
+        # savings being traded away by not skipping them.
+        if mod_node.get('kind') == 'module' and _is_trivial_change(hunks):
+            log(f"  skip (trivial diff): {_display_name(mod_node['name'])} ({mod_node.get('file')})")
+            continue
+
+        if is_module:
             mod_code = _collapse_nested_definitions(mod_node['file'], start, end, nested)
-        elif changed_lines and start is not None and end is not None:
-            mod_code = _windowed_source(mod_node['file'], start, end, changed_lines)
+        elif hunks and start is not None and end is not None:
+            mod_code = _windowed_source(mod_node['file'], start, end, [ln for hunk in hunks for ln in hunk_lines(hunk)])
         else:
             mod_code = get_source_code(mod_node['file'], start, end)
 
@@ -537,11 +610,14 @@ def scan_graph_for_vulnerabilities(
                 if snippet:
                     neighbor_contexts.append(snippet)
 
+        diff_text = _diff_section(hunks, fully_added, mod_node.get('kind') or 'function')
+        section = _node_section(mod_node, mod_code, diff_text, neighbor_contexts)
+
         # Keyed on the full single-node prompt, not just the code inside it,
         # so changing the prompt's wording or answer format invalidates
         # verdicts reached under the old one. Batched runs use the same key,
         # so a node's cache entry is shared across --batch-size values.
-        prompt_hash = _hash_prompt(model, _build_prompt(mod_node, mod_code, neighbor_contexts))
+        prompt_hash = _hash_prompt(model, _build_prompt(mod_node, section))
         cached = cache.get(prompt_hash)
         if cached is not None:
             log(f"  cache hit: {_display_name(mod_node['name'])} ({len(cached)} finding(s))")
@@ -550,16 +626,16 @@ def scan_graph_for_vulnerabilities(
                 vulnerabilities[mod_node['id']] = cached
             continue
 
-        jobs.append((mod_node, prompt_hash, mod_code, neighbor_contexts))
+        jobs.append((mod_node, prompt_hash, section))
 
     def run_single(job):
-        """The original one-node-per-call path -- used whenever a group has
-        exactly one job, so batch_size=1 (the default) sends the exact same
-        prompt shape this has always sent. Returns a one-element list so
+        """The one-node-per-call path -- used whenever a group has exactly
+        one job, so batch_size=1 (the default) sends the single-node prompt,
+        never the multi-node batch format. Returns a one-element list so
         callers can treat every group's result uniformly."""
-        mod_node, prompt_hash, mod_code, neighbor_contexts = job
+        mod_node, prompt_hash, section = job
         node_label = f"{_display_name(mod_node['name'])} ({mod_node['id']})"
-        prompt = _build_prompt(mod_node, mod_code, neighbor_contexts)
+        prompt = _build_prompt(mod_node, section)
         if debug_log:
             debug_log(f"\n{'='*80}\nPROMPT -- {node_label}\n{'='*80}\n{prompt}\n")
         usage = None  # unavailable if the provider doesn't report it
@@ -655,7 +731,7 @@ def scan_graph_for_vulnerabilities(
                 return [(j[0]['id'], j[1], None, usage, _summarize_error(e)) for j in group]
 
             results = []
-            for mod_node, prompt_hash, _mod_code, _neighbor_contexts in group:
+            for mod_node, prompt_hash, _section in group:
                 try:
                     findings = _validated_findings(
                         parsed.get(mod_node['id']),

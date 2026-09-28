@@ -21,6 +21,19 @@ def test_finds_modified_function_and_expands_subgraph(git_repo: Path):
     )
 
 
+def test_modified_node_carries_its_own_diff_hunks(git_repo: Path):
+    """git_repo's second commit replaces a()/b()/c() with vulnerable_exec in
+    one hunk: vulnerable_exec gets that hunk cut to its own lines, with the
+    code it replaced -- what the scanner shows the model as the change."""
+    graph = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+
+    vulnerable = next(n for n in graph["nodes"] if n.get("name") == "vulnerable_exec")
+    [hunk] = vulnerable["diff_hunks"]
+    assert hunk["start"] == 2
+    assert hunk["added"] == ["def vulnerable_exec(user_input):", "    return os.system(user_input)"]
+    assert "def a():" in hunk["removed"]
+
+
 def test_depth_zero_yields_only_seed_and_deleted_nodes(git_repo: Path):
     """At depth 0, no neighbor traversal happens -- every node present must
     be a seed (modified/added) or a deletion, never something pulled in by

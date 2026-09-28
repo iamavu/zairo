@@ -4,7 +4,7 @@ import os
 import shutil
 import tempfile
 from collections import defaultdict
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 def _git_error(result: subprocess.CompletedProcess) -> str:
@@ -152,9 +152,9 @@ def _unquote_git_path(path: str) -> str:
     return out.decode("utf-8", errors="surrogateescape")
 
 
-def _untracked_file_lines(repo_path: str, log: Callable[[str], None]) -> Dict[str, Dict[int, str]]:
-    """Every line of every untracked (and not .gitignore'd) text file, as if
-    added in full. `git diff` never lists a file git isn't tracking yet, so
+def _untracked_file_hunks(repo_path: str, log: Callable[[str], None]) -> Dict[str, List[Dict[str, Any]]]:
+    """Every untracked (and not .gitignore'd) text file as a single hunk
+    adding all of its lines. `git diff` never lists a file git isn't tracking yet, so
     a brand-new file that hasn't been `git add`ed would otherwise be
     invisible to the scan -- despite being exactly the kind of uncommitted
     change it exists to catch."""
@@ -166,7 +166,7 @@ def _untracked_file_lines(repo_path: str, log: Callable[[str], None]) -> Dict[st
         log(f"git ls-files --others failed (exit {result.returncode}): {result.stderr.strip()}")
         return {}
 
-    lines_by_file = {}
+    hunks_by_file = {}
     for rel_path in result.stdout.split("\0"):
         if not rel_path:
             continue
@@ -188,8 +188,8 @@ def _untracked_file_lines(repo_path: str, log: Callable[[str], None]) -> Dict[st
         if lines:
             # rstrip("\r"): CRLF files, matching the diff-derived lines,
             # which text-mode subprocess output has already normalized.
-            lines_by_file[abs_path] = {i: text.rstrip("\r") for i, text in enumerate(lines, 1)}
-    return lines_by_file
+            hunks_by_file[abs_path] = [{"start": 1, "removed": [], "added": [text.rstrip("\r") for text in lines]}]
+    return hunks_by_file
 
 
 def get_changed_file_paths(
@@ -198,7 +198,7 @@ def get_changed_file_paths(
     to_ref: str = None,
 ) -> List[str]:
     """Repo-relative paths of every file that changed (`git diff --name-only`),
-    including a file deleted in its entirety -- unlike get_modified_lines,
+    including a file deleted in its entirety -- unlike get_diff_hunks,
     which intentionally excludes those (there's no to-side line range for a
     fully deleted file to anchor to). Untracked files aren't listed: they
     didn't exist at from_ref, so they can't contain a deletion. Raises if
@@ -211,14 +211,48 @@ def get_changed_file_paths(
     return [path for path in result.stdout.split("\0") if path]
 
 
-def get_modified_lines(
+def hunk_lines(hunk: Dict[str, Any]) -> List[int]:
+    """The to-side line numbers a hunk touches: its added lines -- or, for a
+    pure deletion, the line the removed ones used to follow (at least 1),
+    since a deleted check still changes the code around it."""
+    if hunk["added"]:
+        return list(range(hunk["start"], hunk["start"] + len(hunk["added"])))
+    return [max(1, hunk["start"])]
+
+
+def hunks_in_range(hunks: List[Dict[str, Any]], start: int, end: int) -> List[Dict[str, Any]]:
+    """The hunks touching to-side lines start..end, with added lines outside
+    that range cut off. Removed lines are kept whole: they have no to-side
+    position to cut by, and what a change took away is the part a reviewer
+    can't see anywhere else."""
+    within = []
+    for hunk in hunks:
+        lines = [ln for ln in hunk_lines(hunk) if start <= ln <= end]
+        if not lines:
+            continue
+        if not hunk["added"]:
+            within.append(hunk)
+            continue
+        first, last = lines[0], lines[-1]
+        within.append({
+            "start": first,
+            "removed": hunk["removed"],
+            "added": hunk["added"][first - hunk["start"]:last - hunk["start"] + 1],
+        })
+    return within
+
+
+_HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def get_diff_hunks(
     repo_path: str,
     from_ref: str = None,
     to_ref: str = None,
     log: Optional[Callable[[str], None]] = None,
-) -> Dict[str, Dict[int, str]]:
+) -> Dict[str, List[Dict[str, Any]]]:
     """
-    Parses `git diff -U0` to find which lines have been added/modified.
+    Parses `git diff -U0` into the hunks of every changed file.
 
     - Neither ref:       compares working tree vs HEAD (uncommitted changes,
                          staged or not).
@@ -226,22 +260,20 @@ def get_modified_lines(
     - from_ref + to_ref: compares two commits (e.g. HEAD~3..HEAD).
 
     In both working-tree modes, untracked (not .gitignore'd) files count
-    too, with every line treated as added. Raises if the diff itself fails
-    -- a failed diff is not an empty one.
+    too, as one hunk adding every line. Raises if the diff itself fails --
+    a failed diff is not an empty one.
 
-    Returns a dict mapping absolute file paths to a dict of
-    {to-side line number: representative changed text}. The text is used to
-    cheaply filter out non-substantive changes (comments, blank lines)
-    before spending an LLM call on them, and to build a windowed view of
-    large functions instead of sending their full body.
+    Returns {absolute file path: [hunk, ...]}, each hunk a dict of:
+      start:   the to-side line number of its first added line -- or, for
+               a pure deletion, the line the removed ones used to follow
+               (0 at the top of the file), as git reports it;
+      removed: the text of the lines it removed, in order;
+      added:   the text of the lines it added, in order (line start + i).
 
-    A hunk with zero added lines (a pure deletion, e.g. `@@ -11 +10,0 @@`)
-    has no "+" line to anchor to in the to-side tree, but the enclosing node
-    still changed — a deleted validation check or sanitization call is
-    exactly the kind of change a security scan most needs to catch. Those
-    are recorded under a synthetic marker at the deletion's boundary line
-    in the to-side file, with the removed text as its value, so the
-    enclosing node is still found instead of silently skipped.
+    Keeping what was removed, not just what was added, is the point: a
+    deleted validation check or sanitization call is exactly the kind of
+    change a security review most needs to see, and the code after the
+    change can't show it.
     """
     log = log or (lambda msg: None)
 
@@ -261,22 +293,27 @@ def get_modified_lines(
     if result.returncode != 0:
         raise RuntimeError(f"git diff failed: {_git_error(result)}")
 
-    diff_output = result.stdout
-
-    modified_lines = defaultdict(dict)
+    hunks_by_file = defaultdict(list)
     current_file = None
-    next_line_num = None
-    pending_deletion_line = None
-    pending_deletion_text = []
+    hunk = None
+    removed_left = added_left = 0
 
-    def flush_pending_deletion():
-        if current_file and pending_deletion_line is not None and pending_deletion_text:
-            modified_lines[current_file][pending_deletion_line] = "\n".join(pending_deletion_text)
+    for line in result.stdout.splitlines():
+        if removed_left or added_left:
+            # Inside a hunk, -U0 lists exactly as many removed lines, then
+            # added lines, as its header announced. Counting them off -- not
+            # guessing from each line's prefix -- means a removed "-- SQL
+            # comment" (shown as "--- SQL comment") can't pass for a file
+            # header. "\ No newline at end of file" markers aren't counted.
+            if line.startswith("-") and removed_left:
+                hunk["removed"].append(line[1:])
+                removed_left -= 1
+            elif line.startswith("+") and added_left:
+                hunk["added"].append(line[1:])
+                added_left -= 1
+            continue
 
-    for line in diff_output.splitlines():
         if line.startswith("+++ "):
-            flush_pending_deletion()
-            pending_deletion_line, pending_deletion_text = None, []
             # Git appends a tab after a path containing a space (for
             # patch(1)'s sake) and C-quotes unusual ones -- undo both, or
             # the path never matches the file's real one.
@@ -286,40 +323,24 @@ def get_modified_lines(
                 current_file = os.path.abspath(os.path.join(repo_path, path[2:]))
             else:
                 # "+++ /dev/null": the whole file was deleted on the to side.
-                # There's no to-side file to attribute this hunk to, and
+                # There's no to-side file to attribute its hunks to, and
                 # without resetting this, a stale current_file from the
                 # PREVIOUS file section in the diff would silently absorb
                 # this file's content -- a genuine cross-file data leak.
                 current_file = None
-            next_line_num = None
         elif line.startswith("@@ ") and current_file:
-            flush_pending_deletion()
-            pending_deletion_line, pending_deletion_text = None, []
-            # Parse the + part of the hunk header
-            match = re.search(r'\+([0-9]+)(?:,([0-9]+))?', line)
+            match = _HUNK_HEADER_RE.match(line)
             if match:
-                start_line = int(match.group(1))
-                count = match.group(2)
-                count = int(count) if count is not None else 1
-                if count > 0:
-                    next_line_num = start_line
-                else:
-                    next_line_num = None
-                    pending_deletion_line = max(1, start_line)
-        elif current_file and next_line_num is not None and line.startswith("+") and not line.startswith("+++"):
-            # With -U0 there are no context lines, so every "+" line after a
-            # hunk header maps to the next line number in the added range.
-            modified_lines[current_file][next_line_num] = line[1:]
-            next_line_num += 1
-        elif current_file and pending_deletion_line is not None and line.startswith("-") and not line.startswith("---"):
-            pending_deletion_text.append(line[1:])
-
-    flush_pending_deletion()
+                removed_count, start, added_count = match.groups()
+                removed_left = int(removed_count) if removed_count is not None else 1
+                added_left = int(added_count) if added_count is not None else 1
+                hunk = {"start": int(start), "removed": [], "added": []}
+                hunks_by_file[current_file].append(hunk)
 
     if not (from_ref and to_ref):
-        untracked = _untracked_file_lines(repo_path, log)
+        untracked = _untracked_file_hunks(repo_path, log)
         if untracked:
             log(f"Including {len(untracked)} untracked file(s), every line as added")
-            modified_lines.update(untracked)
+            hunks_by_file.update(untracked)
 
-    return dict(modified_lines)
+    return dict(hunks_by_file)

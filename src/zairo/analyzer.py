@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from trailmark import parse_directory
 from trailmark.query.api import QueryEngine
-from .git_utils import get_changed_file_paths, get_modified_lines
+from .git_utils import get_changed_file_paths, get_diff_hunks, hunk_lines, hunks_in_range
 from ._util import display_name as _display_name
 
 # Cap on how many `git show` subprocesses run at once in _find_deleted_nodes.
@@ -133,10 +133,10 @@ def analyze_impact(
 
     analysis_root = os.path.abspath(repo_path)
 
-    modified_files_lines = get_modified_lines(analysis_root, from_ref, to_ref, log=log)
-    log(f"git diff found {len(modified_files_lines)} modified file(s):")
-    for f, lines in modified_files_lines.items():
-        log(f"  {f}: {len(lines)} line(s) changed -> {sorted(lines.keys())}")
+    diff_hunks = get_diff_hunks(analysis_root, from_ref, to_ref, log=log)
+    log(f"git diff found {len(diff_hunks)} modified file(s):")
+    for f, hunks in diff_hunks.items():
+        log(f"  {f}: {len(hunks)} hunk(s) at line(s) {[hunk_lines(h)[0] for h in hunks]}")
 
     # Initialize Trailmark
     log(f"Indexing {analysis_root} with Trailmark (language={language})...")
@@ -170,16 +170,15 @@ def analyze_impact(
             "status": "unchanged" # default
         }
 
-        if location["file_path"] in modified_files_lines:
-            file_mod_lines = modified_files_lines[location["file_path"]]
+        if location["file_path"] in diff_hunks:
             start = location["start_line"]
             end = location["end_line"]
-            changed_lines = {ln: text for ln, text in file_mod_lines.items() if start <= ln <= end}
-            if changed_lines:
+            node_hunks = hunks_in_range(diff_hunks[location["file_path"]], start, end)
+            if node_hunks:
                 seed_nodes.add(node_id)
                 node_metadata[node_id]["status"] = "modified"
-                node_metadata[node_id]["changed_lines"] = changed_lines
-                log(f"  seed: {_display_name(node_metadata[node_id]['name'])} ({location['file_path']}:{start}-{end}), {len(changed_lines)} line(s) changed")
+                node_metadata[node_id]["diff_hunks"] = node_hunks
+                log(f"  seed: {_display_name(node_metadata[node_id]['name'])} ({location['file_path']}:{start}-{end}), {len(node_hunks)} hunk(s)")
 
     log(f"Identified {len(seed_nodes)} seed node(s)")
 

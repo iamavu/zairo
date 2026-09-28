@@ -4,15 +4,24 @@ from pathlib import Path
 
 import pytest
 
-from zairo.git_utils import get_changed_file_paths, get_modified_lines, resolve_commit
+from zairo.git_utils import get_changed_file_paths, get_diff_hunks, hunk_lines, hunks_in_range, resolve_commit
 
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
 
 
+def _added_lines(repo: Path, *refs: str) -> dict:
+    """{file: {line number: text}} of every added line -- what most tests
+    here check; the hunk tests further down look at removed lines too."""
+    return {
+        path: {ln: text for hunk in hunks for ln, text in zip(hunk_lines(hunk), hunk["added"])}
+        for path, hunks in get_diff_hunks(str(repo), *refs).items()
+    }
+
+
 def test_diff_between_two_commits(git_repo: Path):
-    modified = get_modified_lines(str(git_repo), "HEAD~1", "HEAD")
+    modified = _added_lines(git_repo, "HEAD~1", "HEAD")
     file_path = str((git_repo / "test.py").resolve())
 
     assert file_path in modified
@@ -26,7 +35,7 @@ def test_uncommitted_changes(git_repo: Path):
     test_py = git_repo / "test.py"
     test_py.write_text(test_py.read_text() + "\n# trailing comment\n")
 
-    modified = get_modified_lines(str(git_repo))
+    modified = _added_lines(git_repo)
     file_path = str(test_py.resolve())
 
     assert file_path in modified
@@ -35,7 +44,7 @@ def test_uncommitted_changes(git_repo: Path):
 
 def test_no_base_or_target_diffs_working_tree_vs_head(git_repo: Path):
     # With no changes at all, nothing should show up as modified.
-    modified = get_modified_lines(str(git_repo))
+    modified = _added_lines(git_repo)
     assert modified == {}
 
 
@@ -47,7 +56,7 @@ def test_staged_changes_are_included(git_repo: Path):
     test_py.write_text(test_py.read_text() + "def staged(cmd):\n    return os.popen(cmd)\n")
     _git(git_repo, "add", "test.py")
 
-    modified = get_modified_lines(str(git_repo))
+    modified = _added_lines(git_repo)
     file_path = str(test_py.resolve())
 
     assert file_path in modified
@@ -59,7 +68,7 @@ def test_untracked_file_counts_as_entirely_added(git_repo: Path):
     new_py = git_repo / "new.py"
     new_py.write_text("import os\ndef run(cmd):\n    return os.system(cmd)\n")
 
-    modified = get_modified_lines(str(git_repo))
+    modified = _added_lines(git_repo)
 
     assert modified[str(new_py.resolve())] == {
         1: "import os",
@@ -73,7 +82,7 @@ def test_gitignored_and_binary_untracked_files_are_skipped(git_repo: Path):
     (git_repo / "ignored.py").write_text("def f():\n    pass\n")
     (git_repo / "blob.bin").write_bytes(b"\x00\x01\x02")
 
-    modified = get_modified_lines(str(git_repo))
+    modified = _added_lines(git_repo)
 
     assert str((git_repo / "ignored.py").resolve()) not in modified
     assert str((git_repo / "blob.bin").resolve()) not in modified
@@ -84,7 +93,7 @@ def test_untracked_files_not_included_when_diffing_two_commits(git_repo: Path):
     around untracked in the working tree isn't part of either."""
     (git_repo / "new.py").write_text("def f():\n    pass\n")
 
-    modified = get_modified_lines(str(git_repo), "HEAD~1", "HEAD")
+    modified = _added_lines(git_repo, "HEAD~1", "HEAD")
 
     assert str((git_repo / "new.py").resolve()) not in modified
 
@@ -99,7 +108,7 @@ def test_repo_with_no_commits_yet(tmp_path: Path):
     _git(repo, "add", "staged.py")
     (repo / "untracked.py").write_text("def b():\n    pass\n")
 
-    modified = get_modified_lines(str(repo))
+    modified = _added_lines(repo)
 
     assert set(modified[str((repo / "staged.py").resolve())]) == {1, 2}
     assert set(modified[str((repo / "untracked.py").resolve())]) == {1, 2}
@@ -134,7 +143,7 @@ def test_resolve_commit_in_a_shallow_clone_hints_at_fetch_depth(git_repo: Path, 
 
 def test_failed_git_diff_raises_instead_of_reporting_no_changes(git_repo: Path):
     with pytest.raises(RuntimeError, match="git diff failed"):
-        get_modified_lines(str(git_repo), "no-such-ref", "HEAD")
+        get_diff_hunks(str(git_repo), "no-such-ref", "HEAD")
 
 
 @pytest.mark.parametrize("name", [
@@ -150,7 +159,7 @@ def test_unusual_filenames_are_matched(git_repo: Path, name: str):
     _git(git_repo, "add", "--", name)
     _git(git_repo, "commit", "-q", "-m", "add")
 
-    modified = get_modified_lines(str(git_repo), "HEAD~1", "HEAD")
+    modified = _added_lines(git_repo, "HEAD~1", "HEAD")
 
     assert set(modified[str((git_repo / name).resolve())]) == {1, 2}
     assert get_changed_file_paths(str(git_repo), "HEAD~1", "HEAD") == [name]
@@ -165,6 +174,59 @@ def test_user_diff_config_cannot_change_the_parsed_format(git_repo: Path):
     test_py = git_repo / "test.py"
     test_py.write_text(test_py.read_text() + "def added():\n    pass\n")
 
-    modified = get_modified_lines(str(git_repo))
+    modified = _added_lines(git_repo)
 
     assert set(modified[str(test_py.resolve())]) == {4, 5}
+
+
+def test_hunks_keep_what_a_change_replaced(git_repo: Path):
+    """What a replaced line used to say is the part the code after the
+    change can't show -- a dropped check is simply gone from it."""
+    test_py = git_repo / "test.py"
+    test_py.write_text(test_py.read_text().replace("os.system(user_input)", "os.popen(user_input).read()"))
+
+    [hunk] = get_diff_hunks(str(git_repo))[str(test_py.resolve())]
+
+    assert hunk == {
+        "start": 3,
+        "removed": ["    return os.system(user_input)"],
+        "added": ["    return os.popen(user_input).read()"],
+    }
+
+
+def test_pure_deletion_hunk_sits_after_the_line_it_followed(git_repo: Path):
+    test_py = git_repo / "test.py"
+    test_py.write_text("import os\ndef vulnerable_exec(user_input):\n")
+
+    [hunk] = get_diff_hunks(str(git_repo))[str(test_py.resolve())]
+
+    assert hunk == {"start": 2, "removed": ["    return os.system(user_input)"], "added": []}
+    assert hunk_lines(hunk) == [2]
+
+
+def test_lines_that_look_like_file_headers_stay_in_their_hunk(git_repo: Path):
+    """A removed "-- comment" shows up in the diff as "--- comment", an
+    added "++ x" as "+++ x" -- both look like file headers, but belong to
+    the hunk, whose header says how many lines it has."""
+    query = git_repo / "query.sql"
+    query.write_text("-- only admins may run this\nSELECT 1;\n")
+    _git(git_repo, "add", "query.sql")
+    _git(git_repo, "commit", "-q", "-m", "add query")
+    query.write_text("++ counter\nSELECT 1;\n")
+
+    [hunk] = get_diff_hunks(str(git_repo))[str(query.resolve())]
+
+    assert hunk == {"start": 1, "removed": ["-- only admins may run this"], "added": ["++ counter"]}
+
+
+def test_hunks_in_range_cuts_added_lines_but_keeps_removed_ones():
+    hunks = [
+        {"start": 10, "removed": ["old"], "added": ["a", "b", "c", "d"]},  # lines 10-13
+        {"start": 20, "removed": ["gone"], "added": []},                  # deleted after line 20
+        {"start": 30, "removed": [], "added": ["x"]},                     # outside the range
+    ]
+
+    assert hunks_in_range(hunks, 12, 25) == [
+        {"start": 12, "removed": ["old"], "added": ["c", "d"]},
+        {"start": 20, "removed": ["gone"], "added": []},
+    ]
