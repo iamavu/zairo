@@ -118,6 +118,7 @@ def run_scan(
         json_path, html_path, sarif_path = generate_reports(
             graph_data, output_dir, vulnerabilities, repo_root=analysis_root, tool_version=__version__,
             repo_name=os.path.basename(abs_repo),
+            failed_nodes=token_usage['failed_nodes'] if token_usage else None,
         )
 
         return ScanResult(

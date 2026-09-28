@@ -80,6 +80,39 @@ def test_sarif_written_even_with_zero_findings(tmp_path: Path):
     assert sarif["runs"][0]["results"] == []
 
 
+def test_incomplete_scan_is_recorded_in_report_json_and_sarif(tmp_path: Path):
+    graph_data = _graph_data(str(tmp_path / "x.py"))
+    output_dir = tmp_path / "out"
+    json_path, _, sarif_path = generate_reports(
+        graph_data, str(output_dir), {}, repo_root=str(tmp_path), failed_nodes={"n1": "boom"},
+    )
+
+    with open(json_path) as f:
+        written = json.load(f)
+    assert written["scan_complete"] is False
+    assert written["nodes"][0]["scan_error"] == "boom"
+    with open(sarif_path) as f:
+        assert json.load(f)["runs"][0]["invocations"][0]["executionSuccessful"] is False
+
+
+def test_complete_scan_is_recorded_in_report_json(tmp_path: Path):
+    graph_data = _graph_data(str(tmp_path / "x.py"))
+    json_path, _, _ = generate_reports(graph_data, str(tmp_path / "out"), {}, repo_root=str(tmp_path))
+
+    with open(json_path) as f:
+        written = json.load(f)
+    assert written["scan_complete"] is True
+    assert "scan_error" not in written["nodes"][0]
+
+
+def test_no_scan_status_when_llm_scan_did_not_run(tmp_path: Path):
+    graph_data = _graph_data(str(tmp_path / "x.py"))
+    json_path, _, _ = generate_reports(graph_data, str(tmp_path / "out"), None, repo_root=str(tmp_path))
+
+    with open(json_path) as f:
+        assert "scan_complete" not in json.load(f)
+
+
 def test_no_sarif_when_llm_scan_did_not_run(tmp_path: Path):
     graph_data = _graph_data(str(tmp_path / "x.py"))
     output_dir = tmp_path / "out"
@@ -116,3 +149,20 @@ def test_html_payloads_preserve_hostile_text_without_closing_script(tmp_path):
     assert graph["nodes"][0]["name"] == payload
     assert graph["nodes"][0]["vulnerabilities"][0]["title"] == payload
     assert metadata["repo_root"].endswith(payload)
+
+
+def test_html_shows_symbols_the_scan_could_not_assess(tmp_path):
+    """report.html has to tell "no findings" apart from "never assessed",
+    and the error text it shows comes from the provider/model -- untrusted,
+    so it must go through escapeHtml like every other field."""
+    graph_data = _graph_data(str(tmp_path / "x.py"))
+    _, html_path, _ = generate_reports(
+        graph_data, str(tmp_path / "out"), {}, repo_root=str(tmp_path), failed_nodes={"n1": "<b>boom</b>"},
+    )
+
+    html = Path(html_path).read_text(encoding="utf-8")
+    graph = json.loads(re.search(r"const graphData = (.+);", html).group(1))
+    assert graph["nodes"][0]["scan_error"] == "<b>boom</b>"
+    assert "<b>boom</b>" not in html
+    assert "Could not assess: ${escapeHtml(oneLine(d.scan_error))}" in html
+    assert "Scan incomplete" in html

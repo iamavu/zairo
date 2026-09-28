@@ -87,6 +87,20 @@ def _relative_uri(file_path: Optional[str], repo_root: str) -> Optional[str]:
     return rel.replace(os.sep, "/")
 
 
+def _location(node: Dict[str, Any], repo_root: str) -> Optional[Dict[str, Any]]:
+    """A fresh SARIF location for a node every call -- never share one
+    between results, since the rollup rewrites each URI in place."""
+    uri = _relative_uri(node.get("file"), repo_root)
+    if not uri:
+        return None
+    return {
+        "physicalLocation": {
+            "artifactLocation": {"uri": uri},
+            "region": {"startLine": node.get("start_line") or 1},
+        }
+    }
+
+
 def _rule_for(finding: Dict[str, Any], level: str, severity: str) -> Tuple[str, Dict[str, Any]]:
     """Picks a stable rule id/definition for a finding: keyed by CWE when the
     model gave one (so "SQL Injection" and "SQLi in query builder" -- two
@@ -124,11 +138,17 @@ def build_sarif(
     vulnerabilities: Dict[str, List[Dict[str, Any]]],
     repo_root: str,
     tool_version: str = "0.0.0",
+    failed_nodes: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Converts zairo's LLM findings into a SARIF 2.1.0 log for GitHub code
     scanning (or any other SARIF-consuming viewer). Always returns a valid
     log, even with zero results -- uploading an empty SARIF file for a clean
-    scan is what lets GitHub mark previously reported alerts as resolved."""
+    scan is what lets GitHub mark previously reported alerts as resolved.
+
+    `failed_nodes` ({node id: error}) are nodes the scan couldn't assess:
+    each becomes an error-level tool execution notification, and the run's
+    invocation records executionSuccessful: false -- so zero results from
+    an incomplete scan never look like a clean one."""
     nodes = {n["id"]: n for n in graph_data["nodes"]}
 
     rules: Dict[str, Dict[str, Any]] = {}
@@ -136,8 +156,6 @@ def build_sarif(
 
     for node_id, findings in vulnerabilities.items():
         node = nodes.get(node_id, {})
-        uri = _relative_uri(node.get("file"), repo_root)
-        start_line = node.get("start_line") or 1
 
         for finding in findings:
             title = finding.get("title") or "Potential vulnerability"
@@ -159,16 +177,26 @@ def build_sarif(
                 "message": {"text": message},
                 "properties": {"severity": severity, "cwe": cwe, "node": node.get("name")},
             }
-            if uri:
-                result["locations"] = [
-                    {
-                        "physicalLocation": {
-                            "artifactLocation": {"uri": uri},
-                            "region": {"startLine": start_line},
-                        }
-                    }
-                ]
+            location = _location(node, repo_root)
+            if location:
+                result["locations"] = [location]
             results.append(result)
+
+    notifications: List[Dict[str, Any]] = []
+    for node_id, error in (failed_nodes or {}).items():
+        node = nodes.get(node_id, {})
+        notification: Dict[str, Any] = {
+            "level": "error",
+            "message": {"text": f"Could not assess {node.get('name', node_id)}: {error}"},
+        }
+        location = _location(node, repo_root)
+        if location:
+            notification["locations"] = [location]
+        notifications.append(notification)
+
+    invocation: Dict[str, Any] = {"executionSuccessful": not notifications}
+    if notifications:
+        invocation["toolExecutionNotifications"] = notifications
 
     return {
         "$schema": SARIF_SCHEMA_URI,
@@ -183,6 +211,7 @@ def build_sarif(
                         "rules": list(rules.values()),
                     }
                 },
+                "invocations": [invocation],
                 "results": results,
             }
         ],

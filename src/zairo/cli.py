@@ -194,6 +194,13 @@ def _run_single_repo(
                     f"[bold red]Gate failed:[/bold red] found a '{worst}' severity finding "
                     f"(threshold: {fail_on.value})."
                 )
+            num_failed = len(result.token_usage['failed_nodes'])
+            if num_failed:
+                should_fail = True
+                console.print(
+                    f"[bold red]Gate failed:[/bold red] the scan is incomplete -- {num_failed} node(s) "
+                    f"couldn't be assessed, and --fail-on only passes a complete scan."
+                )
         if tokens:
             _print_token_usage(result.token_usage)
 
@@ -341,6 +348,13 @@ def _run_multi_repo(
             console.print(
                 f"[bold red]Gate failed:[/bold red] found a '{worst}' severity finding across all repos "
                 f"(threshold: {fail_on.value})."
+            )
+        num_failed = sum(len(r["result"].token_usage['failed_nodes']) for r in ok_results)
+        if num_failed:
+            should_fail = True
+            console.print(
+                f"[bold red]Gate failed:[/bold red] the scan is incomplete -- {num_failed} node(s) "
+                f"across all repos couldn't be assessed, and --fail-on only passes a complete scan."
             )
 
     return should_fail

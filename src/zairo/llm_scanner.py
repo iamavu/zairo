@@ -408,7 +408,9 @@ def scan_graph_for_vulnerabilities(
     prompt_tokens/completion_tokens/total_tokens summed across every real
     LLM call made (cache hits don't count -- they made no call), plus
     requests/requests_without_usage so a caller can tell whether the token
-    totals are complete or partial (e.g. some providers don't report it).
+    totals are complete or partial (e.g. some providers don't report it),
+    and failed_nodes ({node id: error}) -- any entry at all means the scan
+    is incomplete.
     With batch_size > 1, 'requests' counts actual API calls, not nodes --
     that's the whole point of batching, so it's the number that should drop.
 
@@ -683,6 +685,10 @@ def scan_graph_for_vulnerabilities(
         # failed on every node (e.g. a missing API key) is never
         # indistinguishable from a clean "0 vulnerabilities found" scan.
         'errors': {},
+        # {node id: error message} for every node that got no usable answer
+        # -- what makes a scan incomplete. The reports mark these nodes, and
+        # --fail-on refuses to pass a scan that has any.
+        'failed_nodes': {},
     }
 
     if jobs:
@@ -705,8 +711,10 @@ def scan_graph_for_vulnerabilities(
                     token_usage['requests_without_usage'] += 1
                 for node_id, prompt_hash, findings, _usage, error_message in results:
                     if findings is None:
-                        if error_message:
-                            token_usage['errors'][error_message] = token_usage['errors'].get(error_message, 0) + 1
+                        # No findings list means no assessment, message or not.
+                        error_message = error_message or "unknown error"
+                        token_usage['failed_nodes'][node_id] = error_message
+                        token_usage['errors'][error_message] = token_usage['errors'].get(error_message, 0) + 1
                         continue  # request failed; don't cache a non-result
                     cache[prompt_hash] = findings
                     if findings:

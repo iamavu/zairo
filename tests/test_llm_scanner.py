@@ -117,6 +117,18 @@ def test_no_errors_key_populated_on_a_clean_run(monkeypatch):
     _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=None)
 
     assert token_usage["errors"] == {}
+    assert token_usage["failed_nodes"] == {}
+
+
+def test_failed_nodes_records_which_nodes_were_never_assessed(monkeypatch):
+    """Per-node, not just per-message: the reports need to mark exactly
+    which nodes nobody reviewed."""
+    _mock_litellm(monkeypatch, RuntimeError("boom"))
+    graph_data = {"nodes": [_node("n1", "fn_one"), _node("n2", "fn_two")], "edges": []}
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=None)
+
+    assert token_usage["failed_nodes"] == {"n1": "boom", "n2": "boom"}
 
 
 def test_debug_log_receives_prompt_and_response_on_success(monkeypatch):
@@ -315,8 +327,8 @@ def test_non_answer_is_a_failed_scan_and_never_cached(monkeypatch, tmp_path):
             graph_data, "fake-model", cache_path=cache_path,
         )
         assert vulnerabilities == {}
-        [(message, count)] = token_usage["errors"].items()
-        assert count == 1 and "no 'vulnerabilities' list" in message
+        assert list(token_usage["failed_nodes"]) == ["n1"]
+        assert "no 'vulnerabilities' list" in token_usage["failed_nodes"]["n1"]
 
     assert fake_litellm.completion.call_count == 2  # the second run wasn't a cache hit
 
@@ -327,7 +339,7 @@ def test_findings_that_are_not_objects_fail_the_node(monkeypatch):
 
     _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=None)
 
-    assert sum(token_usage["errors"].values()) == 1
+    assert list(token_usage["failed_nodes"]) == ["n1"]
 
 
 def test_bare_json_string_fails_the_node(monkeypatch):
@@ -336,7 +348,7 @@ def test_bare_json_string_fails_the_node(monkeypatch):
 
     _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=None)
 
-    assert sum(token_usage["errors"].values()) == 1
+    assert list(token_usage["failed_nodes"]) == ["n1"]
 
 
 def test_bare_findings_list_is_still_accepted(monkeypatch):
@@ -345,7 +357,7 @@ def test_bare_findings_list_is_still_accepted(monkeypatch):
 
     vulnerabilities, token_usage = llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=None)
 
-    assert token_usage["errors"] == {}
+    assert token_usage["failed_nodes"] == {}
     assert vulnerabilities["n1"][0]["severity"] == "high"
 
 
@@ -357,7 +369,7 @@ def test_batch_entry_that_is_not_a_findings_list_fails_only_that_node(monkeypatc
         graph_data, "fake-model", cache_path=None, batch_size=2,
     )
 
-    assert sum(token_usage["errors"].values()) == 1  # n2 only: n1's empty list is a valid answer
+    assert list(token_usage["failed_nodes"]) == ["n2"]
 
 
 def test_changing_the_prompt_invalidates_cached_verdicts(monkeypatch, tmp_path):

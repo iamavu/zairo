@@ -35,24 +35,36 @@ def generate_reports(
     repo_root: str = None,
     tool_version: str = "0.0.0",
     repo_name: str = None,
+    failed_nodes: dict = None,
 ):
     """Returns (json_path, html_path, sarif_path). sarif_path is None unless
     an LLM scan actually ran (vulnerabilities is not None, including when it
     ran and found nothing) -- there's nothing meaningful to convert to SARIF
-    otherwise."""
-    os.makedirs(output_dir, exist_ok=True)
+    otherwise.
 
-    # Attach vulnerabilities to graph_data
-    if vulnerabilities:
-        for node in graph_data['nodes']:
-            if node['id'] in vulnerabilities:
-                node['vulnerabilities'] = vulnerabilities[node['id']]
+    `failed_nodes` ({node id: error}) are nodes the LLM scan couldn't
+    assess. Each gets a 'scan_error' in report.json, whose top-level
+    'scan_complete' is then false, and report.sarif marks its run as not
+    executed successfully -- so neither can read as a clean result for code
+    nobody actually reviewed."""
+    os.makedirs(output_dir, exist_ok=True)
+    failed_nodes = failed_nodes or {}
+
+    # Attach vulnerabilities and scan failures to graph_data
+    for node in graph_data['nodes']:
+        if vulnerabilities and node['id'] in vulnerabilities:
+            node['vulnerabilities'] = vulnerabilities[node['id']]
+        if node['id'] in failed_nodes:
+            node['scan_error'] = failed_nodes[node['id']]
 
     json_path = os.path.join(output_dir, "report.json")
     html_path = os.path.join(output_dir, "report.html")
 
+    report = dict(graph_data)
+    if vulnerabilities is not None:
+        report['scan_complete'] = not failed_nodes
     with open(json_path, 'w') as f:
-        json.dump(graph_data, f, indent=2)
+        json.dump(report, f, indent=2)
 
     template = Template(HTML_TEMPLATE)
     html_content = template.render(
@@ -70,7 +82,7 @@ def generate_reports(
 
     sarif_path = None
     if vulnerabilities is not None:
-        sarif_data = build_sarif(graph_data, vulnerabilities, repo_root or output_dir, tool_version)
+        sarif_data = build_sarif(graph_data, vulnerabilities, repo_root or output_dir, tool_version, failed_nodes)
         sarif_path = os.path.join(output_dir, "report.sarif")
         with open(sarif_path, 'w') as f:
             json.dump(sarif_data, f, indent=2)

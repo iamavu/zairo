@@ -46,6 +46,29 @@ def test_missing_file_omits_location_but_keeps_result():
     assert "locations" not in result
 
 
+def test_complete_scan_records_a_successful_invocation():
+    sarif = build_sarif(_graph("/repo/src/app.py"), {}, repo_root="/repo")
+    assert sarif["runs"][0]["invocations"] == [{"executionSuccessful": True}]
+
+
+def test_failed_nodes_mark_the_run_unsuccessful_with_a_notification_each():
+    """Zero results from a scan that couldn't assess some code must not
+    look like a clean scan to a SARIF consumer."""
+    sarif = build_sarif(
+        _graph("/repo/src/app.py"), {}, repo_root="/repo",
+        failed_nodes={"n1": "AuthenticationError: invalid API key"},
+    )
+
+    invocation = sarif["runs"][0]["invocations"][0]
+    assert invocation["executionSuccessful"] is False
+    [notification] = invocation["toolExecutionNotifications"]
+    assert notification["level"] == "error"
+    assert "vulnerable_exec" in notification["message"]["text"]
+    assert "invalid API key" in notification["message"]["text"]
+    location = notification["locations"][0]["physicalLocation"]
+    assert location["artifactLocation"]["uri"] == "src/app.py"
+
+
 def test_file_on_another_drive_omits_location_instead_of_crashing(monkeypatch):
     """On Windows, os.path.relpath raises ValueError when the file and the
     repo root are on different drives (e.g. a C:\\ temp worktree vs a D:\\

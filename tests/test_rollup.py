@@ -93,27 +93,56 @@ def test_write_rollup_reports_sarif_locations_resolve_from_the_worktree(tmp_path
     """When diffing two commits, node files live under the scan's temporary
     worktree, not the repo -- rollup.sarif has to make them relative to the
     worktree, or every finding loses its location (or, on Windows with the
-    temp dir on another drive, relpath raises and the rollup crashes)."""
+    temp dir on another drive, relpath raises and the rollup crashes). The
+    same goes for the notifications of nodes the scan couldn't assess."""
     repo = tmp_path / "repo"
     worktree = tmp_path / "zairo-worktree-abc"
     scan_result = ScanResult(
         repo_path=str(repo),
         analysis_root=str(worktree),
         graph_data={
-            "nodes": [{"id": "n1", "name": "f", "status": "modified",
-                       "file": str(worktree / "src" / "app.py"), "start_line": 3}],
+            "nodes": [
+                {"id": "n1", "name": "f", "status": "modified",
+                 "file": str(worktree / "src" / "app.py"), "start_line": 3},
+                {"id": "n2", "name": "g", "status": "modified",
+                 "file": str(worktree / "src" / "util.py"), "start_line": 7},
+            ],
             "edges": [],
         },
         vulnerabilities={"n1": [{"title": "X", "severity": "high"}]},
-        token_usage=None,
+        token_usage={"failed_nodes": {"n2": "boom"}},
         json_path="", html_path="", sarif_path="",
     )
     results = [{"repo": str(repo), "slug": "repo", "status": "ok", "result": scan_result}]
 
     reports = write_rollup_reports(results, str(tmp_path / "out"))
     with open(reports["sarif"]) as f:
-        sarif = json.load(f)
+        run = json.load(f)["runs"][0]
 
-    location = sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+    location = run["results"][0]["locations"][0]["physicalLocation"]
     assert location["artifactLocation"]["uri"] == "repo/src/app.py"
     assert location["region"]["startLine"] == 3
+    [notification] = run["invocations"][0]["toolExecutionNotifications"]
+    assert notification["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "repo/src/util.py"
+
+
+def test_incomplete_repo_scan_is_flagged_in_rollup(tmp_path: Path):
+    """A repo whose scan couldn't assess some nodes must not show up as a
+    plain "ok" in the rollup."""
+    incomplete = _ok_result(vulnerabilities={})
+    incomplete.token_usage = {"failed_nodes": {"n1": "boom"}}
+    results = [
+        {"repo": "/a", "slug": "a", "status": "ok", "result": incomplete},
+        {"repo": "/b", "slug": "b", "status": "ok", "result": _ok_result(vulnerabilities={})},
+        {"repo": "/c", "slug": "c", "status": "ok", "result": _ok_result(vulnerabilities=None)},
+    ]
+
+    reports = write_rollup_reports(results, str(tmp_path))
+
+    with open(reports["json"]) as f:
+        by_slug = {r["slug"]: r for r in json.load(f)["repos"]}
+    assert (by_slug["a"]["scan_complete"], by_slug["a"]["num_failed_nodes"]) == (False, 1)
+    assert by_slug["b"]["scan_complete"] is True
+    assert by_slug["c"]["scan_complete"] is None  # --graph-only: no scan to be incomplete
+    html = Path(reports["html"]).read_text()
+    assert html.count(">incomplete</span>") == 1

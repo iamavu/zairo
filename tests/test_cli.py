@@ -241,7 +241,7 @@ def test_multi_repo_tokens_sums_usage_across_repos(make_git_repo, tmp_path: Path
 
     fake_usage = {
         "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
-        "requests": 1, "requests_without_usage": 0, "errors": {},
+        "requests": 1, "requests_without_usage": 0, "errors": {}, "failed_nodes": {},
     }
 
     with patch("zairo.scan.scan_graph_for_vulnerabilities", return_value=({}, fake_usage)):
@@ -304,3 +304,54 @@ def test_error_text_with_markup_like_brackets_prints_verbatim(git_repo: Path, tm
     assert multi.exit_code == 1
     assert "bad option [/<m>]" in multi.output
     assert (tmp_path / "multi" / "rollup.json").exists()
+
+
+def _scan_usage(failed_nodes: dict) -> dict:
+    """What scan_graph_for_vulnerabilities returns as its second value."""
+    errors = {}
+    for message in failed_nodes.values():
+        errors[message] = errors.get(message, 0) + 1
+    return {
+        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "requests": 1,
+        "requests_without_usage": 1, "nodes_scanned": len(failed_nodes) or 1,
+        "errors": errors, "failed_nodes": failed_nodes,
+    }
+
+
+def test_fail_on_fails_an_incomplete_scan(git_repo: Path, tmp_path: Path):
+    """Every node failing (e.g. a missing API key) finds nothing -- that's
+    no evidence of safety, so --fail-on must not pass it."""
+    usage = _scan_usage({"n1": "AuthenticationError: invalid API key"})
+    with patch("zairo.scan.scan_graph_for_vulnerabilities", return_value=({}, usage)):
+        result = runner.invoke(
+            app,
+            [str(git_repo), "--from", "HEAD~1", "--to", "HEAD", "--fail-on", "high", "--output", str(tmp_path / "out")],
+        )
+
+    assert result.exit_code != 0
+    assert "scan is incomplete" in result.output
+
+
+def test_fail_on_passes_a_complete_clean_scan(git_repo: Path, tmp_path: Path):
+    with patch("zairo.scan.scan_graph_for_vulnerabilities", return_value=({}, _scan_usage({}))):
+        result = runner.invoke(
+            app,
+            [str(git_repo), "--from", "HEAD~1", "--to", "HEAD", "--fail-on", "high", "--output", str(tmp_path / "out")],
+        )
+
+    assert result.exit_code == 0, result.output
+
+
+def test_multi_repo_fail_on_fails_when_any_repo_scan_is_incomplete(make_git_repo, tmp_path: Path):
+    repo_a = make_git_repo("repo_a")
+    repo_b = make_git_repo("repo_b")
+    usages = iter([_scan_usage({}), _scan_usage({"n1": "boom"})])
+
+    with patch("zairo.scan.scan_graph_for_vulnerabilities", side_effect=lambda *a, **kw: ({}, next(usages))):
+        result = runner.invoke(
+            app,
+            [str(repo_a), str(repo_b), "--fail-on", "high", "--output", str(tmp_path / "out")],
+        )
+
+    assert result.exit_code != 0
+    assert "scan is incomplete" in result.output

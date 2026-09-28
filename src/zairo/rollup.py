@@ -79,6 +79,7 @@ ROLLUP_HTML_TEMPLATE = """
         }
         .badge.status-ok { background: rgba(158,206,106,0.18); color: var(--status-added); }
         .badge.status-error { background: rgba(247,118,142,0.18); color: var(--sev-critical); }
+        .badge.status-incomplete { background: rgba(224,175,104,0.18); color: var(--sev-medium); }
 
         .count { font-variant-numeric: tabular-nums; color: var(--text-faint); }
         .count.nonzero { font-weight: 700; }
@@ -123,7 +124,11 @@ ROLLUP_HTML_TEMPLATE = """
                     <td colspan="6" class="error-text">{{ r.error }}</td>
                     <td></td>
                 {% else %}
+                  {% if r.scan_complete is sameas false %}
+                    <td><span class="badge status-incomplete" title="{{ r.num_failed_nodes }} node(s) could not be assessed">incomplete</span></td>
+                  {% else %}
                     <td><span class="badge status-ok">ok</span></td>
+                  {% endif %}
                     <td>{{ r.num_modified_nodes }}</td>
                     <td>{{ r.num_findings }}</td>
                     <td class="count sev-critical {{ 'nonzero' if r.severity_counts.critical else '' }}">{{ r.severity_counts.critical }}</td>
@@ -191,7 +196,12 @@ def build_rollup_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
                     totals[sev] += 1
                     num_findings += 1
 
+        # None when no LLM scan ran (--graph-only): there's nothing to be
+        # complete or incomplete about.
+        failed_nodes = (scan_result.token_usage or {}).get("failed_nodes", {})
         entry.update({
+            "scan_complete": None if scan_result.vulnerabilities is None else not failed_nodes,
+            "num_failed_nodes": len(failed_nodes),
             "num_modified_nodes": sum(1 for n in scan_result.graph_data["nodes"] if n["status"] != "unchanged"),
             "num_findings": num_findings,
             "severity_counts": severity_counts,
@@ -223,10 +233,12 @@ def _build_rollup_sarif(results: List[Dict[str, Any]], tool_version: str) -> Opt
         repo_sarif = build_sarif(
             scan_result.graph_data, scan_result.vulnerabilities,
             repo_root=scan_result.analysis_root, tool_version=tool_version,
+            failed_nodes=(scan_result.token_usage or {}).get("failed_nodes"),
         )
         run = repo_sarif["runs"][0]
-        for result in run["results"]:
-            for loc in result.get("locations", []):
+        notifications = [n for inv in run["invocations"] for n in inv.get("toolExecutionNotifications", [])]
+        for item in run["results"] + notifications:
+            for loc in item.get("locations", []):
                 artifact = loc["physicalLocation"]["artifactLocation"]
                 artifact["uri"] = f"{r['slug']}/{artifact['uri']}"
         run["properties"] = {"repo": r["repo"]}

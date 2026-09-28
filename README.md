@@ -55,7 +55,7 @@ zairo backend frontend infra --from main --fail-on high -o zairo_multi_out
 **Output & gating**
 
 - `--output`, `-o` *(`zairo_out`)*: where the reports go. Multi-repo mode: each repo gets its own `<output>/<repo-slug>/`, plus a combined `rollup.*` here too.
-- `--fail-on` *(none)*: exit non-zero if a finding at or above this severity turns up (`low`/`medium`/`high`/`critical`). Errors if combined with `--graph-only` (nothing to gate on). Multi-repo mode: checked across all repos combined. See [CI / PR gating](#ci--pr-gating).
+- `--fail-on` *(none)*: exit non-zero if a finding at or above this severity turns up (`low`/`medium`/`high`/`critical`), or if the scan is incomplete (any node the model couldn't assess). Errors if combined with `--graph-only` (nothing to gate on). Multi-repo mode: checked across all repos combined. See [CI / PR gating](#ci--pr-gating).
 - `--verbose`, `-v` *(off)*: print what's happening step by step (git commands, worktree setup, per-node scan progress).
 - `--debug`, `-vv` *(off)*: everything `--verbose` prints, plus the exact prompt sent to the LLM and its raw response for every node -- written to `<output>/debug.log` (per-repo in multi-repo mode), since it's too much to print to the console.
 
@@ -69,11 +69,11 @@ Run `zairo --help` any time for this same list from the CLI.
 
 ## Output files
 
-- **`report.json`** *(always)*: the raw impact graph (nodes, edges, and any attached findings), as data.
+- **`report.json`** *(always)*: the raw impact graph (nodes, edges, and any attached findings), as data. After a vulnerability scan, `scan_complete` says whether every node got assessed, and each one that didn't carries a `scan_error` saying why.
 - **`report.html`** *(always)*: a self-contained, interactive dependency-graph viewer (Cytoscape.js). Click a node to see its findings.
-- **`report.sarif`** *(unless `--graph-only` is used)*: findings in [SARIF 2.1.0](https://sarifweb.azurewebsites.net/), for GitHub code scanning or any other SARIF consumer. Always written, even for a clean scan (an empty-but-valid log), so a scanning UI can mark previously reported alerts resolved. Findings are grouped into rules by CWE when the model tagged one, so recurring issues of the same kind collapse into one rule instead of a new one per wording variant.
+- **`report.sarif`** *(unless `--graph-only` is used)*: findings in [SARIF 2.1.0](https://sarifweb.azurewebsites.net/), for GitHub code scanning or any other SARIF consumer. Always written, even for a clean scan (an empty-but-valid log), so a scanning UI can mark previously reported alerts resolved. Findings are grouped into rules by CWE when the model tagged one, so recurring issues of the same kind collapse into one rule instead of a new one per wording variant. An incomplete scan is marked `executionSuccessful: false`, with an error notification per node that couldn't be assessed.
 
-Multi-repo mode produces the same three files per repo, plus `rollup.json` / `rollup.html` / `rollup.sarif`: per-repo status and severity counts, a dashboard table linking into each repo's reports, and every repo's SARIF results merged into one multi-run log.
+Multi-repo mode produces the same three files per repo, plus `rollup.json` / `rollup.html` / `rollup.sarif`: per-repo status (including `incomplete` scans) and severity counts, a dashboard table linking into each repo's reports, and every repo's SARIF results merged into one multi-run log.
 
 ### Deleted code
 
@@ -85,6 +85,11 @@ A function/class/module removed entirely (not just edited) still shows up in `re
 above that severity is found (across all repos combined, in multi-repo
 mode), so a CI step can block a merge on it. A few things worth knowing:
 
+- It also fails whenever the scan is incomplete: a node the model couldn't
+  assess (a provider error, a missing API key, a response that wasn't a
+  scan result) is code nobody reviewed, so it can't count as a pass. On
+  PRs from forks, GitHub withholds secrets such as the model's API key, so
+  expect the gate to fail there rather than silently pass.
 - `--from`/`--to` have to name commits that exist in the checkout; an
   unknown ref is an error rather than an empty diff. CI checkouts are
   often shallow, so fetch full history (`fetch-depth: 0` in
