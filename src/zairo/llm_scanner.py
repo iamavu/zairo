@@ -641,7 +641,8 @@ def scan_graph_for_vulnerabilities(
     is incomplete -- and assessed_nodes, the ids of every node that did get
     a valid answer (from the model or the cache), findings or not: the only
     way to tell "scanned clean" apart from "never scanned", since
-    `vulnerabilities` only holds nodes with findings.
+    `vulnerabilities` only holds nodes with findings -- and skipped_nodes
+    ({node id: reason}), the changed nodes deliberately not scanned.
     With batch_size > 1, 'requests' counts actual API calls, not nodes --
     that's the whole point of batching, so it's the number that should drop.
 
@@ -670,9 +671,18 @@ def scan_graph_for_vulnerabilities(
 
     vulnerabilities = {}
     assessed_nodes = []
+    skipped_nodes = {}
     nodes = {n['id']: n for n in graph_data['nodes']}
     edges = graph_data['edges']
     cache = _load_cache(cache_path)
+
+    def skip(node: Dict[str, Any], reason: str) -> None:
+        """A changed node deliberately not sent to the model -- recorded with
+        why, so the report can say so instead of a bare "not scanned" that
+        reads like a failure."""
+        skipped_nodes[node['id']] = reason
+        where = f" ({node['file']})" if node.get('file') else ""
+        log(f"  skip ({reason}): {_display_name(node['name'])}{where}")
 
     modified_nodes = [n for n in graph_data['nodes'] if n['status'] in ['modified', 'added']]
     log(f"Scanning {len(modified_nodes)} modified/added node(s) with {model}")
@@ -690,10 +700,10 @@ def scan_graph_for_vulnerabilities(
             # leaks fully unrelated, unchanged functions from other files
             # into the prompt and produces findings misattributed to code
             # that was never touched by this diff.
-            log(f"  skip (proxy node, not first-party source): {_display_name(mod_node['name'])}")
+            skip(mod_node, "external call target, no source of its own")
             continue
         if _is_test_file(mod_node.get('file')):
-            log(f"  skip (test file, not shipped attack surface): {_display_name(mod_node['name'])} ({mod_node.get('file')})")
+            skip(mod_node, "test file, not shipped code")
             continue
         hunks = mod_node.get('diff_hunks') or []
         start, end = mod_node.get('start_line'), mod_node.get('end_line')
@@ -723,7 +733,7 @@ def scan_graph_for_vulnerabilities(
             ]
             own_hunks = _outside_nested(hunks, nested)
             if hunks and not own_hunks:
-                log(f"  skip (every change is inside a nested definition, scanned on its own): {_display_name(mod_node['name'])} ({mod_node.get('file')})")
+                skip(mod_node, "every change is inside a function or class scanned on its own")
                 continue
             hunks = own_hunks
 
@@ -735,7 +745,7 @@ def scan_graph_for_vulnerabilities(
         # cost nothing extra to scan in full anyway, so there's no real
         # savings being traded away by not skipping them.
         if mod_node.get('kind') == 'module' and _is_trivial_change(hunks):
-            log(f"  skip (trivial diff): {_display_name(mod_node['name'])} ({mod_node.get('file')})")
+            skip(mod_node, "only comments or blank lines changed")
             continue
 
         if is_module:
@@ -747,7 +757,7 @@ def scan_graph_for_vulnerabilities(
             mod_code = "\n".join(code_lines)
 
         if not mod_code.strip():
-            log(f"  skip (no source found): {_display_name(mod_node['name'])}")
+            skip(mod_node, "source not found")
             continue
 
         # A module/file-level node's window is a tiny slice of the whole
@@ -922,6 +932,7 @@ def scan_graph_for_vulnerabilities(
         # --fail-on refuses to pass a scan that has any.
         'failed_nodes': {},
         'assessed_nodes': assessed_nodes,  # cache hits so far; successful calls added below
+        'skipped_nodes': skipped_nodes,  # {node id: why it wasn't sent to the model}
     }
 
     if jobs:

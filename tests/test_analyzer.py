@@ -101,6 +101,30 @@ def test_a_call_the_change_removed_is_not_an_edge(git_repo: Path):
     assert not any(e["source"] == ids["handle"] and e["target"] == ids["check"] for e in graph["edges"])
 
 
+def test_modules_are_named_by_their_file_path(git_repo: Path):
+    """Trailmark names a module with a dotted id that has to escape any dot
+    in a file name ("pkg.settings\\.local") -- the graph shows its path."""
+    (git_repo / "pkg").mkdir()
+    _commit_file(git_repo, "pkg/settings.local.py", "DEBUG = False\n", "add settings")
+    _commit_file(git_repo, "pkg/settings.local.py", "DEBUG = True\n", "debug on")
+
+    graph = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+
+    [module] = [n for n in graph["nodes"] if n["kind"] == "module"]
+    assert module["name"] == "pkg/settings.local.py"
+    assert module["id"] == "pkg.settings\\.local"  # the id stays Trailmark's
+
+
+def test_deleted_modules_are_named_by_their_file_path(git_repo: Path):
+    _commit_file(git_repo, "old.helpers.py", "def f():\n    return 1\n", "add helpers")
+    subprocess.run(["git", "rm", "-q", "old.helpers.py"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "drop helpers"], cwd=git_repo, check=True, capture_output=True)
+
+    graph = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+
+    assert {n["name"] for n in graph["nodes"] if n["status"] == "deleted"} == {"old.helpers.py", "f"}
+
+
 def test_no_deleted_nodes_when_nothing_was_deleted(git_repo: Path):
     """Diffing a ref against itself: nothing changed, so nothing should be
     reported as deleted either."""

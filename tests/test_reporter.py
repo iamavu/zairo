@@ -177,6 +177,20 @@ def test_html_shows_symbols_the_scan_could_not_assess(tmp_path):
     assert "Scan incomplete" in html
 
 
+def test_reports_say_why_a_symbol_was_not_scanned(tmp_path):
+    """A bare "Not scanned" on changed code reads like a failed scan."""
+    json_path, html_path, _ = generate_reports(
+        _graph_data(str(tmp_path / "x.py")), str(tmp_path / "out"), {}, repo_root=str(tmp_path),
+        skipped_nodes={"n1": "test file, not shipped code"},
+    )
+
+    with open(json_path) as f:
+        assert json.load(f)["nodes"][0]["scan_skipped"] == "test file, not shipped code"
+    html = Path(html_path).read_text(encoding="utf-8")
+    assert "Not scanned: ${escapeHtml(oneLine(d.scan_skipped))}." in html
+    assert "Not scanned: unchanged, shown for context." in html
+
+
 def test_deleted_symbols_start_hidden_in_the_graph(tmp_path):
     """Deleted symbols are context, not the change itself -- the map starts
     with them off, like unchanged ones on anything but a small graph."""

@@ -37,6 +37,7 @@ def generate_reports(
     repo_name: str = None,
     failed_nodes: dict = None,
     assessed_nodes: list = None,
+    skipped_nodes: dict = None,
 ):
     """Returns (json_path, html_path, sarif_path). sarif_path is None unless
     an LLM scan actually ran (vulnerabilities is not None, including when it
@@ -52,16 +53,24 @@ def generate_reports(
     `assessed_nodes` are the ids the scan did get an answer for, findings
     or not. report.html needs them to tell a symbol that was scanned clean
     from one that was never scanned at all (skipped, or just context) --
-    `vulnerabilities` can't, since it only holds nodes with findings."""
+    `vulnerabilities` can't, since it only holds nodes with findings.
+
+    `skipped_nodes` ({node id: reason}) are changed nodes the scan left out
+    on purpose (a test file, a comment-only change, ...). Each gets a
+    'scan_skipped' reason, which report.html shows -- a bare "not scanned"
+    on changed code reads like a failure."""
     os.makedirs(output_dir, exist_ok=True)
     failed_nodes = failed_nodes or {}
+    skipped_nodes = skipped_nodes or {}
 
-    # Attach vulnerabilities and scan failures to graph_data
+    # Attach vulnerabilities, scan failures and skip reasons to graph_data
     for node in graph_data['nodes']:
         if vulnerabilities and node['id'] in vulnerabilities:
             node['vulnerabilities'] = vulnerabilities[node['id']]
         if node['id'] in failed_nodes:
             node['scan_error'] = failed_nodes[node['id']]
+        if node['id'] in skipped_nodes:
+            node['scan_skipped'] = skipped_nodes[node['id']]
 
     json_path = os.path.join(output_dir, "report.json")
     html_path = os.path.join(output_dir, "report.html")

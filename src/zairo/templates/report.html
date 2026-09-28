@@ -457,7 +457,8 @@
                 });
                 findingHtml += '</section>';
             } else {
-                const note = !reportMeta.scan_performed ? 'Security scan not run.' : d.scan_error ? `Could not assess: ${escapeHtml(oneLine(d.scan_error))}` : d.status === 'deleted' ? 'Deleted symbols are not scanned.' : scannedIds.has(d.id) ? 'No findings reported.' : 'Not scanned.';
+                // Always say why a symbol wasn't scanned: a bare "Not scanned" reads like a failure.
+                const note = !reportMeta.scan_performed ? 'Security scan not run.' : d.scan_error ? `Could not assess: ${escapeHtml(oneLine(d.scan_error))}` : d.status === 'deleted' ? 'Deleted symbols are not scanned.' : scannedIds.has(d.id) ? 'No findings reported.' : d.scan_skipped ? `Not scanned: ${escapeHtml(oneLine(d.scan_skipped))}.` : d.status === 'unchanged' ? 'Not scanned: unchanged, shown for context.' : 'Not scanned.';
                 findingHtml = `<p class="detail-note">${note}</p>`;
             }
             const ins = incoming.get(id), outs = outgoing.get(id);

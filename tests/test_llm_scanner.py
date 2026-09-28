@@ -655,6 +655,32 @@ def test_no_context_section_without_neighbors(monkeypatch):
     assert "Related code" not in prompt
 
 
+def test_skipped_nodes_record_why_they_were_not_scanned(monkeypatch, tmp_path):
+    _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    spec = tmp_path / "__tests__" / "merge-with.spec.ts"
+    spec.parent.mkdir()
+    spec.write_text("it('merges', () => {})\n")
+    settings = tmp_path / "settings.py"
+    settings.write_text("# a comment\nos.system('ls')\n")
+    nodes = [
+        _node("n1", "fn_one"),
+        {"id": "t", "name": "__tests__/merge-with.spec.ts", "kind": "module", "file": str(spec), "start_line": 1,
+         "end_line": 1, "status": "modified", "diff_hunks": [{"start": 1, "removed": [], "added": ["it('merges', () => {})"]}]},
+        {"id": "p", "name": "os.system", "kind": "proxy", "file": str(settings), "start_line": 2, "end_line": 2, "status": "modified"},
+        {"id": "m", "name": "settings.py", "kind": "module", "file": str(settings), "start_line": 1, "end_line": 2,
+         "status": "modified", "diff_hunks": [{"start": 1, "removed": [], "added": ["# a comment"]}]},
+    ]
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities({"nodes": nodes, "edges": []}, "fake-model", cache_path=None)
+
+    assert token_usage["skipped_nodes"] == {
+        "t": "test file, not shipped code",
+        "p": "external call target, no source of its own",
+        "m": "only comments or blank lines changed",
+    }
+    assert token_usage["assessed_nodes"] == ["n1"]
+
+
 def test_replacing_module_code_with_a_comment_is_not_trivial(monkeypatch, tmp_path):
     """Only comments were *added* -- but real code was removed, which is
     exactly the kind of change that must not be skipped."""

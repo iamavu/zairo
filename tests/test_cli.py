@@ -243,6 +243,7 @@ def test_multi_repo_tokens_sums_usage_across_repos(make_git_repo, tmp_path: Path
     fake_usage = {
         "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
         "requests": 1, "requests_without_usage": 0, "errors": {}, "failed_nodes": {}, "assessed_nodes": [],
+        "skipped_nodes": {},
     }
 
     with patch("zairo.scan.scan_graph_for_vulnerabilities", return_value=({}, fake_usage)):
@@ -315,7 +316,7 @@ def _scan_usage(failed_nodes: dict) -> dict:
     return {
         "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "requests": 1,
         "requests_without_usage": 1, "nodes_scanned": len(failed_nodes) or 1,
-        "errors": errors, "failed_nodes": failed_nodes, "assessed_nodes": [],
+        "errors": errors, "failed_nodes": failed_nodes, "assessed_nodes": [], "skipped_nodes": {},
     }
 
 
@@ -371,3 +372,21 @@ def test_report_html_marks_what_the_scan_assessed(git_repo: Path, tmp_path: Path
     html = (output_dir / "report.html").read_text(encoding="utf-8")
     metadata = json.loads(re.search(r"const reportMeta = (.+);", html).group(1))
     assert metadata["scanned_node_ids"] == ["some-node-id"]
+
+
+def test_reports_say_why_a_changed_symbol_was_not_scanned(git_repo: Path, tmp_path: Path):
+    """End to end: the scanner's skip reasons have to reach the reports."""
+    output_dir = tmp_path / "out"
+
+    def scan(graph_data, *args, **kwargs):
+        usage = _scan_usage({})
+        usage["skipped_nodes"] = {n["id"]: "test file, not shipped code" for n in graph_data["nodes"] if n["name"] == "vulnerable_exec"}
+        return {}, usage
+
+    with patch("zairo.scan.scan_graph_for_vulnerabilities", side_effect=scan):
+        result = runner.invoke(app, [str(git_repo), "--from", "HEAD~1", "--to", "HEAD", "--output", str(output_dir)])
+
+    assert result.exit_code == 0, result.output
+    report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
+    [node] = [n for n in report["nodes"] if n["name"] == "vulnerable_exec"]
+    assert node["scan_skipped"] == "test file, not shipped code"

@@ -29,6 +29,21 @@ def _edge_dict(edge, with_line: bool = True) -> Dict[str, Any]:
     }
 
 
+def _node_name(unit, root: str) -> str:
+    """A module goes by its file's path under `root` ("src/utils/merge-with.spec.ts")
+    rather than Trailmark's name for it, a dotted id that has to escape any
+    dot in a file or directory name ("src.utils.merge-with\\.spec"). The
+    node's id stays Trailmark's."""
+    if unit.kind.value != 'module':
+        return unit.name
+    try:
+        rel = os.path.relpath(unit.location.file_path, root)
+    except ValueError:  # another drive, on Windows
+        return unit.name
+    outside = rel == os.pardir or rel.startswith(os.pardir + os.sep)
+    return unit.name if outside else rel.replace(os.sep, '/')
+
+
 def _find_deleted_nodes(
     repo_path: str,
     changed_files: List[str],
@@ -108,7 +123,7 @@ def _find_deleted_nodes(
                 rel = os.path.relpath(location.file_path, tmp_dir)
                 deleted_metadata[node_id] = {
                     "id": node_id,
-                    "name": unit.name,
+                    "name": _node_name(unit, tmp_dir),
                     "kind": unit.kind.value,
                     "file": os.path.join(repo_path, rel),
                     "start_line": location.start_line,
@@ -174,7 +189,7 @@ def analyze_impact(
         location = unit.location
         node_metadata[node_id] = {
             "id": node_id,
-            "name": unit.name,
+            "name": _node_name(unit, analysis_root),
             "kind": unit.kind.value,
             "file": location.file_path,
             "start_line": location.start_line,
