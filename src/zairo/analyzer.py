@@ -111,6 +111,41 @@ def _node_name(unit, root: str) -> str:
     return unit.name if outside else rel.replace(os.sep, '/')
 
 
+def _symbol(node_id: str, unit, root: str) -> Dict[str, Any]:
+    """A Trailmark unit as the graph's node dict, status "unchanged".
+
+    A proxy is an external/unresolved call target (e.g. `os.system`).
+    Trailmark places it at the first call to it that it came across, but it
+    has no source of its own: it's recorded without a location, so it can't
+    count as changed just because that call did, and the report shows it as
+    an external reference, not as code at that line."""
+    is_proxy = unit.kind.value == 'proxy'
+    location = unit.location
+    return {
+        "id": node_id,
+        "name": _node_name(unit, root),
+        "kind": unit.kind.value,
+        "file": None if is_proxy else location.file_path,
+        "start_line": None if is_proxy else location.start_line,
+        "end_line": None if is_proxy else location.end_line,
+        "complexity": unit.cyclomatic_complexity,
+        "status": "unchanged",
+    }
+
+
+def list_symbols(repo_path: str, language: str = "auto", log: Optional[Callable[[str], None]] = None) -> List[Dict[str, Any]]:
+    """Every symbol in the repo as it is on disk, test code and external
+    call targets aside -- what --warm-up writes notes for. No diff involved."""
+    log = log or (lambda msg: None)
+    root = os.path.abspath(repo_path)
+    log(f"Indexing {root} with Trailmark (language={language})...")
+    graph = parse_directory(root, language=language)
+    return [
+        _symbol(node_id, unit, root) for node_id, unit in graph.nodes.items()
+        if unit.kind.value != 'proxy' and not _in_test_file(unit.location.file_path, root)
+    ]
+
+
 def _find_deleted_nodes(
     repo_path: str,
     changed_files: List[str],
@@ -282,24 +317,10 @@ def analyze_impact(
         if node_id in test_nodes:
             continue
         location = unit.location
-        # A proxy is an external/unresolved call target (e.g. `os.system`).
-        # Trailmark places it at the first call to it that it came across,
-        # but it has no source of its own: it's recorded without a location,
-        # so it can't count as changed just because that call did, and the
-        # report shows it as an external reference, not as code at that line.
         is_proxy = unit.kind.value == 'proxy'
         if is_proxy:
             proxies.add(node_id)
-        node_metadata[node_id] = {
-            "id": node_id,
-            "name": _node_name(unit, analysis_root),
-            "kind": unit.kind.value,
-            "file": None if is_proxy else location.file_path,
-            "start_line": None if is_proxy else location.start_line,
-            "end_line": None if is_proxy else location.end_line,
-            "complexity": unit.cyclomatic_complexity,
-            "status": "unchanged" # default
-        }
+        node_metadata[node_id] = _symbol(node_id, unit, analysis_root)
         if node_id in entrypoints:
             node_metadata[node_id]["entrypoint"] = entrypoints[node_id]
 

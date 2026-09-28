@@ -774,6 +774,7 @@ def scan_graph_for_vulnerabilities(
     batch_size: int = 1,
     context: Optional[Dict[str, Any]] = None,
     notes_path: Optional[str] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> Tuple[Dict[str, List[Dict]], Dict[str, int]]:
     """Returns (vulnerabilities, token_usage). token_usage has
     prompt_tokens/completion_tokens/total_tokens summed across every real
@@ -816,7 +817,11 @@ def scan_graph_for_vulnerabilities(
     `notes_path` is where --warm-up keeps its notes (see write_notes). A
     scan only reads them: they fill in code further out than the prompt
     shows in full. Nodes' `entrypoint`s (from the analyzer) say how each
-    changed function is reached."""
+    changed function is reached.
+
+    `on_progress(done, total)` is called with how many of the nodes that
+    need a model call have had one: once at 0 before the first request,
+    then after each request -- from the calling thread."""
     log = log or (lambda msg: None)
     log_lock = threading.Lock()
 
@@ -1107,10 +1112,16 @@ def scan_graph_for_vulnerabilities(
         _ensure_litellm()  # deferred until there's actually a request to make
         batch_size = max(1, batch_size)
         groups = [jobs[i:i + batch_size] for i in range(0, len(jobs), batch_size)]
+        done = 0
+        if on_progress:
+            on_progress(0, len(jobs))
         with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
             futures = [pool.submit(run_group, group) for group in groups]
             for future in as_completed(futures):
                 results = future.result()  # one entry per node in the group
+                done += len(results)
+                if on_progress:
+                    on_progress(done, len(jobs))
                 # One real LLM call produced every result in this group --
                 # count it, and its usage, exactly once, not once per node.
                 token_usage['requests'] += 1
@@ -1157,7 +1168,12 @@ def write_notes(
     and saves them to `notes_path` -- also when interrupted, keeping the
     ones done so far. Identical functions share one note. Returns counts:
     written, cached (already had one), failed, requests, total_tokens, and
-    errors ({message: number of functions it cost a note})."""
+    errors ({message: number of functions it cost a note}).
+
+    `on_event` gets "notes_started" (model, to_write, cached), then
+    "notes_progress" (done, total: functions) at 0 before the first
+    request and after each one, then "notes_done" with the counts -- all
+    from the calling thread."""
     log = log or (lambda msg: None)
     on_event = on_event or (lambda event, **kwargs: None)
     log_lock = threading.Lock()
@@ -1218,6 +1234,7 @@ def write_notes(
     try:
         if groups:
             _ensure_litellm()
+            on_event("notes_progress", done=0, total=len(todo))
             with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
                 futures = [pool.submit(run, group) for group in groups]
                 try:
@@ -1233,6 +1250,7 @@ def write_notes(
                                 notes[key] = note
                                 stats["written"] += 1
                         safe_log(f"  notes: {done}/{len(groups)} request(s) done")
+                        on_event("notes_progress", done=stats["written"] + stats["failed"], total=len(todo))
                 except BaseException:
                     # Interrupted (Ctrl-C): leaving the pool waits for every
                     # queued request, which on a big warm-up is most of them.

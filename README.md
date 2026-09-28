@@ -24,6 +24,9 @@ zairo . --from main --to HEAD
 
 # Fail the build if anything high-severity turns up
 zairo . --from main --to HEAD --fail-on high
+
+# Write notes on the repo's functions for later scans to read (no scan, no reports)
+zairo . --warm-up
 ```
 
 Give it more than one repo, as extra arguments or one per line in a `--repos-file` (or both, merged into one list), and it switches to **multi-repo mode** on its own: every repo gets its own report, plus one combined summary.
@@ -51,7 +54,7 @@ zairo backend frontend infra --from main --fail-on high -o zairo_multi_out
 - `--max-tokens` *(4096)*: output budget per request. Reasoning models burn this on internal thinking too, so raise it if you see empty responses.
 - `--cache` / `--no-cache` *(cache on)*: skip re-scanning code that's unchanged since the last run (cached by content hash in `<output>/.llm_cache.json`).
 - `--tokens` *(off)*: print how many tokens the scan actually used (cache hits don't count, since they made no call).
-- `--warm-up` *(off)*: before scanning, write a short note on what each function in the repo does, skipping ones already noted. Scans read these notes as hints about code they don't show in full. See [Warm-up notes](#warm-up-notes).
+- `--warm-up` *(off)*: instead of scanning, write a short note on what each function in the repo does, skipping ones already noted. No diff, no scan, no reports, so it can't be combined with `--from`, `--to`, `--fail-on` or `--graph-only`. Later scans with the same `--output` read the notes as hints about code they don't show in full. See [Warm-up notes](#warm-up-notes).
 - `--notes-model` *(`--model`)*: the model `--warm-up` writes notes with. A cheaper model is usually fine. Needs `--warm-up`.
 
 **Output & gating**
@@ -92,10 +95,17 @@ For each changed function, the model gets:
 
 ### Warm-up notes
 
-`zairo . --warm-up` writes a short note on each function and method in the repo before scanning: what it does, where its data comes from, the checks it performs, the security-sensitive operations it performs (SQL, shell, file paths, HTML output, ...), and what it passes to which calls. Notes are about each function's own code only: a note names the calls a function makes, never what they do. So a note stays right when anything else changes, and if `sanitize()` becomes a no-op, no caller's note still claims it escapes anything.
+`zairo . --warm-up` writes a short note on each function and method in the repo as it is on disk, and nothing else: no diff, no scan, no reports. Scan as a second command, with the same `--output`:
 
-- The notes are kept in `<output>/.notes_cache.json`, keyed on each function's code, so a later warm-up only notes new or changed functions. Every scan reads them if they're there, with or without `--warm-up`.
-- The first warm-up on a large repo makes many requests, about one per 10 functions. `--notes-model` lets you use a cheaper model for them.
+```bash
+zairo . --warm-up --notes-model gemini/gemini-2.5-flash
+zairo . --from main --to HEAD
+```
+
+Each note says what the function does, where its data comes from, the checks it performs, the security-sensitive operations it performs (SQL, shell, file paths, HTML output, ...), and what it passes to which calls. Notes are about each function's own code only: a note names the calls a function makes, never what they do. So a note stays right when anything else changes, and if `sanitize()` becomes a no-op, no caller's note still claims it escapes anything.
+
+- The notes are kept in `<output>/.notes_cache.json` (`<output>/<repo-slug>/` in multi-repo mode, one repo at a time), keyed on each function's code, so a later warm-up only notes new or changed functions. Every scan with that `--output` reads them.
+- The first warm-up on a large repo makes many requests, about one per 10 functions, with a progress bar. `--notes-model` lets you use a cheaper model for them. The warm-up exits non-zero if it couldn't write any of the notes it needed (a missing API key, say).
 - In CI, keep `.notes_cache.json` between runs (e.g. with `actions/cache`), or every run starts from scratch.
 - The model is told notes are machine-written hints about code it hasn't seen, not a place to report findings. The changed code itself is always shown in full.
 

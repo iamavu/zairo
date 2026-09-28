@@ -810,6 +810,30 @@ def test_warm_up_notes_every_function_once(monkeypatch, tmp_path):
     assert all(note["model"] == "cheap-model" and note["partial"] is False for note in saved.values())
 
 
+def test_warm_up_reports_progress_per_request(monkeypatch, tmp_path):
+    _fake_llm(monkeypatch)
+    progress = []
+
+    llm_scanner.write_notes(
+        _functions(tmp_path, 12), "cheap-model", str(tmp_path / "notes.json"), concurrency=1,
+        on_event=lambda event, **kw: progress.append((kw["done"], kw["total"])) if event == "notes_progress" else None,
+    )
+
+    assert progress == [(0, 12), (10, 12), (12, 12)]
+
+
+def test_scan_reports_progress_per_request(monkeypatch):
+    _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    progress = []
+
+    llm_scanner.scan_graph_for_vulnerabilities(
+        {"nodes": [_node("n1", "fn_one"), _node("n2", "fn_two"), _node("n3", "fn_three")], "edges": []},
+        "fake-model", cache_path=None, on_progress=lambda done, total: progress.append((done, total)),
+    )
+
+    assert progress == [(0, 3), (1, 3), (2, 3), (3, 3)]
+
+
 def test_warm_up_counts_functions_the_model_gave_no_note_for(monkeypatch, tmp_path):
     _fake_llm(monkeypatch, drop_labels=("F2",))
     notes_path = str(tmp_path / "notes.json")
