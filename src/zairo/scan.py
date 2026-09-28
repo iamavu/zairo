@@ -12,6 +12,11 @@ from .reporter import generate_reports
 @dataclass
 class ScanResult:
     repo_path: str
+    # Where graph_data's node['file'] paths are rooted: the temporary
+    # worktree when diffing two commits (already removed by the time a
+    # caller sees this -- it's only for making those paths relative), the
+    # repo itself otherwise.
+    analysis_root: str
     graph_data: Dict[str, Any]
     vulnerabilities: Optional[Dict[str, List[Dict[str, Any]]]]
     token_usage: Optional[Dict[str, int]]
@@ -108,6 +113,7 @@ def run_scan(
 
         return ScanResult(
             repo_path=repo_path,
+            analysis_root=analysis_root,
             graph_data=graph_data,
             vulnerabilities=vulnerabilities,
             token_usage=token_usage,

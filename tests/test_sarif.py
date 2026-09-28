@@ -46,6 +46,22 @@ def test_missing_file_omits_location_but_keeps_result():
     assert "locations" not in result
 
 
+def test_file_on_another_drive_omits_location_instead_of_crashing(monkeypatch):
+    """On Windows, os.path.relpath raises ValueError when the file and the
+    repo root are on different drives (e.g. a C:\\ temp worktree vs a D:\\
+    repo) -- that's just another case of "outside repo_root", not a crash."""
+    def relpath_across_drives(path, start=None):
+        raise ValueError("path is on mount 'C:', start on mount 'D:'")
+    monkeypatch.setattr("zairo.sarif.os.path.relpath", relpath_across_drives)
+
+    graph_data = _graph("/repo/src/app.py")
+    vulnerabilities = {"n1": [{"title": "X", "description": "d", "severity": "high"}]}
+    sarif = build_sarif(graph_data, vulnerabilities, repo_root="/repo")
+
+    result = sarif["runs"][0]["results"][0]
+    assert "locations" not in result
+
+
 def test_defaults_missing_severity_to_critical_error():
     """Fail-safe default (see _util.DEFAULT_SEVERITY): an ungradeable
     finding must surface as loudly as a real critical one, not blend into

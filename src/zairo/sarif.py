@@ -78,7 +78,10 @@ def _relative_uri(file_path: Optional[str], repo_root: str) -> Optional[str]:
     just without a location SARIF viewers can jump to."""
     if not file_path:
         return None
-    rel = os.path.relpath(file_path, repo_root)
+    try:
+        rel = os.path.relpath(file_path, repo_root)
+    except ValueError:
+        return None  # Windows: on a different drive, so outside repo_root too
     if rel.startswith(".."):
         return None
     return rel.replace(os.sep, "/")

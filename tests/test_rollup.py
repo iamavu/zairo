@@ -20,6 +20,7 @@ def test_unique_slug_sanitizes_unsafe_characters():
 def _ok_result(vulnerabilities=None):
     return ScanResult(
         repo_path="/repo",
+        analysis_root="/repo",
         graph_data={"nodes": [{"id": "n1", "status": "modified"}, {"id": "n2", "status": "unchanged"}], "edges": []},
         vulnerabilities=vulnerabilities,
         token_usage=None,
@@ -86,3 +87,33 @@ def test_write_rollup_reports_sarif_merges_one_run_per_repo(tmp_path: Path):
     with open(reports["sarif"]) as f:
         sarif = json.load(f)
     assert len(sarif["runs"]) == 2
+
+
+def test_write_rollup_reports_sarif_locations_resolve_from_the_worktree(tmp_path: Path):
+    """When diffing two commits, node files live under the scan's temporary
+    worktree, not the repo -- rollup.sarif has to make them relative to the
+    worktree, or every finding loses its location (or, on Windows with the
+    temp dir on another drive, relpath raises and the rollup crashes)."""
+    repo = tmp_path / "repo"
+    worktree = tmp_path / "zairo-worktree-abc"
+    scan_result = ScanResult(
+        repo_path=str(repo),
+        analysis_root=str(worktree),
+        graph_data={
+            "nodes": [{"id": "n1", "name": "f", "status": "modified",
+                       "file": str(worktree / "src" / "app.py"), "start_line": 3}],
+            "edges": [],
+        },
+        vulnerabilities={"n1": [{"title": "X", "severity": "high"}]},
+        token_usage=None,
+        json_path="", html_path="", sarif_path="",
+    )
+    results = [{"repo": str(repo), "slug": "repo", "status": "ok", "result": scan_result}]
+
+    reports = write_rollup_reports(results, str(tmp_path / "out"))
+    with open(reports["sarif"]) as f:
+        sarif = json.load(f)
+
+    location = sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+    assert location["artifactLocation"]["uri"] == "repo/src/app.py"
+    assert location["region"]["startLine"] == 3
