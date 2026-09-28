@@ -175,3 +175,13 @@ def test_html_shows_symbols_the_scan_could_not_assess(tmp_path):
     assert "<b>boom</b>" not in html
     assert "Could not assess: ${escapeHtml(oneLine(d.scan_error))}" in html
     assert "Scan incomplete" in html
+
+
+def test_deleted_symbols_start_hidden_in_the_graph(tmp_path):
+    """Deleted symbols are context, not the change itself -- the map starts
+    with them off, like unchanged ones on anything but a small graph."""
+    _, html_path, _ = generate_reports(_graph_data(str(tmp_path / "x.py")), str(tmp_path / "out"), None)
+
+    html = Path(html_path).read_text(encoding="utf-8")
+    toggle = re.search(r'<input[^>]*id="toggle-deleted"[^>]*>', html).group(0)
+    assert "checked" not in toggle
