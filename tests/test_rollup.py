@@ -141,7 +141,7 @@ def test_incomplete_repo_scan_is_flagged_in_rollup(tmp_path: Path):
 
     with open(reports["json"]) as f:
         by_slug = {r["slug"]: r for r in json.load(f)["repos"]}
-    assert (by_slug["a"]["scan_complete"], by_slug["a"]["num_failed_nodes"]) == (False, 1)
+    assert (by_slug["a"]["scan_complete"], by_slug["a"]["num_failed_symbols"]) == (False, 1)
     assert by_slug["b"]["scan_complete"] is True
     assert by_slug["c"]["scan_complete"] is None  # --graph-only: no scan to be incomplete
     html = Path(reports["html"]).read_text()

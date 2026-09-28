@@ -29,10 +29,27 @@ def test_generate_reports_writes_json_and_html(tmp_path: Path):
 
     with open(json_path) as f:
         written = json.load(f)
-    assert written["nodes"][0]["vulnerabilities"] == vulnerabilities["n1"]
+    assert written["symbols"][0]["vulnerabilities"] == vulnerabilities["n1"]
 
     html = Path(html_path).read_text()
     assert "Zairo Impact Analysis" in html
+
+
+def test_reports_name_symbols_and_connections(tmp_path: Path):
+    """The same words report.html and the CLI use, not the graph's own
+    nodes and edges."""
+    graph_data = _graph_data(str(tmp_path / "x.py"))
+    graph_data["edges"] = [{"source": "n1", "target": "n1", "kind": "calls", "confidence": "certain", "lines": [3]}]
+    findings = {"n1": [{"title": "X", "description": "d", "severity": "high"}]}
+
+    json_path, _, sarif_path = generate_reports(graph_data, str(tmp_path / "out"), findings, repo_root=str(tmp_path))
+
+    with open(json_path) as f:
+        written = json.load(f)
+    assert set(written) == {"symbols", "connections", "scan_complete"}
+    assert written["connections"] == graph_data["edges"]
+    with open(sarif_path) as f:
+        assert json.load(f)["runs"][0]["results"][0]["properties"]["symbol"] == "vulnerable_exec"
 
 
 def test_html_escapes_finding_and_node_text_before_rendering(tmp_path: Path):
@@ -90,7 +107,7 @@ def test_incomplete_scan_is_recorded_in_report_json_and_sarif(tmp_path: Path):
     with open(json_path) as f:
         written = json.load(f)
     assert written["scan_complete"] is False
-    assert written["nodes"][0]["scan_error"] == "boom"
+    assert written["symbols"][0]["scan_error"] == "boom"
     with open(sarif_path) as f:
         assert json.load(f)["runs"][0]["invocations"][0]["executionSuccessful"] is False
 
@@ -102,7 +119,7 @@ def test_complete_scan_is_recorded_in_report_json(tmp_path: Path):
     with open(json_path) as f:
         written = json.load(f)
     assert written["scan_complete"] is True
-    assert "scan_error" not in written["nodes"][0]
+    assert "scan_error" not in written["symbols"][0]
 
 
 def test_no_scan_status_when_llm_scan_did_not_run(tmp_path: Path):
@@ -139,7 +156,7 @@ def test_html_distinguishes_unscanned_symbols_from_clean_scans(tmp_path, finding
     html = Path(html_path).read_text(encoding="utf-8")
     metadata = json.loads(re.search(r"const reportMeta = (.+);", html).group(1))
     assert metadata["scan_performed"] is (findings is not None)
-    assert metadata["scanned_node_ids"] == scanned_ids
+    assert metadata["scanned_symbol_ids"] == scanned_ids
     assert metadata["repo_root"] == str(tmp_path)
     assert metadata["repo_name"] == tmp_path.name
 
@@ -155,8 +172,8 @@ def test_html_payloads_preserve_hostile_text_without_closing_script(tmp_path):
     assert payload not in html
     graph = json.loads(re.search(r"const graphData = (.+);", html).group(1))
     metadata = json.loads(re.search(r"const reportMeta = (.+);", html).group(1))
-    assert graph["nodes"][0]["name"] == payload
-    assert graph["nodes"][0]["vulnerabilities"][0]["title"] == payload
+    assert graph["symbols"][0]["name"] == payload
+    assert graph["symbols"][0]["vulnerabilities"][0]["title"] == payload
     assert metadata["repo_root"].endswith(payload)
 
 
@@ -171,7 +188,7 @@ def test_html_shows_symbols_the_scan_could_not_assess(tmp_path):
 
     html = Path(html_path).read_text(encoding="utf-8")
     graph = json.loads(re.search(r"const graphData = (.+);", html).group(1))
-    assert graph["nodes"][0]["scan_error"] == "<b>boom</b>"
+    assert graph["symbols"][0]["scan_error"] == "<b>boom</b>"
     assert "<b>boom</b>" not in html
     assert "Could not assess: ${escapeHtml(oneLine(d.scan_error))}" in html
     assert "Scan incomplete" in html
@@ -185,7 +202,7 @@ def test_reports_say_why_a_symbol_was_not_scanned(tmp_path):
     )
 
     with open(json_path) as f:
-        assert json.load(f)["nodes"][0]["scan_skipped"] == "only comments or blank lines changed"
+        assert json.load(f)["symbols"][0]["scan_skipped"] == "only comments or blank lines changed"
     html = Path(html_path).read_text(encoding="utf-8")
     assert "Not scanned: ${escapeHtml(oneLine(d.scan_skipped))}." in html
     assert "Not scanned: unchanged, shown for context." in html

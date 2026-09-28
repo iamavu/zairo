@@ -75,7 +75,9 @@ def generate_reports(
     json_path = os.path.join(output_dir, "report.json")
     html_path = os.path.join(output_dir, "report.html")
 
-    report = dict(graph_data)
+    # The reports say symbols and connections, like report.html's UI and
+    # the CLI; nodes and edges are the graph's own terms, used internally.
+    report = {"symbols": graph_data['nodes'], "connections": graph_data['edges']}
     if vulnerabilities is not None:
         report['scan_complete'] = not failed_nodes
     with open(json_path, 'w') as f:
@@ -83,12 +85,12 @@ def generate_reports(
 
     template = Template(HTML_TEMPLATE)
     html_content = template.render(
-        graph_json=_json_for_script(graph_data),
+        graph_json=_json_for_script(report),
         report_meta_json=_json_for_script({
             "repo_root": os.path.abspath(repo_root) if repo_root else "",
             "repo_name": repo_name or (os.path.basename(os.path.abspath(repo_root)) if repo_root else ""),
             "scan_performed": vulnerabilities is not None,
-            "scanned_node_ids": list(assessed_nodes or []),
+            "scanned_symbol_ids": list(assessed_nodes or []),
         }),
     )
 

@@ -313,9 +313,9 @@
         const SEVERITY_COLOR = Object.fromEntries(Object.keys(SEVERITY_RANK).map(s => [s, color('sev-' + s)]));
         const tint = hex => '#' + [1, 3, 5].map(i => Math.round(parseInt(hex.slice(i, i + 2), 16) * .13 + parseInt(color('canvas').slice(i, i + 2), 16) * .87).toString(16).padStart(2, '0')).join('');
         const statusMark = { added: '+', modified: '~', deleted: '−', unchanged: '·' };
-        const nodes = graphData.nodes.map((n, index) => ({...n, index, name: String(n.name || n.id), kind: n.kind || 'symbol', file: n.file || '', status: Object.hasOwn(STATUS_COLOR, n.status) ? n.status : 'unchanged', vulnerabilities: n.vulnerabilities || []}));
+        const nodes = graphData.symbols.map((n, index) => ({...n, index, name: String(n.name || n.id), kind: n.kind || 'symbol', file: n.file || '', status: Object.hasOwn(STATUS_COLOR, n.status) ? n.status : 'unchanged', vulnerabilities: n.vulnerabilities || []}));
         const nodeById = new Map(nodes.map(n => [n.id, n]));
-        const edges = graphData.edges.filter(e => nodeById.has(e.source) && nodeById.has(e.target));
+        const edges = graphData.connections.filter(e => nodeById.has(e.source) && nodeById.has(e.target));
         const dependencies = edges.filter(e => e.kind !== 'contains');
         const parentOf = new Map();
         // Ignore malformed containment cycles rather than losing the entire report.
@@ -327,7 +327,7 @@
         const incoming = new Map(nodes.map(n => [n.id, []]));
         const outgoing = new Map(nodes.map(n => [n.id, []]));
         dependencies.forEach(e => { incoming.get(e.target).push(e); outgoing.get(e.source).push(e); });
-        const scannedIds = new Set(reportMeta.scanned_node_ids);
+        const scannedIds = new Set(reportMeta.scanned_symbol_ids);
         // Symbols the model couldn't assess: no findings on them proves nothing.
         const unassessed = nodes.filter(n => n.scan_error).length;
         const oneLine = value => String(value).replace(/\s+/g, ' ').trim();

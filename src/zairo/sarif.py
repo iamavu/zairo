@@ -182,7 +182,7 @@ def build_sarif(
                 "properties": {
                     "severity": severity,
                     "cwe": cwe,
-                    "node": node.get("name"),
+                    "symbol": node.get("name"),
                     "introducedByChange": introduced if isinstance(introduced, bool) else None,
                     "confidence": normalize_confidence(finding.get("confidence")),
                 },

@@ -275,7 +275,7 @@ def test_head_relative_from_resolves_in_the_repo_not_the_to_worktree(git_repo: P
 
     assert result.exit_code == 0, result.output
     with open(output_dir / "report.json") as f:
-        modified = {n["name"] for n in json.load(f)["nodes"] if n["status"] == "modified"}
+        modified = {n["name"] for n in json.load(f)["symbols"] if n["status"] == "modified"}
     assert "vulnerable_exec" in modified
 
 
@@ -371,7 +371,7 @@ def test_report_html_marks_what_the_scan_assessed(git_repo: Path, tmp_path: Path
     assert result.exit_code == 0, result.output
     html = (output_dir / "report.html").read_text(encoding="utf-8")
     metadata = json.loads(re.search(r"const reportMeta = (.+);", html).group(1))
-    assert metadata["scanned_node_ids"] == ["some-node-id"]
+    assert metadata["scanned_symbol_ids"] == ["some-node-id"]
 
 
 def test_reports_say_why_a_changed_symbol_was_not_scanned(git_repo: Path, tmp_path: Path):
@@ -388,7 +388,7 @@ def test_reports_say_why_a_changed_symbol_was_not_scanned(git_repo: Path, tmp_pa
 
     assert result.exit_code == 0, result.output
     report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
-    [node] = [n for n in report["nodes"] if n["name"] == "vulnerable_exec"]
+    [node] = [n for n in report["symbols"] if n["name"] == "vulnerable_exec"]
     assert node["scan_skipped"] == "only comments or blank lines changed"
 
 
@@ -415,4 +415,4 @@ def test_depth_only_shapes_the_report_not_what_the_model_sees(git_repo: Path, tm
     [prompt] = [p for p in prompts if "Modified Function: helper" in p]
     assert "Caller: caller\n" in prompt
     report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
-    assert "caller" not in {n["name"] for n in report["nodes"]}
+    assert "caller" not in {n["name"] for n in report["symbols"]}

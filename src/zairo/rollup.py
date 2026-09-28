@@ -111,7 +111,7 @@ ROLLUP_HTML_TEMPLATE = """
         <table>
             <thead>
                 <tr>
-                    <th>Repo</th><th>Status</th><th>Modified nodes</th><th>Findings</th>
+                    <th>Repo</th><th>Status</th><th>Changed symbols</th><th>Findings</th>
                     <th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Reports</th>
                 </tr>
             </thead>
@@ -125,11 +125,11 @@ ROLLUP_HTML_TEMPLATE = """
                     <td></td>
                 {% else %}
                   {% if r.scan_complete is sameas false %}
-                    <td><span class="badge status-incomplete" title="{{ r.num_failed_nodes }} symbol(s) could not be assessed">incomplete</span></td>
+                    <td><span class="badge status-incomplete" title="{{ r.num_failed_symbols }} symbol(s) could not be assessed">incomplete</span></td>
                   {% else %}
                     <td><span class="badge status-ok">ok</span></td>
                   {% endif %}
-                    <td>{{ r.num_modified_nodes }}</td>
+                    <td>{{ r.num_changed_symbols }}</td>
                     <td>{{ r.num_findings }}</td>
                     <td class="count sev-critical {{ 'nonzero' if r.severity_counts.critical else '' }}">{{ r.severity_counts.critical }}</td>
                     <td class="count sev-high {{ 'nonzero' if r.severity_counts.high else '' }}">{{ r.severity_counts.high }}</td>
@@ -201,8 +201,8 @@ def build_rollup_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         failed_nodes = (scan_result.token_usage or {}).get("failed_nodes", {})
         entry.update({
             "scan_complete": None if scan_result.vulnerabilities is None else not failed_nodes,
-            "num_failed_nodes": len(failed_nodes),
-            "num_modified_nodes": sum(1 for n in scan_result.graph_data["nodes"] if n["status"] != "unchanged"),
+            "num_failed_symbols": len(failed_nodes),
+            "num_changed_symbols": sum(1 for n in scan_result.graph_data["nodes"] if n["status"] != "unchanged"),
             "num_findings": num_findings,
             "severity_counts": severity_counts,
             "worst_severity": max_severity(scan_result.vulnerabilities) if scan_result.vulnerabilities else None,
