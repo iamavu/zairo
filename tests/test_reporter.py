@@ -1,5 +1,8 @@
 import json
+import re
 from pathlib import Path
+
+import pytest
 
 from zairo.reporter import generate_reports
 
@@ -84,3 +87,32 @@ def test_no_sarif_when_llm_scan_did_not_run(tmp_path: Path):
 
     assert sarif_path is None
     assert not (output_dir / "report.sarif").exists()
+
+
+@pytest.mark.parametrize("findings, scanned_ids", [(None, []), ({}, []), ({"n1": []}, ["n1"])])
+def test_html_distinguishes_unscanned_symbols_from_clean_scans(tmp_path, findings, scanned_ids):
+    graph_data = _graph_data(str(tmp_path / "x.py"))
+    _, html_path, _ = generate_reports(graph_data, str(tmp_path / "out"), findings, repo_root=str(tmp_path))
+
+    html = Path(html_path).read_text(encoding="utf-8")
+    metadata = json.loads(re.search(r"const reportMeta = (.+);", html).group(1))
+    assert metadata["scan_performed"] is (findings is not None)
+    assert metadata["scanned_node_ids"] == scanned_ids
+    assert metadata["repo_root"] == str(tmp_path)
+    assert metadata["repo_name"] == tmp_path.name
+
+
+def test_html_payloads_preserve_hostile_text_without_closing_script(tmp_path):
+    payload = '</script><script>window.injected = true</script><img src=x onerror="alert(1)"> & résumé'
+    graph_data = _graph_data(payload)
+    graph_data["nodes"][0]["name"] = payload
+    findings = {"n1": [{"title": payload, "description": payload, "impact": payload, "severity": "high"}]}
+    _, html_path, _ = generate_reports(graph_data, str(tmp_path / "out"), findings, repo_root=str(tmp_path / payload))
+
+    html = Path(html_path).read_text(encoding="utf-8")
+    assert payload not in html
+    graph = json.loads(re.search(r"const graphData = (.+);", html).group(1))
+    metadata = json.loads(re.search(r"const reportMeta = (.+);", html).group(1))
+    assert graph["nodes"][0]["name"] == payload
+    assert graph["nodes"][0]["vulnerabilities"][0]["title"] == payload
+    assert metadata["repo_root"].endswith(payload)
