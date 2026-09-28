@@ -83,9 +83,12 @@ A function/class/module removed entirely (not just edited) still shows up in `re
 
 `--fail-on <low|medium|high|critical>` exits non-zero if any finding at or
 above that severity is found (across all repos combined, in multi-repo
-mode), so a CI step can block a merge on it. A couple of things worth
-knowing:
+mode), so a CI step can block a merge on it. A few things worth knowing:
 
+- `--from`/`--to` have to name commits that exist in the checkout; an
+  unknown ref is an error rather than an empty diff. CI checkouts are
+  often shallow, so fetch full history (`fetch-depth: 0` in
+  `actions/checkout`, as in the example below).
 - It errors if combined with `--graph-only` (there'd be nothing to gate on).
 - It never suppresses the SARIF output: that's still written even on a
   failed gate, so a scanning UI reflects the current state either way.

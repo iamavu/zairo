@@ -1,7 +1,9 @@
 import subprocess
 from pathlib import Path
 
-from zairo.git_utils import get_changed_file_paths, get_modified_lines
+import pytest
+
+from zairo.git_utils import get_changed_file_paths, get_modified_lines, resolve_commit
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -100,3 +102,35 @@ def test_repo_with_no_commits_yet(tmp_path: Path):
 
     assert set(modified[str((repo / "staged.py").resolve())]) == {1, 2}
     assert set(modified[str((repo / "untracked.py").resolve())]) == {1, 2}
+
+
+def test_resolve_commit_returns_the_full_commit_id(git_repo: Path):
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=git_repo, capture_output=True, text=True).stdout.strip()
+    assert resolve_commit(str(git_repo), "HEAD") == head
+
+
+def test_resolve_commit_rejects_an_unknown_ref(git_repo: Path):
+    """A ref that doesn't exist must be an error, not a `git diff` failure
+    that reads as "nothing changed"."""
+    with pytest.raises(RuntimeError, match="'no-such-ref' doesn't name a commit"):
+        resolve_commit(str(git_repo), "no-such-ref")
+
+
+def test_resolve_commit_rejects_an_option_looking_ref(git_repo: Path):
+    with pytest.raises(RuntimeError, match="doesn't name a commit"):
+        resolve_commit(str(git_repo), "--output=/tmp/x")
+
+
+def test_resolve_commit_in_a_shallow_clone_hints_at_fetch_depth(git_repo: Path, tmp_path: Path):
+    """The classic CI mistake: a depth-1 checkout doesn't have the base
+    commit at all."""
+    shallow = tmp_path / "shallow"
+    _git(tmp_path, "clone", "-q", "--depth", "1", git_repo.as_uri(), str(shallow))
+
+    with pytest.raises(RuntimeError, match="fetch-depth: 0"):
+        resolve_commit(str(shallow), "HEAD~1")
+
+
+def test_failed_git_diff_raises_instead_of_reporting_no_changes(git_repo: Path):
+    with pytest.raises(RuntimeError, match="git diff failed"):
+        get_modified_lines(str(git_repo), "no-such-ref", "HEAD")

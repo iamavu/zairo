@@ -6,6 +6,7 @@ from typing import List, Optional
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from . import __version__
 from .rollup import unique_slug, write_rollup_reports
 from .scan import run_scan
@@ -62,7 +63,7 @@ def _print_scan_errors(token_usage: dict, indent: str = "") -> None:
         f"— results may be incomplete:"
     )
     for message, count in sorted(errors.items(), key=lambda kv: -kv[1])[:3]:
-        console.print(f"{indent}  [red]× ({count}x)[/red] {message}")
+        console.print(f"{indent}  [red]× ({count}x)[/red] {escape(message)}")
     if len(errors) > 3:
         console.print(f"{indent}  [dim]... {len(errors) - 3} more distinct error(s); rerun with --verbose for full detail[/dim]")
 
@@ -73,7 +74,7 @@ def _single_repo_on_event(event: str, **kw) -> None:
         console.print(f"[bold blue]Total nodes in subgraph: {kw['num_nodes']}[/bold blue]")
         console.print(f"[bold blue]Total edges in subgraph: {kw['num_edges']}[/bold blue]")
     elif event == "llm_scan_started":
-        console.print(f"[bold yellow]Running LLM scanner using {kw['model']} (concurrency={kw['concurrency']})...[/bold yellow]")
+        console.print(f"[bold yellow]Running LLM scanner using {escape(kw['model'])} (concurrency={kw['concurrency']})...[/bold yellow]")
     elif event == "llm_scan_done":
         if kw['num_vulnerabilities'] == 0:
             console.print("[bold yellow]Found 0 vulnerabilities.[/bold yellow]")
@@ -123,7 +124,7 @@ def _make_loggers(output_dir: str, verbose: bool, debug: bool, indent: str):
 
     def log(msg: str) -> None:
         if verbose:
-            console.print(f"[dim]{indent}{msg}[/dim]")
+            console.print(f"[dim]{indent}{escape(msg)}[/dim]")
         if debug_file:
             with file_lock:
                 debug_file.write(msg + "\n")
@@ -164,11 +165,11 @@ def _run_single_repo(
     log, debug_log, close_debug_log = _make_loggers(output_dir, verbose, debug, indent="  · ")
 
     if from_ref and to_ref:
-        console.print(f"[bold green]Analyzing {repo_path} at depth {depth} — diff {from_ref}..{to_ref}[/bold green]")
+        console.print(f"[bold green]Analyzing {escape(repo_path)} at depth {depth} — diff {escape(from_ref)}..{escape(to_ref)}[/bold green]")
     elif from_ref:
-        console.print(f"[bold green]Analyzing {repo_path} at depth {depth} — diff {from_ref}..working tree[/bold green]")
+        console.print(f"[bold green]Analyzing {escape(repo_path)} at depth {depth} — diff {escape(from_ref)}..working tree[/bold green]")
     else:
-        console.print(f"[bold green]Analyzing {repo_path} at depth {depth} — uncommitted changes[/bold green]")
+        console.print(f"[bold green]Analyzing {escape(repo_path)} at depth {depth} — uncommitted changes[/bold green]")
 
     cache_path = os.path.join(output_dir, ".llm_cache.json") if (llm and cache) else None
     try:
@@ -178,7 +179,7 @@ def _run_single_repo(
             batch_size=batch_size,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/bold red] {e}")
+        console.print(f"[bold red]Error:[/bold red] {escape(str(e))}")
         raise typer.Exit(1)
     finally:
         close_debug_log()
@@ -197,12 +198,12 @@ def _run_single_repo(
             _print_token_usage(result.token_usage)
 
     console.print("[bold green]Success![/bold green] Reports generated:")
-    console.print(f"  - {result.json_path}")
-    console.print(f"  - {result.html_path}")
+    console.print(f"  - {escape(result.json_path)}")
+    console.print(f"  - {escape(result.html_path)}")
     if result.sarif_path:
-        console.print(f"  - {result.sarif_path}")
+        console.print(f"  - {escape(result.sarif_path)}")
     if debug:
-        console.print(f"  - {os.path.join(output_dir, 'debug.log')}")
+        console.print(f"  - {escape(os.path.join(output_dir, 'debug.log'))}")
 
     return should_fail
 
@@ -245,13 +246,13 @@ def _run_multi_repo(
     if repo_concurrency <= 1:
         console.print(f"[bold green]Scanning {len(paths)} repo(s)...[/bold green]")
         for i, (repo_path, slug) in enumerate(zip(paths, slugs), 1):
-            console.print(f"[bold cyan][{i}/{len(paths)}][/bold cyan] {repo_path}")
+            console.print(f"[bold cyan][{i}/{len(paths)}][/bold cyan] {escape(repo_path)}")
 
             def on_event(event: str, **kw) -> None:
                 if event == "graph_built":
                     console.print(f"    {kw['num_modified']} modified/added node(s), {kw['num_deleted']} deleted node(s); {kw['num_nodes']} node(s), {kw['num_edges']} edge(s) in subgraph")
                 elif event == "llm_scan_started":
-                    console.print(f"    running LLM scan ({kw['model']})...")
+                    console.print(f"    running LLM scan ({escape(kw['model'])})...")
                 elif event == "llm_scan_done":
                     if kw['num_vulnerabilities'] == 0:
                         console.print("    found 0 vulnerabilities")
@@ -262,7 +263,7 @@ def _run_multi_repo(
             entry = scan_one(repo_path, slug, on_event)
             results.append(entry)
             if entry["status"] == "error":
-                console.print(f"    [bold red]error:[/bold red] {entry['error']}")
+                console.print(f"    [bold red]error:[/bold red] {escape(entry['error'])}")
                 if not continue_on_error:
                     console.print("[bold red]Aborting multi-repo run (--stop-on-error).[/bold red]")
                     break
@@ -298,11 +299,11 @@ def _run_multi_repo(
                     if llm:
                         num_vulns = sum(len(findings) for findings in (sr.vulnerabilities or {}).values())
                         summary += f", found {num_vulns} vulnerability(s) in {len(sr.vulnerabilities or {})} node(s)"
-                    console.print(f"[bold cyan][{completed}/{len(paths)}][/bold cyan] {entry['repo']} — {summary}")
+                    console.print(f"[bold cyan][{completed}/{len(paths)}][/bold cyan] {escape(entry['repo'])} — {summary}")
                     if llm:
                         _print_scan_errors(sr.token_usage, indent="    ")
                 else:
-                    console.print(f"[bold cyan][{completed}/{len(paths)}][/bold cyan] {entry['repo']} — [bold red]error:[/bold red] {entry['error']}")
+                    console.print(f"[bold cyan][{completed}/{len(paths)}][/bold cyan] {escape(entry['repo'])} — [bold red]error:[/bold red] {escape(entry['error'])}")
 
                 if entry["status"] == "error" and not continue_on_error and not stop_requested:
                     stop_requested = True
@@ -317,14 +318,14 @@ def _run_multi_repo(
 
     console.print(f"[bold green]Scanned {len(ok_results)}/{len(results)} repo(s) successfully.[/bold green]")
     if errored_results:
-        console.print(f"[bold red]{len(errored_results)} repo(s) failed:[/bold red] " + ", ".join(r["repo"] for r in errored_results))
+        console.print(f"[bold red]{len(errored_results)} repo(s) failed:[/bold red] " + ", ".join(escape(r["repo"]) for r in errored_results))
     if llm and tokens:
         _print_token_usage(_sum_token_usage([r["result"].token_usage for r in ok_results]))
     console.print("Rollup reports generated:")
-    console.print(f"  - {reports['json']}")
-    console.print(f"  - {reports['html']}")
+    console.print(f"  - {escape(reports['json'])}")
+    console.print(f"  - {escape(reports['html'])}")
     if reports['sarif']:
-        console.print(f"  - {reports['sarif']}")
+        console.print(f"  - {escape(reports['sarif'])}")
     if debug:
         console.print("[dim]Debug logs: <output>/<repo-slug>/debug.log, one per repo.[/dim]")
 

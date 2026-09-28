@@ -209,7 +209,7 @@ def analyze_impact(
     # itself the primary change of interest, not something reached by
     # traversing from one.
     effective_from_ref = from_ref or "HEAD"
-    changed_file_paths = get_changed_file_paths(analysis_root, from_ref, to_ref, log=log)
+    changed_file_paths = get_changed_file_paths(analysis_root, from_ref, to_ref)
     deleted_metadata, deleted_edges = _find_deleted_nodes(
         analysis_root, changed_file_paths, effective_from_ref, set(graph_nodes.keys()), language, log,
     )

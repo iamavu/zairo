@@ -7,6 +7,49 @@ from collections import defaultdict
 from typing import Callable, Dict, List, Optional
 
 
+def _git_error(result: subprocess.CompletedProcess) -> str:
+    """The first line of a failed git command's stderr -- some failures
+    (e.g. `git diff` outside a repository) follow the actual reason with the
+    command's entire usage text."""
+    lines = result.stderr.strip().splitlines()
+    return lines[0] if lines else f"exit {result.returncode}"
+
+
+def resolve_commit(repo_path: str, ref: str) -> str:
+    """The full commit id `ref` names, resolved in repo_path itself.
+
+    This has to happen before a --to worktree exists: inside it,
+    HEAD-relative refs (HEAD, HEAD~1, @, ...) resolve against the
+    worktree's own checkout, so `--from HEAD --to feature` would silently
+    diff feature against itself. Raises on a ref that doesn't name a commit,
+    rather than letting `git diff` fail into what looks like "nothing
+    changed". A leading "-" is rejected outright -- no ref starts with one,
+    and git would read it as an option instead.
+    """
+    result = None
+    if not ref.startswith("-"):
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            cwd=repo_path, capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+
+    message = f"'{ref}' doesn't name a commit in {repo_path}"
+    if result is not None and result.stderr.strip():
+        message += f" ({result.stderr.strip()})"
+    shallow = subprocess.run(
+        ["git", "rev-parse", "--is-shallow-repository"],
+        cwd=repo_path, capture_output=True, text=True,
+    )
+    if shallow.stdout.strip() == "true":
+        message += (
+            ". This is a shallow clone, so it may just not have been fetched"
+            " -- in GitHub Actions, check out with fetch-depth: 0"
+        )
+    raise RuntimeError(message)
+
+
 def create_worktree(repo_path: str, ref: str) -> str:
     """
     Checks out `ref` into a new temporary git worktree and returns its path.
@@ -120,19 +163,17 @@ def get_changed_file_paths(
     repo_path: str,
     from_ref: str = None,
     to_ref: str = None,
-    log: Optional[Callable[[str], None]] = None,
 ) -> List[str]:
     """Repo-relative paths of every file that changed (`git diff --name-only`),
     including a file deleted in its entirety -- unlike get_modified_lines,
     which intentionally excludes those (there's no to-side line range for a
     fully deleted file to anchor to). Untracked files aren't listed: they
-    didn't exist at from_ref, so they can't contain a deletion."""
-    log = log or (lambda msg: None)
+    didn't exist at from_ref, so they can't contain a deletion. Raises if
+    the diff itself fails."""
     cmd = ["git", "diff", "--name-only"] + _diff_refs(repo_path, from_ref, to_ref)
     result = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True)
     if result.returncode != 0:
-        log(f"git diff --name-only failed (exit {result.returncode}): {result.stderr.strip()}")
-        return []
+        raise RuntimeError(f"git diff --name-only failed: {_git_error(result)}")
     return [line for line in result.stdout.splitlines() if line]
 
 
@@ -151,7 +192,8 @@ def get_modified_lines(
     - from_ref + to_ref: compares two commits (e.g. HEAD~3..HEAD).
 
     In both working-tree modes, untracked (not .gitignore'd) files count
-    too, with every line treated as added.
+    too, with every line treated as added. Raises if the diff itself fails
+    -- a failed diff is not an empty one.
 
     Returns a dict mapping absolute file paths to a dict of
     {to-side line number: representative changed text}. The text is used to
@@ -174,8 +216,7 @@ def get_modified_lines(
     result = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True)
 
     if result.returncode != 0:
-        log(f"git diff failed (exit {result.returncode}): {result.stderr.strip()}")
-        return {}
+        raise RuntimeError(f"git diff failed: {_git_error(result)}")
 
     diff_output = result.stdout
 

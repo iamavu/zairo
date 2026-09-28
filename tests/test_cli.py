@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -255,3 +256,51 @@ def test_multi_repo_tokens_sums_usage_across_repos(make_git_repo, tmp_path: Path
     assert "40 completion" in result.output
     assert "240 total" in result.output
     assert "2 request(s)" in result.output
+
+
+def test_head_relative_from_resolves_in_the_repo_not_the_to_worktree(git_repo: Path, tmp_path: Path):
+    """--to is checked out into a temporary worktree, where HEAD means the
+    --to commit. --from HEAD has to mean the repo's HEAD (here the initial
+    commit), or the scan silently diffs --to against itself."""
+    _git = lambda *a: subprocess.run(["git", *a], cwd=git_repo, check=True, capture_output=True)
+    _git("branch", "feature")  # the vulnerable commit
+    _git("checkout", "-q", "HEAD~1")  # HEAD is now the initial commit
+
+    output_dir = tmp_path / "out"
+    result = runner.invoke(
+        app, [str(git_repo), "--from", "HEAD", "--to", "feature", "--graph-only", "--output", str(output_dir)],
+    )
+
+    assert result.exit_code == 0, result.output
+    with open(output_dir / "report.json") as f:
+        modified = {n["name"] for n in json.load(f)["nodes"] if n["status"] == "modified"}
+    assert "vulnerable_exec" in modified
+
+
+def test_unknown_from_ref_is_an_error(git_repo: Path, tmp_path: Path):
+    """Not an empty diff that passes as "nothing changed"."""
+    result = runner.invoke(
+        app,
+        [str(git_repo), "--from", "no-such-ref", "--to", "HEAD", "--graph-only", "--output", str(tmp_path / "out")],
+    )
+
+    assert result.exit_code != 0
+    assert "doesn't name a commit" in result.output
+
+
+def test_error_text_with_markup_like_brackets_prints_verbatim(git_repo: Path, tmp_path: Path):
+    """Error messages (git's, a model provider's) are arbitrary text. One
+    containing something like git's usage syntax "[/<m>]" must be printed
+    as-is, not parsed as a Rich closing tag -- which used to crash the
+    whole run instead of reporting the error."""
+    with patch("zairo.cli.run_scan", side_effect=RuntimeError("bad option [/<m>]")):
+        single = runner.invoke(app, [str(git_repo), "--graph-only", "--output", str(tmp_path / "single")])
+        multi = runner.invoke(
+            app, [str(git_repo), str(git_repo), "--graph-only", "--output", str(tmp_path / "multi")],
+        )
+
+    assert single.exit_code == 1
+    assert "bad option [/<m>]" in single.output
+    assert multi.exit_code == 1
+    assert "bad option [/<m>]" in multi.output
+    assert (tmp_path / "multi" / "rollup.json").exists()

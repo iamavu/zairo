@@ -4,7 +4,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from . import __version__
 from .analyzer import analyze_impact
-from .git_utils import create_worktree, remove_worktree
+from .git_utils import create_worktree, remove_worktree, resolve_commit
 from .llm_scanner import scan_graph_for_vulnerabilities
 from .reporter import generate_reports
 
@@ -68,6 +68,15 @@ def run_scan(
     worktree_path = None
     analysis_root = abs_repo
     try:
+        # Pinned to commit ids in the repo itself, before any worktree
+        # exists -- see resolve_commit for why.
+        if from_ref:
+            from_ref = resolve_commit(abs_repo, from_ref)
+            log(f"--from resolves to {from_ref}")
+        if to_ref:
+            to_ref = resolve_commit(abs_repo, to_ref)
+            log(f"--to resolves to {to_ref}")
+
         if from_ref and to_ref:
             log(f"Checking out '{to_ref}' into a temporary worktree (--from + --to diff mode)...")
             worktree_path = create_worktree(abs_repo, to_ref)
