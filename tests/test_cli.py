@@ -427,13 +427,6 @@ def test_warm_up_takes_no_scan_options(tmp_path: Path):
     assert "--warm-up only writes notes, so it can't take --from, --to, --graph-only" in result.output
 
 
-def test_notes_model_needs_warm_up(tmp_path: Path):
-    result = runner.invoke(app, [str(tmp_path), "--notes-model", "cheap-model"])
-
-    assert result.exit_code == 1
-    assert "add --warm-up" in result.output
-
-
 def _fake_llm_writing_notes(calls: list) -> MagicMock:
     """Answers note requests with "note on <function name>" and scan
     requests with no findings, recording (model, prompt) in `calls`."""
@@ -492,7 +485,7 @@ def test_scan_shows_progress(git_repo: Path, tmp_path: Path):
     assert re.search(r"Scanning: (\d+)/\1\b", result.output)  # progress, as plain lines outside a terminal
 
 
-def test_warm_up_writes_notes_with_the_notes_model_and_the_scan_reads_them(git_repo: Path, tmp_path: Path):
+def test_warm_up_writes_notes_with_its_model_and_the_scan_reads_them(git_repo: Path, tmp_path: Path):
     """End to end: entry -> mid -> target, where target changed. The scan
     sees mid in full and entry through the note --warm-up wrote."""
     git = lambda *a: subprocess.run(["git", *a], cwd=git_repo, check=True, capture_output=True)
@@ -507,7 +500,7 @@ def test_warm_up_writes_notes_with_the_notes_model_and_the_scan_reads_them(git_r
     output_dir = tmp_path / "out"
 
     with patch("zairo.llm_scanner.litellm", fake_litellm), patch("zairo.llm_scanner._ensure_litellm", return_value=fake_litellm):
-        warm = runner.invoke(app, [str(git_repo), "--warm-up", "--notes-model", "cheap-model", "--model", "big-model", "--output", str(output_dir)])
+        warm = runner.invoke(app, [str(git_repo), "--warm-up", "--model", "cheap-model", "--output", str(output_dir)])
         scan = runner.invoke(app, [str(git_repo), "--from", "HEAD~1", "--to", "HEAD", "--model", "big-model", "--output", str(output_dir)])
 
     assert warm.exit_code == 0, warm.output

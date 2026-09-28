@@ -31,8 +31,7 @@ def _require_llm_for_fail_on(fail_on: Optional[Severity], llm: bool) -> None:
 
 
 def _check_warm_up(
-    warm_up: bool, notes_model: Optional[str], graph_only: bool,
-    from_ref: Optional[str], to_ref: Optional[str], fail_on: Optional[Severity],
+    warm_up: bool, graph_only: bool, from_ref: Optional[str], to_ref: Optional[str], fail_on: Optional[Severity],
 ) -> None:
     # --warm-up is its own mode: it writes notes and stops, so options that
     # only mean something for a scan would be silently ignored.
@@ -42,9 +41,6 @@ def _check_warm_up(
             f"[bold red]Error:[/bold red] --warm-up only writes notes, so it can't take {', '.join(scan_options)}. "
             f"Run the scan as its own command afterwards."
         )
-        raise typer.Exit(1)
-    if notes_model and not warm_up:
-        console.print("[bold red]Error:[/bold red] --notes-model is the model --warm-up writes notes with (add --warm-up).")
         raise typer.Exit(1)
 
 
@@ -504,13 +500,12 @@ def analyze(
     to_ref: str = typer.Option(None, "--to", "-t", help="Commit/ref to diff to, the newer side (e.g. HEAD, feature-branch). Requires --from. Left out: your working tree."),
     language: str = typer.Option("auto", "--language", "-l", help="Language for Trailmark parsing (auto, python, typescript, rust, etc.)"),
     graph_only: bool = typer.Option(False, "--graph-only", help="Skip the LLM vulnerability scan and only build the impact graph -- report.json/.html only, no report.sarif or findings"),
-    model: str = typer.Option("gemini/gemini-2.5-pro", "--model", help="LiteLLM model string to use for scanning"),
+    model: str = typer.Option("gemini/gemini-2.5-pro", "--model", help="LiteLLM model string to scan with -- or, with --warm-up, to write notes with (a cheaper model is usually fine there)"),
     concurrency: int = typer.Option(5, "--concurrency", "-c", help="Number of LLM requests to run in parallel, per repo"),
     batch_size: int = typer.Option(1, "--batch-size", help="Group this many symbols into a single LLM request instead of one call per symbol -- fewer requests (helps with provider rate limits), at the cost of shared fault isolation: a bad/malformed response fails every symbol in that batch, not just one. Caching stays per-symbol either way."),
     repo_concurrency: int = typer.Option(1, "--repo-concurrency", help="Multi-repo mode: how many repos to scan in parallel"),
     cache: bool = typer.Option(True, "--cache/--no-cache", help="Cache LLM findings by content hash to skip re-scanning unchanged symbols across runs"),
     warm_up: bool = typer.Option(False, "--warm-up", help="Instead of scanning, write a short note on what each function in the repo does (skipping ones already noted), into <output>/.notes_cache.json -- no reports. Later scans with the same --output read these notes as hints about code they don't show in full. The first run on a large repo makes many LLM requests."),
-    notes_model: str = typer.Option(None, "--notes-model", help="LiteLLM model string --warm-up writes notes with (default: --model) -- a cheaper model is usually fine"),
     max_tokens: int = typer.Option(4096, "--max-tokens", help="Max output tokens per LLM scan request. Reasoning models count internal thinking against this budget too — too low can cause empty responses"),
     tokens: bool = typer.Option(False, "--tokens", help="Show total LLM tokens used across real API calls (cache hits don't count)"),
     fail_on: Severity = typer.Option(None, "--fail-on", help="Exit with a non-zero status if any finding at or above this severity is found -- for gating CI/PR checks. Errors if combined with --graph-only."),
@@ -525,7 +520,7 @@ def analyze(
     Pass --warm-up instead to only write notes on the repo's functions for later scans to read."""
     llm = not graph_only
     verbose = verbose or debug
-    _check_warm_up(warm_up, notes_model, graph_only, from_ref, to_ref, fail_on)
+    _check_warm_up(warm_up, graph_only, from_ref, to_ref, fail_on)
     _require_from_for_to(from_ref, to_ref)
     _require_llm_for_fail_on(fail_on, llm)
 
@@ -543,7 +538,7 @@ def analyze(
 
     if warm_up:
         should_fail = _run_warm_up(
-            paths, output_dir, language, notes_model or model, concurrency, max_tokens, verbose, debug,
+            paths, output_dir, language, model, concurrency, max_tokens, verbose, debug,
         )
     elif len(paths) == 1:
         should_fail = _run_single_repo(
