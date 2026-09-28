@@ -1,4 +1,5 @@
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -134,3 +135,36 @@ def test_resolve_commit_in_a_shallow_clone_hints_at_fetch_depth(git_repo: Path, 
 def test_failed_git_diff_raises_instead_of_reporting_no_changes(git_repo: Path):
     with pytest.raises(RuntimeError, match="git diff failed"):
         get_modified_lines(str(git_repo), "no-such-ref", "HEAD")
+
+
+@pytest.mark.parametrize("name", [
+    "résumé.py",
+    "my file.py",
+    pytest.param('we"ird.py', marks=pytest.mark.skipif(sys.platform == "win32", reason="not a valid Windows filename")),
+])
+def test_unusual_filenames_are_matched(git_repo: Path, name: str):
+    """In diff headers git quotes some paths ("b/r\303\251sum\303\251.py"),
+    and puts a tab after any containing a space -- neither may keep a
+    changed file out of the scan, or out of deleted-code detection."""
+    (git_repo / name).write_text("def f(x):\n    return eval(x)\n", encoding="utf-8")
+    _git(git_repo, "add", "--", name)
+    _git(git_repo, "commit", "-q", "-m", "add")
+
+    modified = get_modified_lines(str(git_repo), "HEAD~1", "HEAD")
+
+    assert set(modified[str((git_repo / name).resolve())]) == {1, 2}
+    assert get_changed_file_paths(str(git_repo), "HEAD~1", "HEAD") == [name]
+
+
+def test_user_diff_config_cannot_change_the_parsed_format(git_repo: Path):
+    """mnemonicPrefix turns "b/" into "w/", noprefix drops it, and
+    color.ui=always adds escape codes even into a pipe -- any of these
+    would otherwise make every changed file invisible."""
+    for key, value in (("diff.mnemonicPrefix", "true"), ("diff.noprefix", "true"), ("color.ui", "always")):
+        _git(git_repo, "config", key, value)
+    test_py = git_repo / "test.py"
+    test_py.write_text(test_py.read_text() + "def added():\n    pass\n")
+
+    modified = get_modified_lines(str(git_repo))
+
+    assert set(modified[str(test_py.resolve())]) == {4, 5}

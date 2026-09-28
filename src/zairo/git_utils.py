@@ -118,6 +118,39 @@ def _diff_refs(repo_path: str, from_ref: Optional[str], to_ref: Optional[str]) -
 # 8000 bytes.
 _BINARY_SNIFF_BYTES = 8000
 
+# How to decode git output that carries paths. Git prints them as raw
+# bytes: decode as UTF-8, not the locale's encoding, and with
+# surrogateescape, so no byte sequence can crash the decode and each path
+# maps to the same str the filesystem -- and so Trailmark -- gives it.
+_GIT_PATH_TEXT = {"encoding": "utf-8", "errors": "surrogateescape"}
+
+_C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13}
+
+
+def _unquote_git_path(path: str) -> str:
+    """Undoes git's C-style quoting of a path in a diff header. Even with
+    core.quotePath=false, a path containing a double quote, backslash, or
+    control character comes out as e.g. "b/we\\"ird.py", with octal escapes
+    for raw bytes -- matching it literally would never find the file."""
+    if len(path) < 2 or not (path.startswith('"') and path.endswith('"')):
+        return path
+    body = path[1:-1]
+    out = bytearray()
+    i = 0
+    while i < len(body):
+        if body[i] == "\\" and i + 1 < len(body):
+            escaped = body[i + 1]
+            if escaped in "01234567":
+                out.append(int(body[i + 1:i + 4], 8))
+                i += 4
+            else:
+                out.append(_C_ESCAPES.get(escaped, ord(escaped)))
+                i += 2
+        else:
+            out += body[i].encode("utf-8", errors="surrogateescape")
+            i += 1
+    return out.decode("utf-8", errors="surrogateescape")
+
 
 def _untracked_file_lines(repo_path: str, log: Callable[[str], None]) -> Dict[str, Dict[int, str]]:
     """Every line of every untracked (and not .gitignore'd) text file, as if
@@ -127,7 +160,7 @@ def _untracked_file_lines(repo_path: str, log: Callable[[str], None]) -> Dict[st
     change it exists to catch."""
     result = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-        cwd=repo_path, capture_output=True, text=True,
+        cwd=repo_path, capture_output=True, **_GIT_PATH_TEXT,
     )
     if result.returncode != 0:
         log(f"git ls-files --others failed (exit {result.returncode}): {result.stderr.strip()}")
@@ -170,11 +203,12 @@ def get_changed_file_paths(
     fully deleted file to anchor to). Untracked files aren't listed: they
     didn't exist at from_ref, so they can't contain a deletion. Raises if
     the diff itself fails."""
-    cmd = ["git", "diff", "--name-only"] + _diff_refs(repo_path, from_ref, to_ref)
-    result = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True)
+    # -z: NUL-separated and never quoted, whatever characters a path has.
+    cmd = ["git", "diff", "--name-only", "-z"] + _diff_refs(repo_path, from_ref, to_ref)
+    result = subprocess.run(cmd, cwd=repo_path, capture_output=True, **_GIT_PATH_TEXT)
     if result.returncode != 0:
         raise RuntimeError(f"git diff --name-only failed: {_git_error(result)}")
-    return [line for line in result.stdout.splitlines() if line]
+    return [path for path in result.stdout.split("\0") if path]
 
 
 def get_modified_lines(
@@ -211,9 +245,18 @@ def get_modified_lines(
     """
     log = log or (lambda msg: None)
 
-    cmd = ["git", "diff", "-U0"] + _diff_refs(repo_path, from_ref, to_ref)
+    # core.quotePath=false: print non-ASCII paths as-is instead of quoted
+    # with octal escapes; the few paths git quotes regardless are undone by
+    # _unquote_git_path below. The other flags pin the plain unified format
+    # the parser expects, whatever the user's git config says -- e.g.
+    # diff.mnemonicPrefix would turn "b/" into "w/", color.ui=always adds
+    # escape codes even into a pipe, and diff.external swaps in another tool.
+    cmd = [
+        "git", "-c", "core.quotePath=false", "diff", "-U0",
+        "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/",
+    ] + _diff_refs(repo_path, from_ref, to_ref)
     log(f"Running: {' '.join(cmd)} (cwd={repo_path})")
-    result = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True)
+    result = subprocess.run(cmd, cwd=repo_path, capture_output=True, **_GIT_PATH_TEXT)
 
     if result.returncode != 0:
         raise RuntimeError(f"git diff failed: {_git_error(result)}")
@@ -234,10 +277,13 @@ def get_modified_lines(
         if line.startswith("+++ "):
             flush_pending_deletion()
             pending_deletion_line, pending_deletion_text = None, []
-            if line.startswith("+++ b/"):
+            # Git appends a tab after a path containing a space (for
+            # patch(1)'s sake) and C-quotes unusual ones -- undo both, or
+            # the path never matches the file's real one.
+            path = _unquote_git_path(line[4:].removesuffix("\t"))
+            if path.startswith("b/"):
                 # New file path — resolve to absolute so it matches Trailmark's locations
-                rel_path = line[6:]
-                current_file = os.path.abspath(os.path.join(repo_path, rel_path))
+                current_file = os.path.abspath(os.path.join(repo_path, path[2:]))
             else:
                 # "+++ /dev/null": the whole file was deleted on the to side.
                 # There's no to-side file to attribute this hunk to, and
