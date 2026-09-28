@@ -232,14 +232,11 @@ def _summarize_error(e: Exception) -> str:
     return text or e.__class__.__name__
 
 
-def _hash_prompt(model: str, mod_code: str, neighbor_contexts: List[str]) -> str:
+def _hash_prompt(model: str, prompt: str) -> str:
     h = hashlib.sha256()
     h.update(model.encode('utf-8'))
     h.update(b'\x00')
-    h.update(mod_code.encode('utf-8', errors='ignore'))
-    for c in sorted(neighbor_contexts):
-        h.update(b'\x00')
-        h.update(c.encode('utf-8', errors='ignore'))
+    h.update(prompt.encode('utf-8', errors='ignore'))
     return h.hexdigest()
 
 
@@ -298,7 +295,8 @@ def _extract_json(content: str) -> dict:
     boundary, so callers can always rely on a dict with a "vulnerabilities"
     key). Uses JSONDecoder.raw_decode, which parses the first complete JSON
     value and stops there instead of requiring the whole string to be one
-    value.
+    value. Any other JSON value (a bare string, number, ...) isn't an
+    answer and is rejected like unparseable text.
     """
     fixed = _fix_invalid_escapes(content)
     stripped = _FENCE_RE.sub('', fixed).strip()
@@ -315,11 +313,13 @@ def _extract_json(content: str) -> dict:
             continue
         try:
             obj, _ = _JSON_DECODER.raw_decode(candidate)
-            if isinstance(obj, list):
-                obj = {"vulnerabilities": obj}
-            return obj
         except json.JSONDecodeError as e:
             last_err, last_candidate = e, candidate
+            continue
+        if isinstance(obj, list):
+            obj = {"vulnerabilities": obj}
+        if isinstance(obj, dict):
+            return obj
 
     # Show the text around the actual failure point, not just the start of
     # the response — a generic head-of-string preview doesn't help diagnose
@@ -329,7 +329,21 @@ def _extract_json(content: str) -> dict:
         window = last_candidate[max(0, pos - 80):pos + 80]
         raise ValueError(f"could not find valid JSON ({last_err}); near failure point: {window!r}")
 
-    raise ValueError(f"could not find valid JSON in model response: {content[:200]!r}")
+    raise ValueError(f"could not find a JSON object in model response: {content[:200]!r}")
+
+
+def _validated_findings(value: Any, error_message: str) -> List[Dict[str, Any]]:
+    """A model answer only counts as a scan result if it's a list of finding
+    objects. Anything else -- a refusal, {"message": "unable to assess"}, a
+    question back -- is a failed scan, never an empty one: an empty result
+    gets cached and reported as "no vulnerabilities" for code nobody
+    actually assessed. Normalizes each finding's severity/CWE in place."""
+    if not isinstance(value, list) or not all(isinstance(f, dict) for f in value):
+        raise ValueError(error_message)
+    for finding in value:
+        finding["severity"] = normalize_severity(finding.get("severity"))
+        finding["cwe"] = normalize_cwe(finding.get("cwe"))
+    return value
 
 
 def _build_prompt(mod_node: Dict[str, Any], mod_code: str, neighbor_contexts: List[str]) -> str:
@@ -508,14 +522,20 @@ def scan_graph_for_vulnerabilities(
             elif e['target'] == mod_node['id']:
                 neighbor_ids.add(e['source'])
 
+        # sorted(): the prompt, and so its cache key, can't depend on set
+        # iteration order, which changes from run to run.
         neighbor_contexts = []
-        for n_id in neighbor_ids:
+        for n_id in sorted(neighbor_ids):
             if n_id in nodes and n_id != mod_node['id']:
                 snippet = _neighbor_snippet(nodes[n_id])
                 if snippet:
                     neighbor_contexts.append(snippet)
 
-        prompt_hash = _hash_prompt(model, mod_code, neighbor_contexts)
+        # Keyed on the full single-node prompt, not just the code inside it,
+        # so changing the prompt's wording or answer format invalidates
+        # verdicts reached under the old one. Batched runs use the same key,
+        # so a node's cache entry is shared across --batch-size values.
+        prompt_hash = _hash_prompt(model, _build_prompt(mod_node, mod_code, neighbor_contexts))
         cached = cache.get(prompt_hash)
         if cached is not None:
             log(f"  cache hit: {_display_name(mod_node['name'])} ({len(cached)} finding(s))")
@@ -565,15 +585,14 @@ def scan_graph_for_vulnerabilities(
                 return [(mod_node['id'], prompt_hash, None, usage, error_message)]
 
             try:
-                parsed = _extract_json(content)
+                findings = _validated_findings(
+                    _extract_json(content).get("vulnerabilities"),
+                    "model response has no 'vulnerabilities' list of findings, so it isn't a scan result",
+                )
             except ValueError as e:
                 safe_log(f"  error scanning {_display_name(mod_node['name'])}: {e}")
                 return [(mod_node['id'], prompt_hash, None, usage, _summarize_error(e))]
 
-            findings = parsed.get("vulnerabilities", [])
-            for finding in findings:
-                finding["severity"] = normalize_severity(finding.get("severity"))
-                finding["cwe"] = normalize_cwe(finding.get("cwe"))
             safe_log(f"  found {len(findings)} vulnerability finding(s): {_display_name(mod_node['name'])}")
             return [(mod_node['id'], prompt_hash, findings, usage, None)]
         except Exception as e:
@@ -630,15 +649,15 @@ def scan_graph_for_vulnerabilities(
 
             results = []
             for mod_node, prompt_hash, _mod_code, _neighbor_contexts in group:
-                findings = parsed.get(mod_node['id'])
-                if findings is None or not isinstance(findings, list):
-                    error_message = "model response omitted this node's key (batch response incomplete or malformed)"
-                    safe_log(f"  error scanning {_display_name(mod_node['name'])}: {error_message}")
-                    results.append((mod_node['id'], prompt_hash, None, usage, error_message))
+                try:
+                    findings = _validated_findings(
+                        parsed.get(mod_node['id']),
+                        "model response has no findings list for this node (batch response incomplete or malformed)",
+                    )
+                except ValueError as e:
+                    safe_log(f"  error scanning {_display_name(mod_node['name'])}: {e}")
+                    results.append((mod_node['id'], prompt_hash, None, usage, str(e)))
                     continue
-                for finding in findings:
-                    finding["severity"] = normalize_severity(finding.get("severity"))
-                    finding["cwe"] = normalize_cwe(finding.get("cwe"))
                 safe_log(f"  found {len(findings)} vulnerability finding(s): {_display_name(mod_node['name'])}")
                 results.append((mod_node['id'], prompt_hash, findings, usage, None))
             return results

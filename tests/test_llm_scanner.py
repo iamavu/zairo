@@ -26,6 +26,18 @@ def _mock_litellm(monkeypatch, error: Exception) -> MagicMock:
     return fake_litellm
 
 
+def _mock_litellm_response(monkeypatch, content: str) -> MagicMock:
+    fake_litellm = MagicMock()
+    fake_response = MagicMock()
+    fake_response.choices[0].message.content = content
+    fake_response.choices[0].finish_reason = "stop"
+    fake_response.usage = None
+    fake_litellm.completion.return_value = fake_response
+    monkeypatch.setattr(llm_scanner, "litellm", fake_litellm)
+    monkeypatch.setattr(llm_scanner, "_ensure_litellm", lambda: fake_litellm)
+    return fake_litellm
+
+
 def test_scan_errors_are_surfaced_when_every_node_fails(monkeypatch):
     _mock_litellm(monkeypatch, RuntimeError("AuthenticationError: no API key provided"))
     graph_data = {"nodes": [_node("n1", "vulnerable_fn")], "edges": []}
@@ -288,3 +300,78 @@ def test_nodes_scanned_counts_nodes_not_batched_calls(monkeypatch):
     assert sum(token_usage["errors"].values()) == 12
     # The number the CLI would print as "X/Y failed" -- X must never exceed Y.
     assert sum(token_usage["errors"].values()) <= token_usage["nodes_scanned"]
+
+
+def test_non_answer_is_a_failed_scan_and_never_cached(monkeypatch, tmp_path):
+    """Valid JSON that isn't a findings list -- a refusal, "unable to
+    assess" -- must fail the node, not become (and get cached as) a clean
+    "no vulnerabilities" result that later runs silently reuse."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"message": "unable to assess"}')
+    graph_data = {"nodes": [_node("n1", "fn_one")], "edges": []}
+    cache_path = str(tmp_path / "cache.json")
+
+    for _ in range(2):
+        vulnerabilities, token_usage = llm_scanner.scan_graph_for_vulnerabilities(
+            graph_data, "fake-model", cache_path=cache_path,
+        )
+        assert vulnerabilities == {}
+        [(message, count)] = token_usage["errors"].items()
+        assert count == 1 and "no 'vulnerabilities' list" in message
+
+    assert fake_litellm.completion.call_count == 2  # the second run wasn't a cache hit
+
+
+def test_findings_that_are_not_objects_fail_the_node(monkeypatch):
+    _mock_litellm_response(monkeypatch, '{"vulnerabilities": ["SQL injection somewhere"]}')
+    graph_data = {"nodes": [_node("n1", "fn_one")], "edges": []}
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=None)
+
+    assert sum(token_usage["errors"].values()) == 1
+
+
+def test_bare_json_string_fails_the_node(monkeypatch):
+    _mock_litellm_response(monkeypatch, '"No issues found."')
+    graph_data = {"nodes": [_node("n1", "fn_one")], "edges": []}
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=None)
+
+    assert sum(token_usage["errors"].values()) == 1
+
+
+def test_bare_findings_list_is_still_accepted(monkeypatch):
+    _mock_litellm_response(monkeypatch, '[{"title": "Command injection", "severity": "HIGH"}]')
+    graph_data = {"nodes": [_node("n1", "fn_one")], "edges": []}
+
+    vulnerabilities, token_usage = llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=None)
+
+    assert token_usage["errors"] == {}
+    assert vulnerabilities["n1"][0]["severity"] == "high"
+
+
+def test_batch_entry_that_is_not_a_findings_list_fails_only_that_node(monkeypatch):
+    _mock_litellm_response(monkeypatch, json.dumps({"n1": [], "n2": "looks fine"}))
+    graph_data = {"nodes": [_node("n1", "fn_one"), _node("n2", "fn_two")], "edges": []}
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(
+        graph_data, "fake-model", cache_path=None, batch_size=2,
+    )
+
+    assert sum(token_usage["errors"].values()) == 1  # n2 only: n1's empty list is a valid answer
+
+
+def test_changing_the_prompt_invalidates_cached_verdicts(monkeypatch, tmp_path):
+    """The cache key covers the whole prompt, not just the code in it -- a
+    verdict reached under different instructions isn't reusable."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    graph_data = {"nodes": [_node("n1", "fn_one")], "edges": []}
+    cache_path = str(tmp_path / "cache.json")
+
+    llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=cache_path)
+    llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=cache_path)
+    assert fake_litellm.completion.call_count == 1  # same prompt: cache hit
+
+    build_prompt = llm_scanner._build_prompt
+    monkeypatch.setattr(llm_scanner, "_build_prompt", lambda *a: build_prompt(*a) + "\nNew instruction.")
+    llm_scanner.scan_graph_for_vulnerabilities(graph_data, "fake-model", cache_path=cache_path)
+    assert fake_litellm.completion.call_count == 2  # prompt changed: cache miss
