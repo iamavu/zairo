@@ -785,8 +785,10 @@ def scan_graph_for_vulnerabilities(
     is incomplete -- and assessed_nodes, the ids of every node that did get
     a valid answer (from the model or the cache), findings or not: the only
     way to tell "scanned clean" apart from "never scanned", since
-    `vulnerabilities` only holds nodes with findings -- and skipped_nodes
-    ({node id: reason}), the changed nodes deliberately not scanned.
+    `vulnerabilities` only holds nodes with findings -- skipped_nodes
+    ({node id: reason}), the changed nodes deliberately not scanned, and
+    notes_available/notes_used: how many --warm-up notes there were, and
+    how many went into a prompt.
     With batch_size > 1, 'requests' counts actual API calls, not nodes --
     that's the whole point of batching, so it's the number that should drop.
 
@@ -852,12 +854,18 @@ def scan_graph_for_vulnerabilities(
     any_entrypoints = any(n.get('entrypoint') for n in context['nodes'])
     cache = _load_cache(cache_path)
     notes = load_notes(notes_path)
+    if notes:
+        log(f"Loaded {len(notes)} note(s) from {notes_path}")
+    used_notes: Set[str] = set()  # ids of the nodes whose note went into a prompt
 
     def note_of(n: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not notes or not is_notable(n):
             return None
         code = get_source_code(n['file'], n['start_line'], n['end_line'])
-        return notes.get(note_key(code)) if code.strip() else None
+        note = notes.get(note_key(code)) if code.strip() else None
+        if note:
+            used_notes.add(n['id'])
+        return note
 
     def skip(node: Dict[str, Any], reason: str) -> None:
         """A changed node deliberately not sent to the model -- recorded with
@@ -1106,6 +1114,10 @@ def scan_graph_for_vulnerabilities(
         'failed_nodes': {},
         'assessed_nodes': assessed_nodes,  # cache hits so far; successful calls added below
         'skipped_nodes': skipped_nodes,  # {node id: why it wasn't sent to the model}
+        # --warm-up notes found at notes_path, and how many of them went into
+        # a prompt -- so a scan can say whether it had any to use.
+        'notes_available': len(notes),
+        'notes_used': len(used_notes),
     }
 
     if jobs:

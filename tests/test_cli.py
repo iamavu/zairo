@@ -243,8 +243,8 @@ def test_multi_repo_tokens_sums_usage_across_repos(make_git_repo, tmp_path: Path
 
     fake_usage = {
         "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
-        "requests": 1, "requests_without_usage": 0, "errors": {}, "failed_nodes": {}, "assessed_nodes": [],
-        "skipped_nodes": {},
+        "requests": 1, "requests_without_usage": 0, "nodes_scanned": 1, "errors": {}, "failed_nodes": {},
+        "assessed_nodes": [], "skipped_nodes": {}, "notes_available": 0, "notes_used": 0,
     }
 
     with patch("zairo.scan.scan_graph_for_vulnerabilities", return_value=({}, fake_usage)):
@@ -318,6 +318,7 @@ def _scan_usage(failed_nodes: dict) -> dict:
         "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "requests": 1,
         "requests_without_usage": 1, "nodes_scanned": len(failed_nodes) or 1,
         "errors": errors, "failed_nodes": failed_nodes, "assessed_nodes": [], "skipped_nodes": {},
+        "notes_available": 0, "notes_used": 0,
     }
 
 
@@ -483,6 +484,8 @@ def test_scan_shows_progress(git_repo: Path, tmp_path: Path):
 
     assert result.exit_code == 0, result.output
     assert re.search(r"Scanning: (\d+)/\1\b", result.output)  # progress, as plain lines outside a terminal
+    # No warm-up ran into this --output, and the scan says so.
+    assert "No --warm-up notes in" in " ".join(result.output.split())
 
 
 def test_warm_up_writes_notes_with_its_model_and_the_scan_reads_them(git_repo: Path, tmp_path: Path):
@@ -508,3 +511,6 @@ def test_warm_up_writes_notes_with_its_model_and_the_scan_reads_them(git_repo: P
     assert {model for model, prompt in calls if prompt.startswith(NOTE_INSTRUCTIONS)} == {"cheap-model"}
     [scan_prompt] = [prompt for model, prompt in calls if "Modified Function: target" in prompt]
     assert "Callers of its callers:\n- entry (calls mid): does: note on entry" in scan_prompt
+    # Notes on test.py's vulnerable_exec, entry, mid and target; only entry's
+    # is needed -- mid is shown in full, target is the change.
+    assert "Used 1 of 4 note(s) from an earlier --warm-up" in " ".join(scan.output.split())

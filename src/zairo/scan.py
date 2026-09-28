@@ -136,6 +136,7 @@ def run_scan(
                 num_vulnerable_nodes=len(vulnerabilities),
                 num_vulnerabilities=num_vulnerabilities,
                 token_usage=token_usage,
+                notes_path=notes_path,
             )
 
         # SARIF locations must be relative to wherever node['file'] paths were

@@ -142,6 +142,24 @@ def _print_scan_errors(token_usage: dict, indent: str = "") -> None:
         console.print(f"{indent}  [dim]... {len(errors) - 3} more distinct error(s); rerun with --verbose for full detail[/dim]")
 
 
+def _print_notes_usage(token_usage: dict, notes_path: Optional[str], indent: str = "") -> None:
+    """Whether the scan had --warm-up notes to give the model. Silent when
+    it had no symbol to look at; otherwise a missing notes file gets said,
+    so a --warm-up into a different --output doesn't go unnoticed."""
+    if not notes_path or not (token_usage['nodes_scanned'] or token_usage['assessed_nodes']):
+        return
+    if token_usage['notes_available']:
+        console.print(
+            f"{indent}[dim]Used {token_usage['notes_used']:,} of {token_usage['notes_available']:,} note(s) "
+            f"from an earlier --warm-up ({escape(notes_path)}).[/dim]"
+        )
+    else:
+        console.print(
+            f"{indent}[dim]No --warm-up notes in {escape(notes_path)}, so the model saw no notes on code further "
+            f"out. Run with --warm-up and the same --output first to add them.[/dim]"
+        )
+
+
 def _single_repo_on_event(event: str, progress: _Progress, **kw) -> None:
     if event == "graph_built":
         console.print(f"[bold blue]Found {kw['num_modified']} changed symbol(s), {kw['num_deleted']} deleted symbol(s).[/bold blue]")
@@ -160,6 +178,7 @@ def _single_repo_on_event(event: str, progress: _Progress, **kw) -> None:
                 f"in {kw['num_vulnerable_nodes']} symbol(s).[/bold yellow]"
             )
         _print_scan_errors(kw['token_usage'])
+        _print_notes_usage(kw['token_usage'], kw['notes_path'])
 
 
 def _print_token_usage(token_usage: dict) -> None:
@@ -351,6 +370,7 @@ def _run_multi_repo(
                     else:
                         console.print(f"    found {kw['num_vulnerabilities']} vulnerability(s) in {kw['num_vulnerable_nodes']} symbol(s)")
                     _print_scan_errors(kw['token_usage'], indent="    ")
+                    _print_notes_usage(kw['token_usage'], kw['notes_path'], indent="    ")
 
             entry = scan_one(repo_path, slug, on_event)
             progress.stop()  # a failed scan never gets to "llm_scan_done"
@@ -395,6 +415,7 @@ def _run_multi_repo(
                     console.print(f"[bold cyan][{completed}/{len(paths)}][/bold cyan] {escape(entry['repo'])} — {summary}")
                     if llm:
                         _print_scan_errors(sr.token_usage, indent="    ")
+                        _print_notes_usage(sr.token_usage, os.path.join(output_dir, entry['slug'], ".notes_cache.json"), indent="    ")
                 else:
                     console.print(f"[bold cyan][{completed}/{len(paths)}][/bold cyan] {escape(entry['repo'])} — [bold red]error:[/bold red] {escape(entry['error'])}")
 

@@ -877,8 +877,9 @@ def test_scan_shows_notes_on_callers_of_its_callers(monkeypatch, tmp_path):
     notes_path = str(tmp_path / "notes.json")
     llm_scanner.write_notes(graph["nodes"], "cheap-model", notes_path)
 
-    llm_scanner.scan_graph_for_vulnerabilities(graph, "fake-model", cache_path=None, notes_path=notes_path)
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(graph, "fake-model", cache_path=None, notes_path=notes_path)
 
+    assert (token_usage["notes_available"], token_usage["notes_used"]) == (3, 1)  # entry's; mid is shown in full
     [prompt] = _scan_prompts(fake_litellm)
     notes_part = prompt.split("Notes on more related code")[1]
     assert "machine-written summaries" in notes_part and "don't report findings in it" in notes_part
