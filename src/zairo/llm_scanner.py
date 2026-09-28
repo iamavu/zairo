@@ -54,6 +54,10 @@ _NEIGHBOR_MAX_LINES = 30
 _NEIGHBOR_HEAD_LINES = 3
 _CALL_SITE_BEFORE = 10
 _CALL_SITE_AFTER = 5
+# A widely used helper can have hundreds of callers: show this many
+# neighbors in full, and just name the rest (up to _MAX_UNSHOWN_NAMES).
+_MAX_NEIGHBORS = 8
+_MAX_UNSHOWN_NAMES = 20
 
 # Reasoning ("thinking") models count their internal reasoning tokens against
 # this same budget. Too low a cap can make the model exhaust it mid-thought
@@ -201,20 +205,21 @@ def _diff_section(hunks: List[Dict[str, Any]], fully_added: bool, kind_label: st
     )
 
 
-def _sibling_outline(mod_node: Dict[str, Any], nodes: Dict[str, Dict[str, Any]]) -> str:
+def _sibling_outline(mod_node: Dict[str, Any], same_file: List[Dict[str, Any]]) -> str:
     """For a module/file-level node, a windowed snippet alone loses all
     orientation — the model can't tell what else the file contains. List the
     other definitions in the same file (name + line range only, no bodies)
-    so it has that context without paying to send them in full."""
+    so it has that context without paying to send them in full. Not deleted
+    ones: they aren't in the file anymore."""
     siblings = [
-        n for n in nodes.values()
-        if n.get('file') == mod_node.get('file')
-        and n['id'] != mod_node['id']
+        n for n in same_file
+        if n['id'] != mod_node['id']
         and n.get('kind') in ('function', 'class', 'method')
+        and n.get('status') != 'deleted'
     ]
     if not siblings:
         return ""
-    siblings.sort(key=lambda n: n.get('start_line') or 0)
+    siblings.sort(key=lambda n: (n.get('start_line') or 0, n['id']))
     lines = [f"- {n['name']} ({n.get('kind')}, lines {n.get('start_line')}-{n.get('end_line')})" for n in siblings]
     return "Other definitions in this file (not shown in full):\n" + "\n".join(lines)
 
@@ -325,7 +330,9 @@ def _neighbor_snippet(n: Dict[str, Any], roles: Set[str], call_lines: List[int],
 
 def _neighbor_contexts(mod_node: Dict[str, Any], nodes: Dict[str, Dict[str, Any]], edges: List[Dict[str, Any]]) -> List[str]:
     """The code around a changed node that the prompt shows for context:
-    its direct callers and callees, and whatever else it's linked to."""
+    its direct callers and callees, and whatever else it's linked to, from
+    `edges` (which need only be the ones touching it) -- up to
+    _MAX_NEIGHBORS of them in full, and the rest by name."""
     roles: Dict[str, Set[str]] = {}
     call_lines: Dict[str, List[int]] = {}
     for e in edges:
@@ -349,20 +356,35 @@ def _neighbor_contexts(mod_node: Dict[str, Any], nodes: Dict[str, Dict[str, Any]
             continue
         roles.setdefault(other, set()).add(role or 'unknown')
 
-    # sorted(): the prompt, and so its cache key, can't depend on edge
-    # order. Skipped: a deleted neighbor, whose line numbers point into the
-    # old version of its file, so reading them now would show unrelated
-    # code -- and what the change removed is in the diff already; and a
-    # proxy (an external/unresolved call target like `fs.unlinkSync`), whose
-    # only "source" is the call expression in this node -- shown already.
-    contexts = []
-    for n_id in sorted(roles):
-        n = nodes.get(n_id)
-        if n is None or n_id == mod_node['id'] or n.get('status') == 'deleted' or n.get('kind') == 'proxy':
+    # Skipped: a deleted neighbor, whose line numbers point into the old
+    # version of its file, so reading them now would show unrelated code --
+    # and what the change removed is in the diff already; and a proxy (an
+    # external/unresolved call target like `fs.unlinkSync`), which has no
+    # source, and whose call is in this node's code already.
+    candidates = [
+        n_id for n_id in roles
+        if n_id in nodes and n_id != mod_node['id']
+        and nodes[n_id].get('status') != 'deleted' and nodes[n_id].get('kind') != 'proxy'
+    ]
+    # Changed neighbors first -- a change can span both sides of a call --
+    # then by id: sorted either way, since the prompt, and so its cache key,
+    # can't depend on edge order.
+    candidates.sort(key=lambda n_id: (nodes[n_id].get('status') not in ('modified', 'added'), n_id))
+    contexts, unshown = [], []
+    for n_id in candidates:
+        if len(contexts) == _MAX_NEIGHBORS:
+            unshown.append(n_id)
             continue
-        snippet = _neighbor_snippet(n, roles[n_id], call_lines.get(n_id, []), mod_node['name'])
+        snippet = _neighbor_snippet(nodes[n_id], roles[n_id], call_lines.get(n_id, []), mod_node['name'])
         if snippet:
             contexts.append(snippet)
+    if unshown:
+        listed = [
+            f"{_display_name(nodes[n_id].get('name', n_id))} ({', '.join(sorted(roles[n_id]))})"
+            for n_id in unshown[:_MAX_UNSHOWN_NAMES]
+        ]
+        more = f", and {len(unshown) - len(listed)} more" if len(unshown) > len(listed) else ""
+        contexts.append(f"{len(unshown)} more related symbol(s), not shown: {', '.join(listed)}{more}")
     return contexts
 
 
@@ -610,6 +632,7 @@ def scan_graph_for_vulnerabilities(
     max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
     debug_log: Optional[Callable[[str], None]] = None,
     batch_size: int = 1,
+    context: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, List[Dict]], Dict[str, int]]:
     """Returns (vulnerabilities, token_usage). token_usage has
     prompt_tokens/completion_tokens/total_tokens summed across every real
@@ -640,7 +663,14 @@ def scan_graph_for_vulnerabilities(
     code + context), so a batch only ever groups nodes that all need a
     fresh call anyway. batch_size=1 (the default) sends the exact same
     single-node prompt this always has -- batching only changes the prompt
-    shape when actually requested."""
+    shape when actually requested.
+
+    `context` ({"nodes", "edges"}) is the graph a changed node's
+    surroundings are read from -- its direct callers and callees, and the
+    other definitions in its file -- while graph_data only says which nodes
+    to scan. analyze_impact() returns the whole graph for it, so what the
+    model sees doesn't depend on how far --depth took the report's graph.
+    Defaults to graph_data itself."""
     log = log or (lambda msg: None)
     log_lock = threading.Lock()
 
@@ -651,8 +681,18 @@ def scan_graph_for_vulnerabilities(
     vulnerabilities = {}
     assessed_nodes = []
     skipped_nodes = {}
-    nodes = {n['id']: n for n in graph_data['nodes']}
-    edges = graph_data['edges']
+    context = context or graph_data
+    nodes = {n['id']: n for n in context['nodes']}
+    # Indexed once: the context graph can be a whole repo's.
+    nodes_by_file: Dict[str, List[Dict[str, Any]]] = {}
+    for n in context['nodes']:
+        if n.get('file'):
+            nodes_by_file.setdefault(n['file'], []).append(n)
+    edges_by_node: Dict[str, List[Dict[str, Any]]] = {}
+    for e in context['edges']:
+        edges_by_node.setdefault(e['source'], []).append(e)
+        if e['target'] != e['source']:
+            edges_by_node.setdefault(e['target'], []).append(e)
     cache = _load_cache(cache_path)
 
     def skip(node: Dict[str, Any], reason: str) -> None:
@@ -670,17 +710,6 @@ def scan_graph_for_vulnerabilities(
     # touch the network, and only real work goes into the thread pool.
     jobs = []
     for mod_node in modified_nodes:
-        if mod_node.get('kind') == 'proxy':
-            # A proxy node represents an external/unresolved call target
-            # (e.g. `fs.unlinkSync`), shared across every call site to it in
-            # the whole codebase -- it isn't first-party source with a real
-            # body of its own. Scanning it pulls in ALL of its callers as
-            # "context" (anyone who calls fs.unlinkSync, anywhere), which
-            # leaks fully unrelated, unchanged functions from other files
-            # into the prompt and produces findings misattributed to code
-            # that was never touched by this diff.
-            skip(mod_node, "external call target, no source of its own")
-            continue
         hunks = mod_node.get('diff_hunks') or []
         start, end = mod_node.get('start_line'), mod_node.get('end_line')
         is_module = mod_node.get('kind') == 'module' and start is not None and end is not None
@@ -699,10 +728,10 @@ def scan_graph_for_vulnerabilities(
             # own, more specific seed node when they change, and including
             # them here too just duplicates cost and mis-attributes their
             # findings to the enclosing module instead of the actual function.
+            # Not a deleted definition: its lines are where it used to be.
             nested = [
-                n for n in nodes.values()
-                if n.get('file') == mod_node['file']
-                and n['id'] != mod_node['id']
+                n for n in nodes_by_file.get(mod_node['file'], [])
+                if n['id'] != mod_node['id'] and n.get('status') != 'deleted'
                 and n.get('kind') in ('function', 'class')
                 and n.get('start_line') is not None and n.get('end_line') is not None
                 and n['start_line'] >= start and n['end_line'] <= end
@@ -740,11 +769,11 @@ def scan_graph_for_vulnerabilities(
         # file — without an outline of what else is there, the model has no
         # idea whether the flagged line is actually reachable in isolation.
         if mod_node.get('kind') == 'module':
-            outline = _sibling_outline(mod_node, nodes)
+            outline = _sibling_outline(mod_node, nodes_by_file.get(mod_node['file'], []))
             if outline:
                 mod_code = outline + "\n\n" + mod_code
 
-        neighbor_contexts = _neighbor_contexts(mod_node, nodes, edges)
+        neighbor_contexts = _neighbor_contexts(mod_node, nodes, edges_by_node.get(mod_node['id'], []))
         diff_text = _diff_section(hunks, fully_added, mod_node.get('kind') or 'function')
         section = _node_section(mod_node, mod_code, diff_text, neighbor_contexts)
 

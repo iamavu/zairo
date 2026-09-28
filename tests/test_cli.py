@@ -2,7 +2,7 @@ import json
 import re
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
@@ -390,3 +390,29 @@ def test_reports_say_why_a_changed_symbol_was_not_scanned(git_repo: Path, tmp_pa
     report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
     [node] = [n for n in report["nodes"] if n["name"] == "vulnerable_exec"]
     assert node["scan_skipped"] == "only comments or blank lines changed"
+
+
+def test_depth_only_shapes_the_report_not_what_the_model_sees(git_repo: Path, tmp_path: Path):
+    """End to end: at --depth 0 the report's graph is just the change, and
+    the model still gets the changed function's caller."""
+    git = lambda *a: subprocess.run(["git", *a], cwd=git_repo, check=True, capture_output=True)
+    app_py = git_repo / "app.py"
+    app_py.write_text("def helper(x):\n    return x\n\ndef caller(y):\n    return helper(y)\n")
+    git("add", "app.py")
+    git("commit", "-q", "-m", "add app")
+    app_py.write_text("def helper(x):\n    return x + 1\n\ndef caller(y):\n    return helper(y)\n")
+    git("commit", "-q", "-am", "change helper")
+    fake_litellm = MagicMock()
+    fake_litellm.completion.return_value.choices[0].message.content = '{"vulnerabilities": []}'
+    fake_litellm.completion.return_value.usage = None
+    output_dir = tmp_path / "out"
+
+    with patch("zairo.llm_scanner.litellm", fake_litellm), patch("zairo.llm_scanner._ensure_litellm", return_value=fake_litellm):
+        result = runner.invoke(app, [str(git_repo), "--from", "HEAD~1", "--to", "HEAD", "--depth", "0", "--no-cache", "--output", str(output_dir)])
+
+    assert result.exit_code == 0, result.output
+    prompts = [call.kwargs["messages"][0]["content"] for call in fake_litellm.completion.call_args_list]
+    [prompt] = [p for p in prompts if "Modified Function: helper" in p]
+    assert "Caller: caller\n" in prompt
+    report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
+    assert "caller" not in {n["name"] for n in report["nodes"]}

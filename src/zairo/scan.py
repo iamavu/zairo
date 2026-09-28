@@ -83,7 +83,7 @@ def run_scan(
             analysis_root = worktree_path
             log(f"Worktree ready at {worktree_path}")
 
-        graph_data = analyze_impact(analysis_root, depth, from_ref, to_ref, language, log=log)
+        graph_data, context = analyze_impact(analysis_root, depth, from_ref, to_ref, language, log=log)
         num_modified = sum(1 for n in graph_data['nodes'] if n['status'] in ('modified', 'added'))
         num_deleted = sum(1 for n in graph_data['nodes'] if n['status'] == 'deleted')
         on_event(
@@ -100,7 +100,7 @@ def run_scan(
             on_event("llm_scan_started", model=model, concurrency=concurrency)
             vulnerabilities, token_usage = scan_graph_for_vulnerabilities(
                 graph_data, model, log=log, concurrency=concurrency, cache_path=cache_path,
-                max_tokens=max_tokens, debug_log=debug_log, batch_size=batch_size,
+                max_tokens=max_tokens, debug_log=debug_log, batch_size=batch_size, context=context,
             )
             num_vulnerabilities = sum(len(findings) for findings in vulnerabilities.values())
             on_event(

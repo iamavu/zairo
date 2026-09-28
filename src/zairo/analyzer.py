@@ -162,8 +162,13 @@ def analyze_impact(
     to_ref: str = None,
     language: str = "auto",
     log: Optional[Callable[[str], None]] = None,
-) -> Dict[str, Any]:
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
+    Returns (graph_data, context), both {"nodes": [...], "edges": [...]}:
+    graph_data is the report's graph -- the changed nodes plus whatever lies
+    within `depth` hops of them -- and context is the whole graph (test code
+    aside), for the scanner to read a changed node's surroundings from.
+
     `repo_path` must already be checked out at the state to be indexed: the
     caller is responsible for pointing it at a worktree checked out to
     `to_ref` when diffing two commits, so that node locations/contents line
@@ -209,23 +214,32 @@ def analyze_impact(
     # 1. Identify seed nodes (modified/added)
     seed_nodes = set()
     node_metadata = {}
+    proxies = set()
 
     for node_id, unit in graph.nodes.items():
         if node_id in test_nodes:
             continue
         location = unit.location
+        # A proxy is an external/unresolved call target (e.g. `os.system`).
+        # Trailmark places it at the first call to it that it came across,
+        # but it has no source of its own: it's recorded without a location,
+        # so it can't count as changed just because that call did, and the
+        # report shows it as an external reference, not as code at that line.
+        is_proxy = unit.kind.value == 'proxy'
+        if is_proxy:
+            proxies.add(node_id)
         node_metadata[node_id] = {
             "id": node_id,
             "name": _node_name(unit, analysis_root),
             "kind": unit.kind.value,
-            "file": location.file_path,
-            "start_line": location.start_line,
-            "end_line": location.end_line,
+            "file": None if is_proxy else location.file_path,
+            "start_line": None if is_proxy else location.start_line,
+            "end_line": None if is_proxy else location.end_line,
             "complexity": unit.cyclomatic_complexity,
             "status": "unchanged" # default
         }
 
-        if location.file_path in diff_hunks:
+        if not is_proxy and location.file_path in diff_hunks:
             start = location.start_line
             end = location.end_line
             node_hunks = hunks_in_range(diff_hunks[location.file_path], start, end)
@@ -237,7 +251,12 @@ def analyze_impact(
 
     log(f"Identified {len(seed_nodes)} seed node(s)")
 
-    # 2. Traverse graph to build subgraph up to `depth`
+    # 2. Traverse graph to build the report's subgraph up to `depth`. It's
+    # only what the report shows: the scanner reads a changed node's
+    # surroundings from the full graph (see `context` below). A proxy joins
+    # the subgraph -- the change calls os.system -- but traversal never goes
+    # on through it: every function anywhere that calls os.system links to
+    # that one node, and none of them is related to the change.
     subgraph_nodes = set(seed_nodes)
     current_frontier = set(seed_nodes)
 
@@ -248,11 +267,13 @@ def analyze_impact(
             edge_target = edge["target"]
 
             if source in current_frontier and edge_target not in subgraph_nodes:
-                next_frontier.add(edge_target)
                 subgraph_nodes.add(edge_target)
+                if edge_target not in proxies:
+                    next_frontier.add(edge_target)
             elif edge_target in current_frontier and source not in subgraph_nodes:
-                next_frontier.add(source)
                 subgraph_nodes.add(source)
+                if source not in proxies:
+                    next_frontier.add(source)
 
         log(f"Hop {hop + 1}/{depth}: added {len(next_frontier)} node(s), frontier now {len(subgraph_nodes)} total")
         current_frontier = next_frontier
@@ -272,15 +293,12 @@ def analyze_impact(
         subgraph_nodes.update(deleted_metadata.keys())
         node_metadata.update(deleted_metadata)
 
-    # Extract edges for subgraph -- from_ref revision edges included (filtered
-    # by the same rule) so deleted nodes still connect to whatever
-    # surviving node used to contain or call them. Deduplicated, since
-    # Trailmark emits one edge per call site: each edge appears once, with
-    # `lines` listing every place in its source's file where it occurs.
+    # Every edge, deduplicated -- Trailmark emits one per call site: each
+    # appears once, with `lines` listing every place in its source's file
+    # where it occurs. from_ref revision edges are included so deleted nodes
+    # still connect to whatever surviving node used to contain or call them.
     merged_edges: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
     for edge in (graph_edges + deleted_edges):
-        if edge["source"] not in subgraph_nodes or edge["target"] not in subgraph_nodes:
-            continue
         key = (edge["source"], edge["target"], edge["kind"], edge["confidence"])
         merged = merged_edges.setdefault(key, {
             "source": edge["source"], "target": edge["target"], "kind": edge["kind"],
@@ -288,9 +306,10 @@ def analyze_impact(
         })
         if edge["line"] is not None and edge["line"] not in merged["lines"]:
             merged["lines"].append(edge["line"])
-    final_edges = list(merged_edges.values())
-    for edge in final_edges:
+    all_edges = list(merged_edges.values())
+    for edge in all_edges:
         edge["lines"].sort()
+    final_edges = [e for e in all_edges if e["source"] in subgraph_nodes and e["target"] in subgraph_nodes]
 
     nodes = []
     for n_id in subgraph_nodes:
@@ -312,7 +331,9 @@ def analyze_impact(
             "status": "unchanged",
         }))
 
-    return {
-        "nodes": nodes,
-        "edges": final_edges
-    }
+    graph_data = {"nodes": nodes, "edges": final_edges}
+    # What the scanner reads a changed node's surroundings from -- its
+    # direct callers and callees, and the other definitions in its file --
+    # whatever --depth the report's graph was built with.
+    context = {"nodes": list(node_metadata.values()), "edges": all_edges}
+    return graph_data, context

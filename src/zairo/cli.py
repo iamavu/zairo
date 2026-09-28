@@ -364,7 +364,7 @@ def _run_multi_repo(
 def analyze(
     repo_paths: Optional[List[str]] = typer.Argument(None, help="Path(s) to git repositories to scan. More than one switches to multi-repo mode -- see below."),
     repos_file: str = typer.Option(None, "--repos-file", help="Text file with one repo path per line ('#' comments allowed), combined with any positional paths."),
-    depth: int = typer.Option(1, "--depth", "-d", help="Depth of connections to traverse from changed nodes"),
+    depth: int = typer.Option(1, "--depth", "-d", help="How many hops of callers/callees the report's graph shows around each change (the model always sees direct callers/callees)"),
     output_dir: str = typer.Option("zairo_out", "--output", "-o", help="Output directory (multi-repo mode: a subdirectory per repo, plus an aggregate rollup here)"),
     from_ref: str = typer.Option(None, "--from", "-f", help="Commit/ref to diff from, the older side (e.g. HEAD~3, main, a1b2c3d). Left out: HEAD vs your working tree, i.e. uncommitted changes."),
     to_ref: str = typer.Option(None, "--to", "-t", help="Commit/ref to diff to, the newer side (e.g. HEAD, feature-branch). Requires --from. Left out: your working tree."),

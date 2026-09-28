@@ -5,7 +5,7 @@ from zairo.analyzer import analyze_impact
 
 
 def test_finds_modified_function_and_expands_subgraph(git_repo: Path):
-    graph = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
 
     nodes_by_id = {n["id"]: n for n in graph["nodes"]}
     vulnerable = next(
@@ -26,7 +26,7 @@ def test_modified_node_carries_its_own_diff_hunks(git_repo: Path):
     """git_repo's second commit replaces a()/b()/c() with vulnerable_exec in
     one hunk: vulnerable_exec gets that hunk cut to its own lines, with the
     code it replaced -- what the scanner shows the model as the change."""
-    graph = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _ = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
 
     vulnerable = next(n for n in graph["nodes"] if n.get("name") == "vulnerable_exec")
     [hunk] = vulnerable["diff_hunks"]
@@ -39,7 +39,7 @@ def test_depth_zero_yields_only_seed_and_deleted_nodes(git_repo: Path):
     """At depth 0, no neighbor traversal happens -- every node present must
     be a seed (modified/added) or a deletion, never something pulled in by
     a hop that didn't run."""
-    graph = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _ = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
     statuses = {n["status"] for n in graph["nodes"]}
     assert statuses <= {"modified", "added", "deleted"}
 
@@ -49,7 +49,7 @@ def test_finds_functions_deleted_between_base_and_target(git_repo: Path):
     content -- Trailmark's to-side graph can never represent that on its
     own (it only parses the tree as it currently is), so this is purely on
     zairo's own from_ref-revision diffing to detect."""
-    graph = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
 
     by_name = {n["name"]: n for n in graph["nodes"] if n["status"] == "deleted"}
     assert set(by_name.keys()) == {"a", "b", "c"}
@@ -79,7 +79,7 @@ def test_call_edges_list_every_call_site(git_repo: Path):
     _commit_file(git_repo, "app.py", "def helper(x):\n    return x\n\ndef caller(y):\n    a = helper(y)\n    return helper(a)\n", "add app")
     _commit_file(git_repo, "app.py", "def helper(x):\n    return x + 1\n\ndef caller(y):\n    a = helper(y)\n    return helper(a)\n", "change helper")
 
-    graph = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
 
     ids = {n["name"]: n["id"] for n in graph["nodes"]}
     [edge] = [e for e in graph["edges"] if e["source"] == ids["caller"] and e["target"] == ids["helper"]]
@@ -94,7 +94,7 @@ def test_a_call_the_change_removed_is_not_an_edge(git_repo: Path):
     _commit_file(git_repo, "app.py", "def check(x):\n    return x\n\ndef handle(y):\n    return check(y)\n", "add app")
     _commit_file(git_repo, "app.py", "def check(x):\n    return x\n\ndef handle(y):\n    return y\n", "drop the check")
 
-    graph = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
 
     ids = {n["name"]: n["id"] for n in graph["nodes"]}
     assert "check" in ids  # in the graph, via the module that contains it
@@ -108,7 +108,7 @@ def test_modules_are_named_by_their_file_path(git_repo: Path):
     _commit_file(git_repo, "pkg/settings.local.py", "DEBUG = False\n", "add settings")
     _commit_file(git_repo, "pkg/settings.local.py", "DEBUG = True\n", "debug on")
 
-    graph = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _ = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
 
     [module] = [n for n in graph["nodes"] if n["kind"] == "module"]
     assert module["name"] == "pkg/settings.local.py"
@@ -120,7 +120,7 @@ def test_deleted_modules_are_named_by_their_file_path(git_repo: Path):
     subprocess.run(["git", "rm", "-q", "old.helpers.py"], cwd=git_repo, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-q", "-m", "drop helpers"], cwd=git_repo, check=True, capture_output=True)
 
-    graph = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _ = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
 
     assert {n["name"] for n in graph["nodes"] if n["status"] == "deleted"} == {"old.helpers.py", "f"}
 
@@ -135,7 +135,7 @@ def test_test_code_stays_out_of_the_graph(git_repo: Path):
     subprocess.run(["git", "add", "app.py"], cwd=git_repo, check=True, capture_output=True)
     _commit_file(git_repo, "tests/test_app.py", "from app import get_invoice\n\n\ndef test_it():\n    assert get_invoice(1, 3)\n", "change both")
 
-    graph = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
 
     names = {n["name"] for n in graph["nodes"] if n["kind"] != "proxy"}
     assert {"app.py", "get_invoice"} <= names
@@ -152,13 +152,46 @@ def test_a_repo_inside_a_tests_directory_is_not_all_test_code(tmp_path: Path):
     _commit_file(repo, "app.py", "def f():\n    return 1\n", "add app")
     _commit_file(repo, "app.py", "def f():\n    return 2\n", "change app")
 
-    graph = analyze_impact(str(repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _ = analyze_impact(str(repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
 
     assert "f" in {n["name"] for n in graph["nodes"]}
+
+
+def test_external_calls_are_never_changed_and_never_expanded_through(git_repo: Path):
+    """Trailmark places the os.system proxy at the first call to it it saw --
+    here, the changed one. It must not count as changed for that, and even
+    at depth 2 the graph must not reach b.py through it: every function that
+    calls os.system links to that one node."""
+    _commit_file(git_repo, "b.py", "import os\n\ndef unrelated():\n    return os.system('ls')\n", "add b")
+    _commit_file(git_repo, "a.py", "import os\n\ndef run(cmd):\n    return os.system('echo ' + cmd)\n", "add a")
+    _commit_file(git_repo, "a.py", "import os\n\ndef run(cmd):\n    return os.system(cmd)\n", "change a")
+
+    graph, _ = analyze_impact(str(git_repo), depth=2, from_ref="HEAD~1", to_ref="HEAD")
+
+    by_name = {n["name"]: n for n in graph["nodes"]}
+    assert "unrelated" not in by_name
+    [proxy] = [n for n in graph["nodes"] if n["kind"] == "proxy" and "os.system" in n["name"]]
+    assert proxy["status"] == "unchanged"
+    assert (proxy["file"], proxy["start_line"]) == (None, None)  # an external reference, not code in a.py
+    assert any(e["source"] == by_name["run"]["id"] and e["target"] == proxy["id"] for e in graph["edges"])
+
+
+def test_context_is_the_whole_graph_whatever_the_depth(git_repo: Path):
+    """--depth 0 keeps the report's graph to the change itself; the scanner
+    still gets the caller, from context."""
+    _commit_file(git_repo, "app.py", "def helper(x):\n    return x\n\ndef caller(y):\n    return helper(y)\n", "add app")
+    _commit_file(git_repo, "app.py", "def helper(x):\n    return x + 1\n\ndef caller(y):\n    return helper(y)\n", "change helper")
+
+    graph, context = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+
+    assert "caller" not in {n["name"] for n in graph["nodes"]}
+    ids = {n["name"]: n["id"] for n in context["nodes"]}
+    [edge] = [e for e in context["edges"] if e["source"] == ids["caller"] and e["target"] == ids["helper"]]
+    assert edge["lines"] == [5]
 
 
 def test_no_deleted_nodes_when_nothing_was_deleted(git_repo: Path):
     """Diffing a ref against itself: nothing changed, so nothing should be
     reported as deleted either."""
-    graph = analyze_impact(str(git_repo), depth=1, from_ref="HEAD", to_ref="HEAD")
+    graph, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD", to_ref="HEAD")
     assert not any(n["status"] == "deleted" for n in graph["nodes"])

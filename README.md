@@ -39,7 +39,7 @@ zairo backend frontend infra --from main --fail-on high -o zairo_multi_out
 
 - `--from`, `-f` *(none)*: ref to diff from (the older side), e.g. `main` or `HEAD~3`. Left out, `zairo` scans uncommitted changes instead: staged, unstaged, and new untracked files (anything `.gitignore`d is skipped).
 - `--to`, `-t` *(none)*: ref to diff to (the newer side), e.g. `HEAD` or a branch. Needs `--from`, and errors without it; left out (with `--from` set), it diffs against your working tree.
-- `--depth`, `-d` *(1)*: how many hops of callers/callees to pull into the impact graph around each change.
+- `--depth`, `-d` *(1)*: how many hops of callers/callees the report's graph shows around each change. It doesn't change what the model sees: that's always each changed symbol's direct callers and callees (up to 8 in full, the rest by name), whatever the depth. Calls into external code (e.g. `os.system`) show up as external references, but the graph never expands through them, since they'd link every function that makes the same call.
 - `--language`, `-l` *(auto)*: force a language instead of letting Trailmark auto-detect it.
 
 **LLM scanning**
@@ -69,7 +69,7 @@ Run `zairo --help` any time for this same list from the CLI.
 
 ## Output files
 
-- **`report.json`** *(always)*: the raw impact graph (nodes, edges, and any attached findings), as data. Each changed node carries its `diff_hunks`: the lines the change removed and added there, which is also what the model is shown alongside the code. Each edge carries `lines`: where in its source's file it occurs (for a call, every call site), when Trailmark knows. The model sees a long caller around those call sites rather than from the top. After a vulnerability scan, `scan_complete` says whether every node got assessed, and each one that didn't carries a `scan_error` saying why. A changed node left out on purpose (a comment-only change, an external call target, ...) carries a `scan_skipped` reason instead. Modules are named by their file path (`src/config/settings.local.ts`); their `id` is Trailmark's dotted form of it, which escapes dots in file names (`src.config.settings\.local`). Each finding has a `title`, `description`, `impact`, `severity` and `cwe`, plus:
+- **`report.json`** *(always)*: the raw impact graph (nodes, edges, and any attached findings), as data. Each changed node carries its `diff_hunks`: the lines the change removed and added there, which is also what the model is shown alongside the code. Each edge carries `lines`: where in its source's file it occurs (for a call, every call site), when Trailmark knows. The model sees a long caller around those call sites rather than from the top. After a vulnerability scan, `scan_complete` says whether every node got assessed, and each one that didn't carries a `scan_error` saying why. A changed node left out on purpose (a comment-only change, source that can't be read, ...) carries a `scan_skipped` reason instead. Modules are named by their file path (`src/config/settings.local.ts`); their `id` is Trailmark's dotted form of it, which escapes dots in file names (`src.config.settings\.local`). Each finding has a `title`, `description`, `impact`, `severity` and `cwe`, plus:
   - `line`: the line it's about. The model is shown numbered code, and a line it cites is kept only if it was one of those shown; otherwise it's `null`.
   - `introduced_by_change`: `true` if this change introduced it or made it reachable (for example by removing a check), `false` if it was already there.
   - `trigger`: who can trigger it, and how.

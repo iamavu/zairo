@@ -1,4 +1,5 @@
 import json
+import re
 from unittest.mock import MagicMock
 
 import zairo
@@ -626,8 +627,8 @@ def test_caller_call_sites_beyond_the_budget_are_counted_not_shown(monkeypatch, 
 def test_neighbors_are_labeled_by_how_they_relate_and_deleted_ones_skipped(monkeypatch, tmp_path):
     """A deleted neighbor's lines point into the old version of its file --
     reading them from the file as it is now would show unrelated code. A
-    proxy (external call target) sits at the call site: its "code" is just
-    the calling line, already shown."""
+    proxy (external call target) has no source; its call is in the changed
+    code already."""
     fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
     src = tmp_path / "app.py"
     src.write_text("def check(x):\n    return x\n\ndef handle(y):\n    return check(y)\n")
@@ -635,7 +636,7 @@ def test_neighbors_are_labeled_by_how_they_relate_and_deleted_ones_skipped(monke
               "status": "modified", "diff_hunks": [{"start": 5, "removed": ["    return y"], "added": ["    return check(y)"]}]}
     check = {"id": "c", "name": "check", "kind": "function", "file": str(src), "start_line": 1, "end_line": 2, "status": "unchanged"}
     gone = {"id": "d", "name": "old_guard", "kind": "function", "file": str(src), "start_line": 1, "end_line": 2, "status": "deleted"}
-    proxy = {"id": "p", "name": "os.system", "kind": "proxy", "file": str(src), "start_line": 5, "end_line": 5, "status": "modified"}
+    proxy = {"id": "p", "name": "os.system", "kind": "proxy", "file": None, "start_line": None, "end_line": None, "status": "unchanged"}
     edges = [{"source": "h", "target": target, "kind": "calls", "confidence": "certain", "lines": [5]} for target in ("c", "d", "p")]
 
     llm_scanner.scan_graph_for_vulnerabilities({"nodes": [handle, check, gone, proxy], "edges": edges}, "fake-model", cache_path=None)
@@ -643,6 +644,67 @@ def test_neighbors_are_labeled_by_how_they_relate_and_deleted_ones_skipped(monke
     [prompt] = _prompts(fake_litellm)
     assert "Callee: check\n```\ndef check(x):\n    return x\n```" in prompt
     assert "old_guard" not in prompt and "os.system" not in prompt
+
+
+def _helper_and_callers(tmp_path, num_callers):
+    """helper (changed), then caller_00, caller_01, ... each calling it."""
+    src = tmp_path / "lib.py"
+    src.write_text("def helper(x):\n    return x\n" + "".join(f"\ndef caller_{i:02}():\n    return helper({i})\n" for i in range(num_callers)))
+    helper = {"id": "h", "name": "helper", "kind": "function", "file": str(src), "start_line": 1, "end_line": 2,
+              "status": "modified", "diff_hunks": [{"start": 2, "removed": ["    return None"], "added": ["    return x"]}]}
+    callers = [{"id": f"c{i:02}", "name": f"caller_{i:02}", "kind": "function", "file": str(src), "start_line": 4 + 3 * i,
+                "end_line": 5 + 3 * i, "status": "unchanged"} for i in range(num_callers)]
+    edges = [{"source": c["id"], "target": "h", "kind": "calls", "confidence": "certain", "lines": [c["end_line"]]} for c in callers]
+    return helper, callers, edges
+
+
+def test_neighbors_beyond_the_cap_are_named_not_shown(monkeypatch, tmp_path):
+    """A widely used helper shouldn't cost a prompt every one of its callers.
+    Changed neighbors go first: a change can span both sides of a call."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    helper, callers, edges = _helper_and_callers(tmp_path, 11)
+    callers[10]["status"] = "modified"
+    callers[10]["diff_hunks"] = [{"start": 35, "removed": [], "added": ["    return helper(10)"]}]
+
+    llm_scanner.scan_graph_for_vulnerabilities({"nodes": [helper, *callers], "edges": edges}, "fake-model", cache_path=None)
+
+    [prompt] = [p for p in _prompts(fake_litellm) if "Modified Function: helper" in p]
+    shown = re.findall(r"^Caller: (caller_\d+)", prompt, re.M)
+    assert shown == ["caller_10", "caller_00", "caller_01", "caller_02", "caller_03", "caller_04", "caller_05", "caller_06"]
+    assert "3 more related symbol(s), not shown: caller_07 (caller), caller_08 (caller), caller_09 (caller)" in prompt
+
+
+def test_context_comes_from_the_context_graph_not_the_scanned_one(monkeypatch, tmp_path):
+    """At --depth 0 the report's graph holds only the change; the model
+    still gets its callers, from the whole graph."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    helper, callers, edges = _helper_and_callers(tmp_path, 1)
+
+    llm_scanner.scan_graph_for_vulnerabilities(
+        {"nodes": [helper], "edges": []}, "fake-model", cache_path=None,
+        context={"nodes": [helper, *callers], "edges": edges},
+    )
+
+    [prompt] = _prompts(fake_litellm)
+    assert "Caller: caller_00\n```\ndef caller_00():\n    return helper(0)\n```" in prompt
+
+
+def test_deleted_definitions_do_not_hide_or_outline_module_code(monkeypatch, tmp_path):
+    """A deleted function's lines are where it used to be: collapsing them
+    would hide live code that's there now, and it's no longer in the file
+    to list."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    src = tmp_path / "app.py"
+    src.write_text("import os\n\nos.system(ARGS)\n")
+    module = {"id": "m", "name": "app.py", "kind": "module", "file": str(src), "start_line": 1, "end_line": 3,
+              "status": "modified", "diff_hunks": [{"start": 3, "removed": ["def old():", "    pass"], "added": ["os.system(ARGS)"]}]}
+    gone = {"id": "d", "name": "old", "kind": "function", "file": str(src), "start_line": 2, "end_line": 3, "status": "deleted"}
+
+    llm_scanner.scan_graph_for_vulnerabilities({"nodes": [module, gone], "edges": []}, "fake-model", cache_path=None)
+
+    [prompt] = _prompts(fake_litellm)
+    assert "    3 | os.system(ARGS)" in prompt
+    assert "NOT SHOWN" not in prompt and "Other definitions in this file" not in prompt
 
 
 def test_no_context_section_without_neighbors(monkeypatch):
@@ -661,7 +723,6 @@ def test_skipped_nodes_record_why_they_were_not_scanned(monkeypatch, tmp_path):
     nodes = [
         _node("n1", "fn_one"),
         dict(_node("g", "fn_gone"), file=str(tmp_path / "missing.py")),
-        {"id": "p", "name": "os.system", "kind": "proxy", "file": str(settings), "start_line": 2, "end_line": 2, "status": "modified"},
         {"id": "m", "name": "settings.py", "kind": "module", "file": str(settings), "start_line": 1, "end_line": 2,
          "status": "modified", "diff_hunks": [{"start": 1, "removed": [], "added": ["# a comment"]}]},
     ]
@@ -670,7 +731,6 @@ def test_skipped_nodes_record_why_they_were_not_scanned(monkeypatch, tmp_path):
 
     assert token_usage["skipped_nodes"] == {
         "g": "source not found",
-        "p": "external call target, no source of its own",
         "m": "only comments or blank lines changed",
     }
     assert token_usage["assessed_nodes"] == ["n1"]
