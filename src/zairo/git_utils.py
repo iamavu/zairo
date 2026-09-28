@@ -40,6 +40,82 @@ def remove_worktree(repo_path: str, worktree_path: str) -> None:
         text=True,
     )
 
+
+def _diff_refs(repo_path: str, base: Optional[str], target: Optional[str]) -> List[str]:
+    """The ref argument(s) to pass `git diff` for each mode:
+
+    - base + target: two commits (e.g. HEAD~3..HEAD).
+    - base only:     that commit vs the working tree.
+    - neither:       HEAD vs the working tree -- staged AND unstaged changes.
+                     A bare `git diff` compares against the index instead,
+                     so anything already `git add`ed would silently vanish
+                     from the scan.
+    """
+    if base and target:
+        return [base, target]
+    if base:
+        return [base]
+    head = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", "HEAD"],
+        cwd=repo_path, capture_output=True, text=True,
+    )
+    if head.returncode == 0:
+        return ["HEAD"]
+    # No commits yet, so there's no HEAD to diff against -- use the empty
+    # tree instead (every tracked file counts as added). Hashed rather than
+    # hardcoded so it's right for SHA-256 repos too.
+    empty_tree = subprocess.run(
+        ["git", "hash-object", "-t", "tree", "--stdin"],
+        cwd=repo_path, input="", capture_output=True, text=True,
+    )
+    return [empty_tree.stdout.strip()]
+
+
+# Same binary-detection heuristic git itself uses: a NUL byte in the first
+# 8000 bytes.
+_BINARY_SNIFF_BYTES = 8000
+
+
+def _untracked_file_lines(repo_path: str, log: Callable[[str], None]) -> Dict[str, Dict[int, str]]:
+    """Every line of every untracked (and not .gitignore'd) text file, as if
+    added in full. `git diff` never lists a file git isn't tracking yet, so
+    a brand-new file that hasn't been `git add`ed would otherwise be
+    invisible to the scan -- despite being exactly the kind of uncommitted
+    change it exists to catch."""
+    result = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=repo_path, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        log(f"git ls-files --others failed (exit {result.returncode}): {result.stderr.strip()}")
+        return {}
+
+    lines_by_file = {}
+    for rel_path in result.stdout.split("\0"):
+        if not rel_path:
+            continue
+        abs_path = os.path.abspath(os.path.join(repo_path, rel_path))
+        try:
+            with open(abs_path, "rb") as f:
+                head = f.read(_BINARY_SNIFF_BYTES)
+                if b"\0" in head:
+                    continue
+                data = head + f.read()
+        except OSError:
+            continue
+        # split("\n"), not splitlines(): the latter also breaks on form
+        # feeds and other separators git doesn't, which would shift every
+        # later line number out of step with Trailmark's node locations.
+        lines = data.decode("utf-8", errors="replace").split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()  # trailing newline, not an extra empty line
+        if lines:
+            # rstrip("\r"): CRLF files, matching the diff-derived lines,
+            # which text-mode subprocess output has already normalized.
+            lines_by_file[abs_path] = {i: text.rstrip("\r") for i, text in enumerate(lines, 1)}
+    return lines_by_file
+
+
 def get_changed_file_paths(
     repo_path: str,
     base: str = None,
@@ -49,13 +125,10 @@ def get_changed_file_paths(
     """Repo-relative paths of every file that changed (`git diff --name-only`),
     including a file deleted in its entirety -- unlike get_modified_lines,
     which intentionally excludes those (there's no target-side line range
-    for a fully deleted file to anchor to)."""
+    for a fully deleted file to anchor to). Untracked files aren't listed:
+    they didn't exist at the base, so they can't contain a deletion."""
     log = log or (lambda msg: None)
-    cmd = ["git", "diff", "--name-only"]
-    if base and target:
-        cmd += [base, target]
-    elif base:
-        cmd += [base]
+    cmd = ["git", "diff", "--name-only"] + _diff_refs(repo_path, base, target)
     result = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True)
     if result.returncode != 0:
         log(f"git diff --name-only failed (exit {result.returncode}): {result.stderr.strip()}")
@@ -72,9 +145,13 @@ def get_modified_lines(
     """
     Parses `git diff -U0` to find which lines have been added/modified.
 
-    - No base/target: compares working tree vs HEAD (uncommitted changes).
+    - No base/target: compares working tree vs HEAD (uncommitted changes,
+                      staged or not).
     - base only:      compares working tree vs that commit.
     - base + target:  compares two commits (e.g. HEAD~3..HEAD).
+
+    In both working-tree modes, untracked (not .gitignore'd) files count
+    too, with every line treated as added.
 
     Returns a dict mapping absolute file paths to a dict of
     {target line number: representative changed text}. The text is used to
@@ -92,12 +169,7 @@ def get_modified_lines(
     """
     log = log or (lambda msg: None)
 
-    # Build the git diff command
-    cmd = ["git", "diff", "-U0"]
-    if base and target:
-        cmd += [base, target]
-    elif base:
-        cmd += [base]
+    cmd = ["git", "diff", "-U0"] + _diff_refs(repo_path, base, target)
     log(f"Running: {' '.join(cmd)} (cwd={repo_path})")
     result = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True)
 
@@ -156,4 +228,11 @@ def get_modified_lines(
             pending_deletion_text.append(line[1:])
 
     flush_pending_deletion()
+
+    if not (base and target):
+        untracked = _untracked_file_lines(repo_path, log)
+        if untracked:
+            log(f"Including {len(untracked)} untracked file(s), every line as added")
+            modified_lines.update(untracked)
+
     return dict(modified_lines)

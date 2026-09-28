@@ -34,7 +34,7 @@ zairo backend frontend infra --base main --fail-on high -o zairo_multi_out
 
 **What to scan**
 
-- `--base`, `-b` *(none)*: ref to diff from, e.g. `main` or `HEAD~3`. Left out, `zairo` scans uncommitted changes instead.
+- `--base`, `-b` *(none)*: ref to diff from, e.g. `main` or `HEAD~3`. Left out, `zairo` scans uncommitted changes instead: staged, unstaged, and new untracked files (anything `.gitignore`d is skipped).
 - `--target`, `-t` *(none)*: ref to diff to. Needs `--base`; left out (with `--base` set), it diffs against your working tree.
 - `--depth`, `-d` *(1)*: how many hops of callers/callees to pull into the impact graph around each change.
 - `--language`, `-l` *(auto)*: force a language instead of letting Trailmark auto-detect it.

@@ -1,6 +1,11 @@
+import subprocess
 from pathlib import Path
 
-from zairo.git_utils import get_modified_lines
+from zairo.git_utils import get_changed_file_paths, get_modified_lines
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
 
 
 def test_diff_between_two_commits(git_repo: Path):
@@ -29,3 +34,69 @@ def test_no_base_or_target_diffs_working_tree_vs_head(git_repo: Path):
     # With no changes at all, nothing should show up as modified.
     modified = get_modified_lines(str(git_repo))
     assert modified == {}
+
+
+def test_staged_changes_are_included(git_repo: Path):
+    """A bare `git diff` compares against the index, so a change that's
+    already been `git add`ed would vanish from an uncommitted-changes scan
+    -- it has to be diffed against HEAD instead."""
+    test_py = git_repo / "test.py"
+    test_py.write_text(test_py.read_text() + "def staged(cmd):\n    return os.popen(cmd)\n")
+    _git(git_repo, "add", "test.py")
+
+    modified = get_modified_lines(str(git_repo))
+    file_path = str(test_py.resolve())
+
+    assert file_path in modified
+    assert "os.popen(cmd)" in modified[file_path][5]
+    assert get_changed_file_paths(str(git_repo)) == ["test.py"]
+
+
+def test_untracked_file_counts_as_entirely_added(git_repo: Path):
+    new_py = git_repo / "new.py"
+    new_py.write_text("import os\ndef run(cmd):\n    return os.system(cmd)\n")
+
+    modified = get_modified_lines(str(git_repo))
+
+    assert modified[str(new_py.resolve())] == {
+        1: "import os",
+        2: "def run(cmd):",
+        3: "    return os.system(cmd)",
+    }
+
+
+def test_gitignored_and_binary_untracked_files_are_skipped(git_repo: Path):
+    (git_repo / ".gitignore").write_text("ignored.py\n")
+    (git_repo / "ignored.py").write_text("def f():\n    pass\n")
+    (git_repo / "blob.bin").write_bytes(b"\x00\x01\x02")
+
+    modified = get_modified_lines(str(git_repo))
+
+    assert str((git_repo / "ignored.py").resolve()) not in modified
+    assert str((git_repo / "blob.bin").resolve()) not in modified
+
+
+def test_untracked_files_not_included_when_diffing_two_commits(git_repo: Path):
+    """base + target compares two commits -- whatever happens to be lying
+    around untracked in the working tree isn't part of either."""
+    (git_repo / "new.py").write_text("def f():\n    pass\n")
+
+    modified = get_modified_lines(str(git_repo), "HEAD~1", "HEAD")
+
+    assert str((git_repo / "new.py").resolve()) not in modified
+
+
+def test_repo_with_no_commits_yet(tmp_path: Path):
+    """No HEAD to diff against: every staged and untracked file counts as
+    added, instead of `git diff HEAD` erroring out and finding nothing."""
+    repo = tmp_path / "fresh"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "staged.py").write_text("def a():\n    pass\n")
+    _git(repo, "add", "staged.py")
+    (repo / "untracked.py").write_text("def b():\n    pass\n")
+
+    modified = get_modified_lines(str(repo))
+
+    assert set(modified[str((repo / "staged.py").resolve())]) == {1, 2}
+    assert set(modified[str((repo / "untracked.py").resolve())]) == {1, 2}
