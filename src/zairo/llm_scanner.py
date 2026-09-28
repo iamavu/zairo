@@ -29,6 +29,9 @@ def _ensure_litellm():
 
 from ._util import display_name as _display_name, normalize_confidence, normalize_cwe, normalize_severity
 from .git_utils import hunk_lines
+from .notes import (
+    build_notes_prompt, format_note, is_notable, is_partial, load_notes, note_key, save_notes, validated_note,
+)
 
 # Comment/blank-only diffs (docs, version bumps, log messages) can't produce a
 # real vulnerability finding — skip them before spending an LLM call.
@@ -315,12 +318,30 @@ def _neighbor_code(n: Dict[str, Any], call_lines: List[int]) -> Tuple[str, bool]
 _ROLE_LABELS = {"caller": "Caller", "callee": "Callee"}
 
 
+_TRUST_LABELS = {
+    "untrusted_external": "untrusted input",
+    "semi_trusted_external": "semi-trusted input",
+    "trusted_internal": "trusted/internal input",
+}
+
+
+def _entry_label(n: Dict[str, Any]) -> str:
+    """What kind of entry point a node is, e.g. "Python HTTP route
+    decorator, untrusted input"."""
+    entry = n['entrypoint']
+    label = entry.get('description') or entry.get('kind') or "entry point"
+    trust = _TRUST_LABELS.get(entry.get('trust'))
+    return f"{label}, {trust}" if trust else label
+
+
 def _neighbor_snippet(n: Dict[str, Any], roles: Set[str], call_lines: List[int], mod_name: str) -> Optional[str]:
     code, around_calls = _neighbor_code(n, call_lines)
     if not code:
         return None
     label = ", ".join(_ROLE_LABELS.get(role, f"Related ({role})") for role in sorted(roles, key=lambda r: (r not in _ROLE_LABELS, r)))
     header = f"{label}: {n.get('name', '?')}"
+    if n.get('entrypoint'):
+        header += f" (entry point: {_entry_label(n)})"
     if n.get('status') in ('modified', 'added'):
         header += " (also changed in this change)"
     if around_calls:
@@ -328,11 +349,20 @@ def _neighbor_snippet(n: Dict[str, Any], roles: Set[str], call_lines: List[int],
     return f"{header}\n```\n{code}\n```"
 
 
-def _neighbor_contexts(mod_node: Dict[str, Any], nodes: Dict[str, Dict[str, Any]], edges: List[Dict[str, Any]]) -> List[str]:
+def _no_note(n: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    return None
+
+
+def _neighbor_contexts(
+    mod_node: Dict[str, Any], nodes: Dict[str, Dict[str, Any]], edges: List[Dict[str, Any]],
+    note_of: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]] = _no_note,
+) -> Tuple[List[str], List[str], Set[str]]:
     """The code around a changed node that the prompt shows for context:
     its direct callers and callees, and whatever else it's linked to, from
     `edges` (which need only be the ones touching it) -- up to
-    _MAX_NEIGHBORS of them in full, and the rest by name."""
+    _MAX_NEIGHBORS of them in full. Returns (contexts, noted, direct ids):
+    the rest go into `noted` as note lines when --warm-up wrote a note for
+    them, and are listed by name at the end of `contexts` otherwise."""
     roles: Dict[str, Set[str]] = {}
     call_lines: Dict[str, List[int]] = {}
     for e in edges:
@@ -370,22 +400,126 @@ def _neighbor_contexts(mod_node: Dict[str, Any], nodes: Dict[str, Dict[str, Any]
     # then by id: sorted either way, since the prompt, and so its cache key,
     # can't depend on edge order.
     candidates.sort(key=lambda n_id: (nodes[n_id].get('status') not in ('modified', 'added'), n_id))
-    contexts, unshown = [], []
+    contexts, noted, unshown = [], [], []
     for n_id in candidates:
-        if len(contexts) == _MAX_NEIGHBORS:
-            unshown.append(n_id)
+        if len(contexts) < _MAX_NEIGHBORS:
+            snippet = _neighbor_snippet(nodes[n_id], roles[n_id], call_lines.get(n_id, []), mod_node['name'])
+            if snippet:
+                contexts.append(snippet)
             continue
-        snippet = _neighbor_snippet(nodes[n_id], roles[n_id], call_lines.get(n_id, []), mod_node['name'])
-        if snippet:
-            contexts.append(snippet)
+        label = f"{_display_name(nodes[n_id].get('name', n_id))} ({', '.join(sorted(roles[n_id]))})"
+        note = note_of(nodes[n_id])
+        if note:
+            noted.append(f"- {label}: {format_note(note)}")
+        else:
+            unshown.append(label)
     if unshown:
-        listed = [
-            f"{_display_name(nodes[n_id].get('name', n_id))} ({', '.join(sorted(roles[n_id]))})"
-            for n_id in unshown[:_MAX_UNSHOWN_NAMES]
-        ]
+        listed = unshown[:_MAX_UNSHOWN_NAMES]
         more = f", and {len(unshown) - len(listed)} more" if len(unshown) > len(listed) else ""
         contexts.append(f"{len(unshown)} more related symbol(s), not shown: {', '.join(listed)}{more}")
-    return contexts
+    return contexts, noted, set(roles)
+
+
+# How far up the callers to look for an entry point, and how many of the
+# paths found to show.
+_REACH_MAX_HOPS = 4
+_REACH_MAX_PATHS = 3
+
+
+def _reach_section(
+    mod_node: Dict[str, Any], nodes: Dict[str, Dict[str, Any]], calls_in: Dict[str, List[str]], any_entrypoints: bool,
+) -> str:
+    """How a changed function is reached from the repo's entry points (HTTP
+    routes, CLI commands, ...), following callers up to _REACH_MAX_HOPS
+    calls -- what the model needs to say who can trigger a flaw in it.
+    Nothing when the repo has no entry point Trailmark recognizes: "none
+    found" would then say nothing about this function."""
+    if mod_node.get('kind') not in ('function', 'method'):
+        return ""
+    name = mod_node['name']
+    if mod_node.get('entrypoint'):
+        return f"Entry point: {name} is itself one ({_entry_label(mod_node)})."
+    if not any_entrypoints:
+        return ""
+    paths, seen, frontier = [], {mod_node['id']}, [[mod_node['id']]]
+    for _hop in range(_REACH_MAX_HOPS):
+        next_frontier = []
+        for path in frontier:
+            for caller in sorted(set(calls_in.get(path[-1], []))):
+                n = nodes.get(caller)
+                if caller in seen or n is None or n.get('status') == 'deleted' or n.get('kind') == 'proxy':
+                    continue
+                seen.add(caller)
+                (paths if n.get('entrypoint') else next_frontier).append(path + [caller])
+        frontier = next_frontier
+        if len(paths) >= _REACH_MAX_PATHS or not frontier:
+            break
+    if not paths:
+        return (
+            f"No entry point found within {_REACH_MAX_HOPS} calls up from {name}. It may still be reachable "
+            f"in ways the call graph doesn't show (callbacks, dynamic dispatch, frameworks zairo doesn't recognize)."
+        )
+    lines = []
+    for path in paths[:_REACH_MAX_PATHS]:
+        entry = nodes[path[-1]]
+        chain = " -> ".join(nodes[n_id]['name'] for n_id in reversed(path[:-1]))
+        lines.append(f"- {entry['name']} (entry point: {_entry_label(entry)}) -> {chain}")
+    more = "\n- (and possibly more)" if len(paths) > _REACH_MAX_PATHS else ""
+    return f"Reached from entry points (callers, up to {_REACH_MAX_HOPS} calls up):\n" + "\n".join(lines) + more
+
+
+# How many callers of its callers, and callees of its callees, to note.
+_SECOND_HOP_MAX = 10
+
+
+def _notes_section(
+    mod_node: Dict[str, Any], nodes: Dict[str, Dict[str, Any]], calls_in: Dict[str, List[str]],
+    calls_out: Dict[str, List[str]], noted: List[str], direct_ids: Set[str],
+    note_of: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]],
+) -> str:
+    """--warm-up's notes on code further out than the prompt shows in full:
+    direct neighbors past the cap (`noted`), callers of its callers, and
+    what its callees call. Only code that has a note is listed."""
+    exclude = direct_ids | {mod_node['id']}
+
+    def live(n_id: str) -> bool:
+        # Not a deleted function: its edges are the old code's calls.
+        n = nodes.get(n_id)
+        return n is not None and n.get('kind') != 'proxy' and n.get('status') != 'deleted'
+
+    def second_hop(first_hop: Dict[str, List[str]], second: Dict[str, List[str]], relation: str) -> List[str]:
+        via: Dict[str, str] = {}
+        for hop1 in sorted(set(first_hop.get(mod_node['id'], []))):
+            if not live(hop1):
+                continue
+            for hop2 in sorted(set(second.get(hop1, []))):
+                if hop2 not in exclude and hop2 not in via and live(hop2):
+                    via[hop2] = hop1
+        lines = []
+        for hop2 in sorted(via):
+            note = note_of(nodes[hop2])
+            if note:
+                lines.append(f"- {nodes[hop2]['name']} ({relation} {nodes[via[hop2]]['name']}): {format_note(note)}")
+            if len(lines) == _SECOND_HOP_MAX:
+                break
+        return lines
+
+    parts = []
+    if noted:
+        parts.append("Its other direct callers and callees, not shown above:\n" + "\n".join(noted))
+    up = second_hop(calls_in, calls_in, "calls")
+    if up:
+        parts.append("Callers of its callers:\n" + "\n".join(up))
+    down = second_hop(calls_out, calls_out, "called by")
+    if down:
+        parts.append("What its callees call:\n" + "\n".join(down))
+    if not parts:
+        return ""
+    return (
+        "Notes on more related code -- machine-written summaries of what each function's own code does. "
+        "They're hints and may be wrong, and you haven't seen this code: don't report findings in it.\n"
+        + "\n".join(parts)
+    )
 
 
 _TRACEBACK_MARKER = "Traceback (most recent call last):"
@@ -565,24 +699,30 @@ _FINDING_FORMAT = """Each finding is an object with these keys:
 - 'cwe': the single most applicable CWE identifier in the form "CWE-<number>" (e.g. "CWE-78" for OS command injection, "CWE-89" for SQL injection), or null if none clearly applies -- don't guess one that doesn't fit.
 - 'line': the line number (from the numbered code, the number before the "|") of the one line that most directly shows the problem -- for a removed protection, the line where it used to apply.
 - 'introduced_by_change': true if this change introduced the vulnerability or made it reachable, including by removing or weakening a protection; false if it was already there before the change.
-- 'trigger': one sentence on who can trigger it and how, based on the code shown (e.g. "any logged-in user, by changing invoice_id in the URL").
+- 'trigger': one sentence on who can trigger it and how, based on the code shown and how it's reached (e.g. "any logged-in user, by changing invoice_id in the URL").
 - 'confidence': how sure you are that it's real and exploitable as described -- "high", "medium", or "low". This is separate from severity: a critical-if-real issue you're unsure about is severity "critical", confidence "low"."""
 
 
-def _node_section(mod_node: Dict[str, Any], mod_code: str, diff_text: str, neighbor_contexts: List[str]) -> str:
+def _node_section(
+    mod_node: Dict[str, Any], mod_code: str, diff_text: str, neighbor_contexts: List[str],
+    reach_text: str = "", notes_text: str = "",
+) -> str:
     """One node's part of a prompt -- its code after the change, what the
-    change did to it, and its callers/callees -- shared by the single-node
-    and batch prompts so both always describe a node the same way."""
+    change did to it, how it's reached, its callers/callees, and notes on
+    code further out -- shared by the single-node and batch prompts so both
+    always describe a node the same way."""
     kind_label = mod_node.get('kind') or 'function'
     diff_part = f"\n{diff_text}" if diff_text else ""
+    reach_part = f"\n{reach_text}" if reach_text else ""
     context_part = (
         f"\nRelated code, for context (its callers, callees and other links):\n{chr(10).join(neighbor_contexts)}"
         if neighbor_contexts else ""
     )
+    notes_part = f"\n{notes_text}" if notes_text else ""
     return f"""Modified {kind_label.capitalize()}: {mod_node['name']} (after the change)
 ```
 {mod_code}
-```{diff_part}{context_part}"""
+```{diff_part}{reach_part}{context_part}{notes_part}"""
 
 
 def _build_prompt(mod_node: Dict[str, Any], section: str) -> str:
@@ -633,6 +773,7 @@ def scan_graph_for_vulnerabilities(
     debug_log: Optional[Callable[[str], None]] = None,
     batch_size: int = 1,
     context: Optional[Dict[str, Any]] = None,
+    notes_path: Optional[str] = None,
 ) -> Tuple[Dict[str, List[Dict]], Dict[str, int]]:
     """Returns (vulnerabilities, token_usage). token_usage has
     prompt_tokens/completion_tokens/total_tokens summed across every real
@@ -670,7 +811,12 @@ def scan_graph_for_vulnerabilities(
     other definitions in its file -- while graph_data only says which nodes
     to scan. analyze_impact() returns the whole graph for it, so what the
     model sees doesn't depend on how far --depth took the report's graph.
-    Defaults to graph_data itself."""
+    Defaults to graph_data itself.
+
+    `notes_path` is where --warm-up keeps its notes (see write_notes). A
+    scan only reads them: they fill in code further out than the prompt
+    shows in full. Nodes' `entrypoint`s (from the analyzer) say how each
+    changed function is reached."""
     log = log or (lambda msg: None)
     log_lock = threading.Lock()
 
@@ -689,11 +835,24 @@ def scan_graph_for_vulnerabilities(
         if n.get('file'):
             nodes_by_file.setdefault(n['file'], []).append(n)
     edges_by_node: Dict[str, List[Dict[str, Any]]] = {}
+    calls_in: Dict[str, List[str]] = {}
+    calls_out: Dict[str, List[str]] = {}
     for e in context['edges']:
         edges_by_node.setdefault(e['source'], []).append(e)
         if e['target'] != e['source']:
             edges_by_node.setdefault(e['target'], []).append(e)
+        if e.get('kind') == 'calls':
+            calls_in.setdefault(e['target'], []).append(e['source'])
+            calls_out.setdefault(e['source'], []).append(e['target'])
+    any_entrypoints = any(n.get('entrypoint') for n in context['nodes'])
     cache = _load_cache(cache_path)
+    notes = load_notes(notes_path)
+
+    def note_of(n: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not notes or not is_notable(n):
+            return None
+        code = get_source_code(n['file'], n['start_line'], n['end_line'])
+        return notes.get(note_key(code)) if code.strip() else None
 
     def skip(node: Dict[str, Any], reason: str) -> None:
         """A changed node deliberately not sent to the model -- recorded with
@@ -773,9 +932,13 @@ def scan_graph_for_vulnerabilities(
             if outline:
                 mod_code = outline + "\n\n" + mod_code
 
-        neighbor_contexts = _neighbor_contexts(mod_node, nodes, edges_by_node.get(mod_node['id'], []))
+        neighbor_contexts, noted, direct_ids = _neighbor_contexts(
+            mod_node, nodes, edges_by_node.get(mod_node['id'], []), note_of,
+        )
+        reach_text = _reach_section(mod_node, nodes, calls_in, any_entrypoints)
+        notes_text = _notes_section(mod_node, nodes, calls_in, calls_out, noted, direct_ids, note_of)
         diff_text = _diff_section(hunks, fully_added, mod_node.get('kind') or 'function')
-        section = _node_section(mod_node, mod_code, diff_text, neighbor_contexts)
+        section = _node_section(mod_node, mod_code, diff_text, neighbor_contexts, reach_text, notes_text)
 
         # Keyed on the full single-node prompt, not just the code inside it,
         # so changing the prompt's wording or answer format invalidates
@@ -972,3 +1135,113 @@ def scan_graph_for_vulnerabilities(
 
     _save_cache(cache_path, cache)
     return vulnerabilities, token_usage
+
+
+# Functions noted per --warm-up request: notes are short, so batching them
+# saves most of the requests' repeated instructions.
+_NOTES_PER_REQUEST = 10
+
+
+def write_notes(
+    nodes: List[Dict[str, Any]],
+    model: str,
+    notes_path: str,
+    log: Optional[Callable[[str], None]] = None,
+    concurrency: int = 5,
+    max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
+    debug_log: Optional[Callable[[str], None]] = None,
+    on_event: Optional[Callable[..., None]] = None,
+) -> Dict[str, Any]:
+    """--warm-up: writes a note (see notes.py) for every function and method
+    in `nodes` that doesn't have one yet, _NOTES_PER_REQUEST to a request,
+    and saves them to `notes_path` -- also when interrupted, keeping the
+    ones done so far. Identical functions share one note. Returns counts:
+    written, cached (already had one), failed, requests, total_tokens, and
+    errors ({message: number of functions it cost a note})."""
+    log = log or (lambda msg: None)
+    on_event = on_event or (lambda event, **kwargs: None)
+    log_lock = threading.Lock()
+
+    def safe_log(msg: str) -> None:
+        with log_lock:
+            log(msg)
+
+    notes = load_notes(notes_path)
+    todo: Dict[str, Tuple[Dict[str, Any], str]] = {}
+    cached = 0
+    for n in sorted(nodes, key=lambda n: n['id']):
+        if not is_notable(n):
+            continue
+        code = get_source_code(n['file'], n['start_line'], n['end_line'])
+        if not code.strip():
+            continue
+        key = note_key(code)
+        if key in notes:
+            cached += 1
+        elif key not in todo:
+            todo[key] = (n, code)
+
+    stats = {"written": 0, "cached": cached, "failed": 0, "requests": 0, "total_tokens": 0, "errors": {}}
+    on_event("notes_started", model=model, to_write=len(todo), cached=cached)
+    items = list(todo.items())
+    groups = [items[i:i + _NOTES_PER_REQUEST] for i in range(0, len(items), _NOTES_PER_REQUEST)]
+
+    def run(group):
+        """Returns ([(key, note or None, error or None)], total tokens)."""
+        prompt = build_notes_prompt([(n['name'], code) for _key, (n, code) in group])
+        label = f"notes for {len(group)} function(s): " + ", ".join(_display_name(n['name']) for _key, (n, _code) in group)
+        if debug_log:
+            debug_log(f"\n{'='*80}\nPROMPT -- {label}\n{'='*80}\n{prompt}\n")
+        tokens = 0
+        try:
+            response = litellm.completion(model=model, messages=[{"role": "user", "content": prompt}], max_tokens=max_tokens)
+            usage = getattr(response, 'usage', None)
+            tokens = (getattr(usage, 'total_tokens', 0) or 0) if usage is not None else 0
+            content = response.choices[0].message.content or ""
+            if debug_log:
+                debug_log(f"\n{'-'*80}\nRESPONSE -- {label}\n{'-'*80}\n{content}\n")
+            if not content.strip():
+                raise ValueError("model returned empty content -- try a higher --max-tokens")
+            parsed = _extract_json(content)
+        except Exception as e:
+            safe_log(f"  error writing {label}: {e}")
+            return [(key, None, _summarize_error(e)) for key, _ in group], tokens
+        results = []
+        for i, (key, (n, code)) in enumerate(group, 1):
+            note = validated_note(parsed.get(f"F{i}"))
+            if note is None:
+                results.append((key, None, "model gave no usable note for this function"))
+            else:
+                results.append((key, dict(note, partial=is_partial(code), model=model), None))
+        return results, tokens
+
+    try:
+        if groups:
+            _ensure_litellm()
+            with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+                futures = [pool.submit(run, group) for group in groups]
+                try:
+                    for done, future in enumerate(as_completed(futures), 1):
+                        results, tokens = future.result()
+                        stats["requests"] += 1
+                        stats["total_tokens"] += tokens
+                        for key, note, error in results:
+                            if note is None:
+                                stats["failed"] += 1
+                                stats["errors"][error] = stats["errors"].get(error, 0) + 1
+                            else:
+                                notes[key] = note
+                                stats["written"] += 1
+                        safe_log(f"  notes: {done}/{len(groups)} request(s) done")
+                except BaseException:
+                    # Interrupted (Ctrl-C): leaving the pool waits for every
+                    # queued request, which on a big warm-up is most of them.
+                    # Only the ones already running are waited for.
+                    for future in futures:
+                        future.cancel()
+                    raise
+    finally:
+        if stats["written"]:
+            save_notes(notes_path, notes)
+    on_event("notes_done", **stats)
+    return stats

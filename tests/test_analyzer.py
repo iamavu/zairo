@@ -190,6 +190,24 @@ def test_context_is_the_whole_graph_whatever_the_depth(git_repo: Path):
     assert edge["lines"] == [5]
 
 
+def test_entry_points_are_marked_but_not_from_a_neighbors_decorator(git_repo: Path):
+    """Trailmark looks for decorators in a window of lines around each
+    function, which reaches the route decorator above upload() from the
+    helper right after it: save() isn't a route."""
+    _commit_file(
+        git_repo, "app.py",
+        "from flask import Flask\napp = Flask(__name__)\n\n\n@app.route('/upload', methods=['POST'])\n"
+        "def upload():\n    return save(1)\n\n\ndef save(f):\n    return f\n",
+        "add app",
+    )
+
+    _, context = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+
+    by_name = {n["name"]: n for n in context["nodes"]}
+    assert by_name["upload"]["entrypoint"] == {"kind": "api", "trust": "untrusted_external", "description": "Python HTTP route decorator"}
+    assert "entrypoint" not in by_name["save"]
+
+
 def test_no_deleted_nodes_when_nothing_was_deleted(git_repo: Path):
     """Diffing a ref against itself: nothing changed, so nothing should be
     reported as deleted either."""

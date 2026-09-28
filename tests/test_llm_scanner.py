@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 import zairo
 import zairo.llm_scanner as llm_scanner
+import zairo.notes as notes
 
 # A real, short file to use as node source -- llm_scanner skips nodes whose
 # source can't be read at all, so the mocked litellm call would never
@@ -749,3 +750,162 @@ def test_replacing_module_code_with_a_comment_is_not_trivial(monkeypatch, tmp_pa
     llm_scanner.scan_graph_for_vulnerabilities({"nodes": [module], "edges": []}, "fake-model", cache_path=None)
 
     assert fake_litellm.completion.call_count == 1
+
+
+_NOTE = {"does": "Handles the upload request", "inputs": "req", "checks": "none", "sinks": "none", "passes_on": "req to mid()"}
+
+
+def _fake_llm(monkeypatch, scan_answer='{"vulnerabilities": []}', note=_NOTE, drop_labels=()) -> MagicMock:
+    """Answers note requests (see notes.NOTE_INSTRUCTIONS) with `note` for
+    every function label in them but `drop_labels`, and scan requests with
+    `scan_answer`."""
+    fake_litellm = MagicMock()
+
+    def complete(model, messages, max_tokens):
+        prompt = messages[0]["content"]
+        response = MagicMock()
+        response.usage = None
+        response.choices[0].finish_reason = "stop"
+        if prompt.startswith(notes.NOTE_INSTRUCTIONS):
+            labels = [label for label in re.findall(r"^=== (F\d+): ", prompt, re.M) if label not in drop_labels]
+            response.choices[0].message.content = json.dumps({label: note for label in labels})
+        else:
+            response.choices[0].message.content = scan_answer
+        return response
+
+    fake_litellm.completion.side_effect = complete
+    monkeypatch.setattr(llm_scanner, "litellm", fake_litellm)
+    monkeypatch.setattr(llm_scanner, "_ensure_litellm", lambda: fake_litellm)
+    return fake_litellm
+
+
+def _note_prompts(fake_litellm: MagicMock) -> list:
+    return [p for p in _prompts(fake_litellm) if p.startswith(notes.NOTE_INSTRUCTIONS)]
+
+
+def _scan_prompts(fake_litellm: MagicMock) -> list:
+    return [p for p in _prompts(fake_litellm) if not p.startswith(notes.NOTE_INSTRUCTIONS)]
+
+
+def _functions(tmp_path, count):
+    src = tmp_path / "many.py"
+    src.write_text("".join(f"def f_{i:02}(x):\n    return x + {i}\n\n" for i in range(count)))
+    return [{"id": f"f{i:02}", "name": f"f_{i:02}", "kind": "function", "file": str(src), "start_line": 1 + 3 * i,
+             "end_line": 2 + 3 * i, "status": "unchanged"} for i in range(count)]
+
+
+def test_warm_up_notes_every_function_once(monkeypatch, tmp_path):
+    fake_litellm = _fake_llm(monkeypatch)
+    notes_path = str(tmp_path / "notes.json")
+    nodes = _functions(tmp_path, 12)
+
+    first = llm_scanner.write_notes(nodes, "cheap-model", notes_path)
+    second = llm_scanner.write_notes(nodes, "cheap-model", notes_path)
+
+    assert (first["written"], first["cached"], first["failed"], first["requests"]) == (12, 0, 0, 2)  # 10 + 2
+    assert (second["written"], second["cached"], second["requests"]) == (0, 12, 0)
+    assert len(_note_prompts(fake_litellm)) == 2
+    saved = notes.load_notes(notes_path)
+    assert len(saved) == 12
+    assert all(note["model"] == "cheap-model" and note["partial"] is False for note in saved.values())
+
+
+def test_warm_up_counts_functions_the_model_gave_no_note_for(monkeypatch, tmp_path):
+    _fake_llm(monkeypatch, drop_labels=("F2",))
+    notes_path = str(tmp_path / "notes.json")
+
+    stats = llm_scanner.write_notes(_functions(tmp_path, 3), "cheap-model", notes_path)
+
+    assert (stats["written"], stats["failed"]) == (2, 1)
+    assert stats["errors"] == {"model gave no usable note for this function": 1}
+    assert len(notes.load_notes(notes_path)) == 2
+
+
+def test_warm_up_failure_writes_nothing_and_says_why(monkeypatch, tmp_path):
+    _mock_litellm(monkeypatch, RuntimeError("AuthenticationError: no API key"))
+    notes_path = tmp_path / "notes.json"
+
+    stats = llm_scanner.write_notes(_functions(tmp_path, 3), "cheap-model", str(notes_path))
+
+    assert (stats["written"], stats["failed"]) == (0, 3)
+    assert "AuthenticationError" in next(iter(stats["errors"]))
+    assert not notes_path.exists()
+
+
+def _chain(tmp_path, entrypoint=True):
+    """entry (an HTTP route) -> mid -> target, which changed."""
+    src = tmp_path / "lib.py"
+    src.write_text("def entry(req):\n    return mid(req)\n\ndef mid(x):\n    return target(x)\n\ndef target(y):\n    return run(y)\n")
+    entry = {"id": "e", "name": "entry", "kind": "function", "file": str(src), "start_line": 1, "end_line": 2, "status": "unchanged"}
+    if entrypoint:
+        entry["entrypoint"] = {"kind": "api", "trust": "untrusted_external", "description": "Python HTTP route decorator"}
+    mid = {"id": "m", "name": "mid", "kind": "function", "file": str(src), "start_line": 4, "end_line": 5, "status": "unchanged"}
+    target = {"id": "t", "name": "target", "kind": "function", "file": str(src), "start_line": 7, "end_line": 8,
+              "status": "modified", "diff_hunks": [{"start": 8, "removed": ["    return y"], "added": ["    return run(y)"]}]}
+    edges = [{"source": "e", "target": "m", "kind": "calls", "confidence": "certain", "lines": [2]},
+             {"source": "m", "target": "t", "kind": "calls", "confidence": "certain", "lines": [5]}]
+    return {"nodes": [entry, mid, target], "edges": edges}
+
+
+def test_scan_shows_notes_on_callers_of_its_callers(monkeypatch, tmp_path):
+    fake_litellm = _fake_llm(monkeypatch)
+    graph = _chain(tmp_path)
+    notes_path = str(tmp_path / "notes.json")
+    llm_scanner.write_notes(graph["nodes"], "cheap-model", notes_path)
+
+    llm_scanner.scan_graph_for_vulnerabilities(graph, "fake-model", cache_path=None, notes_path=notes_path)
+
+    [prompt] = _scan_prompts(fake_litellm)
+    notes_part = prompt.split("Notes on more related code")[1]
+    assert "machine-written summaries" in notes_part and "don't report findings in it" in notes_part
+    assert "Callers of its callers:\n- entry (calls mid): does: Handles the upload request; inputs: req; checks: none" in notes_part
+    assert "Caller: mid\n```" in prompt  # the direct caller is still shown in full
+
+
+def test_scan_without_notes_has_no_notes_section(monkeypatch, tmp_path):
+    fake_litellm = _fake_llm(monkeypatch)
+
+    llm_scanner.scan_graph_for_vulnerabilities(_chain(tmp_path), "fake-model", cache_path=None, notes_path=str(tmp_path / "none.json"))
+
+    [prompt] = _scan_prompts(fake_litellm)
+    assert "Notes on more related code" not in prompt
+
+
+def test_neighbors_past_the_cap_get_their_note_instead_of_just_a_name(monkeypatch, tmp_path):
+    fake_litellm = _fake_llm(monkeypatch)
+    helper, callers, edges = _helper_and_callers(tmp_path, 10)
+    notes_path = str(tmp_path / "notes.json")
+    llm_scanner.write_notes(callers, "cheap-model", notes_path)
+
+    llm_scanner.scan_graph_for_vulnerabilities({"nodes": [helper, *callers], "edges": edges}, "fake-model", cache_path=None, notes_path=notes_path)
+
+    [prompt] = _scan_prompts(fake_litellm)
+    assert "Its other direct callers and callees, not shown above:\n- caller_08 (caller): does: Handles" in prompt
+    assert "- caller_09 (caller): does: Handles" in prompt
+    assert "not shown: caller_08" not in prompt
+
+
+def test_scan_says_how_a_changed_function_is_reached(monkeypatch, tmp_path):
+    fake_litellm = _fake_llm(monkeypatch)
+
+    llm_scanner.scan_graph_for_vulnerabilities(_chain(tmp_path), "fake-model", cache_path=None)
+
+    [prompt] = _scan_prompts(fake_litellm)
+    assert (
+        "Reached from entry points (callers, up to 4 calls up):\n"
+        "- entry (entry point: Python HTTP route decorator, untrusted input) -> mid -> target"
+    ) in prompt
+
+
+def test_no_path_to_an_entry_point_is_said_only_when_the_repo_has_some(monkeypatch, tmp_path):
+    """With no entry point Trailmark recognizes anywhere, "none found" would
+    say nothing about this function."""
+    fake_litellm = _fake_llm(monkeypatch)
+    graph = _chain(tmp_path, entrypoint=False)
+    llm_scanner.scan_graph_for_vulnerabilities(graph, "fake-model", cache_path=None)
+    assert "entry point" not in _scan_prompts(fake_litellm)[0]
+
+    other = {"id": "o", "name": "other_route", "kind": "function", "file": graph["nodes"][0]["file"], "start_line": 1,
+             "end_line": 2, "status": "unchanged", "entrypoint": {"kind": "api", "trust": "untrusted_external", "description": "route"}}
+    llm_scanner.scan_graph_for_vulnerabilities({"nodes": graph["nodes"] + [other], "edges": graph["edges"]}, "fake-model", cache_path=None)
+    assert "No entry point found within 4 calls up from target." in _scan_prompts(fake_litellm)[1]

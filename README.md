@@ -51,6 +51,8 @@ zairo backend frontend infra --from main --fail-on high -o zairo_multi_out
 - `--max-tokens` *(4096)*: output budget per request. Reasoning models burn this on internal thinking too, so raise it if you see empty responses.
 - `--cache` / `--no-cache` *(cache on)*: skip re-scanning code that's unchanged since the last run (cached by content hash in `<output>/.llm_cache.json`).
 - `--tokens` *(off)*: print how many tokens the scan actually used (cache hits don't count, since they made no call).
+- `--warm-up` *(off)*: before scanning, write a short note on what each function in the repo does, skipping ones already noted. Scans read these notes as hints about code they don't show in full. See [Warm-up notes](#warm-up-notes).
+- `--notes-model` *(`--model`)*: the model `--warm-up` writes notes with. A cheaper model is usually fine. Needs `--warm-up`.
 
 **Output & gating**
 
@@ -69,7 +71,7 @@ Run `zairo --help` any time for this same list from the CLI.
 
 ## Output files
 
-- **`report.json`** *(always)*: the raw impact graph as data: `symbols` (functions, classes, modules, with any attached findings) and the `connections` between them. Each changed symbol carries its `diff_hunks`: the lines the change removed and added there, which is also what the model is shown alongside the code. Each connection has a `source` and `target` symbol id, a `kind` (`calls`, `contains`, `inherits`, ...) and `lines`: where in its source's file it occurs (for a call, every call site), when Trailmark knows. The model sees a long caller around those call sites rather than from the top. After a vulnerability scan, `scan_complete` says whether every symbol got assessed, and each one that didn't carries a `scan_error` saying why. A changed symbol left out on purpose (a comment-only change, source that can't be read, ...) carries a `scan_skipped` reason instead. Modules are named by their file path (`src/config/settings.local.ts`); their `id` is Trailmark's dotted form of it, which escapes dots in file names (`src.config.settings\.local`). Each finding has a `title`, `description`, `impact`, `severity` and `cwe`, plus:
+- **`report.json`** *(always)*: the raw impact graph as data: `symbols` (functions, classes, modules, with any attached findings) and the `connections` between them. Each changed symbol carries its `diff_hunks`: the lines the change removed and added there, which is also what the model is shown alongside the code. Each connection has a `source` and `target` symbol id, a `kind` (`calls`, `contains`, `inherits`, ...) and `lines`: where in its source's file it occurs (for a call, every call site), when Trailmark knows. The model sees a long caller around those call sites rather than from the top. After a vulnerability scan, `scan_complete` says whether every symbol got assessed, and each one that didn't carries a `scan_error` saying why. A changed symbol left out on purpose (a comment-only change, source that can't be read, ...) carries a `scan_skipped` reason instead. A symbol Trailmark recognizes as an entry point (an HTTP route, a CLI command, a task handler, ...) carries an `entrypoint`: its `kind`, `trust` and `description`. Modules are named by their file path (`src/config/settings.local.ts`); their `id` is Trailmark's dotted form of it, which escapes dots in file names (`src.config.settings\.local`). Each finding has a `title`, `description`, `impact`, `severity` and `cwe`, plus:
   - `line`: the line it's about. The model is shown numbered code, and a line it cites is kept only if it was one of those shown; otherwise it's `null`.
   - `introduced_by_change`: `true` if this change introduced it or made it reachable (for example by removing a check), `false` if it was already there.
   - `trigger`: who can trigger it, and how.
@@ -78,6 +80,24 @@ Run `zairo --help` any time for this same list from the CLI.
 - **`report.sarif`** *(unless `--graph-only` is used)*: findings in [SARIF 2.1.0](https://sarifweb.azurewebsites.net/), for GitHub code scanning or any other SARIF consumer. Always written, even for a clean scan (an empty-but-valid log), so a scanning UI can mark previously reported alerts resolved. Findings are grouped into rules by CWE when the model tagged one, so recurring issues of the same kind collapse into one rule instead of a new one per wording variant. Each result points at the line its finding cites (or where the function starts, if it cited none), and carries `symbol` (the function or class it's in), `introducedByChange` and `confidence` as properties. An incomplete scan is marked `executionSuccessful: false`, with an error notification per symbol that couldn't be assessed.
 
 Multi-repo mode produces the same three files per repo, plus `rollup.json` / `rollup.html` / `rollup.sarif`: per-repo status (including `incomplete` scans) and severity counts, a dashboard table linking into each repo's reports, and every repo's SARIF results merged into one multi-run log.
+
+### What the model sees
+
+For each changed function, the model gets:
+
+- **The code after the change**, numbered, and **the diff**: what was removed and added.
+- **How it's reached**: the paths from the repo's entry points (HTTP routes, CLI commands, task handlers, ... as Trailmark recognizes them) up to 4 calls away, e.g. `upload (entry point: Python HTTP route decorator, untrusted input) -> save_file -> write_blob`. When the repo has entry points but none reaches this function, it says so.
+- **Its direct callers and callees**: up to 8 in full, with a long caller shown around where it calls the changed code.
+- **Notes on code further out**, if `--warm-up` has written them: callers of its callers, what its callees call, and the direct neighbors past the 8.
+
+### Warm-up notes
+
+`zairo . --warm-up` writes a short note on each function and method in the repo before scanning: what it does, where its data comes from, the checks it performs, the security-sensitive operations it performs (SQL, shell, file paths, HTML output, ...), and what it passes to which calls. Notes are about each function's own code only: a note names the calls a function makes, never what they do. So a note stays right when anything else changes, and if `sanitize()` becomes a no-op, no caller's note still claims it escapes anything.
+
+- The notes are kept in `<output>/.notes_cache.json`, keyed on each function's code, so a later warm-up only notes new or changed functions. Every scan reads them if they're there, with or without `--warm-up`.
+- The first warm-up on a large repo makes many requests, about one per 10 functions. `--notes-model` lets you use a cheaper model for them.
+- In CI, keep `.notes_cache.json` between runs (e.g. with `actions/cache`), or every run starts from scratch.
+- The model is told notes are machine-written hints about code it hasn't seen, not a place to report findings. The changed code itself is always shown in full.
 
 ### Test code
 

@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, List, Optional
 from . import __version__
 from .analyzer import analyze_impact
 from .git_utils import create_worktree, remove_worktree, resolve_commit
-from .llm_scanner import scan_graph_for_vulnerabilities
+from .llm_scanner import scan_graph_for_vulnerabilities, write_notes
 from .reporter import generate_reports
 
 
@@ -23,6 +23,7 @@ class ScanResult:
     json_path: str
     html_path: str
     sarif_path: Optional[str]
+    notes_stats: Optional[Dict[str, Any]] = None  # --warm-up's counts (see write_notes)
 
 
 def run_scan(
@@ -41,6 +42,9 @@ def run_scan(
     on_event: Optional[Callable[..., None]] = None,
     debug_log: Optional[Callable[[str], None]] = None,
     batch_size: int = 1,
+    notes_path: Optional[str] = None,
+    warm_up: bool = False,
+    notes_model: Optional[str] = None,
 ) -> ScanResult:
     """Runs the full single-repo pipeline: diff -> impact graph -> optional
     LLM scan -> reports on disk. Shared by the single-repo and multi-repo
@@ -60,6 +64,11 @@ def run_scan(
     raw response for every node scanned -- kept separate from `log` since
     that content is far too large for a normal --verbose console stream and
     is meant to go straight to a file instead (see -vv/--debug in cli.py).
+
+    `warm_up` first writes notes for every function in the repo that
+    doesn't have one yet, with `notes_model` (default: `model`), into
+    `notes_path` -- emitting "notes_started"/"notes_done" -- and the scan
+    then reads them from there, as every scan does when the file exists.
     """
     log = log or (lambda msg: None)
     on_event = on_event or (lambda event, **kwargs: None)
@@ -94,6 +103,13 @@ def run_scan(
             num_edges=len(graph_data['edges']),
         )
 
+        notes_stats = None
+        if warm_up and notes_path:
+            notes_stats = write_notes(
+                context['nodes'], notes_model or model, notes_path, log=log, concurrency=concurrency,
+                max_tokens=max_tokens, debug_log=debug_log, on_event=on_event,
+            )
+
         vulnerabilities = None
         token_usage = None
         if llm:
@@ -101,6 +117,7 @@ def run_scan(
             vulnerabilities, token_usage = scan_graph_for_vulnerabilities(
                 graph_data, model, log=log, concurrency=concurrency, cache_path=cache_path,
                 max_tokens=max_tokens, debug_log=debug_log, batch_size=batch_size, context=context,
+                notes_path=notes_path,
             )
             num_vulnerabilities = sum(len(findings) for findings in vulnerabilities.values())
             on_event(
@@ -132,6 +149,7 @@ def run_scan(
             json_path=json_path,
             html_path=html_path,
             sarif_path=sarif_path,
+            notes_stats=notes_stats,
         )
     finally:
         if worktree_path:

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from typer.testing import CliRunner
 
 from zairo.cli import app
+from zairo.notes import NOTE_INSTRUCTIONS
 
 runner = CliRunner()
 
@@ -416,3 +417,59 @@ def test_depth_only_shapes_the_report_not_what_the_model_sees(git_repo: Path, tm
     assert "Caller: caller\n" in prompt
     report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
     assert "caller" not in {n["name"] for n in report["symbols"]}
+
+
+def test_warm_up_needs_the_llm(tmp_path: Path):
+    result = runner.invoke(app, [str(tmp_path), "--warm-up", "--graph-only"])
+
+    assert result.exit_code == 1
+    assert "--warm-up writes notes with an LLM" in result.output
+
+
+def test_notes_model_needs_warm_up(tmp_path: Path):
+    result = runner.invoke(app, [str(tmp_path), "--notes-model", "cheap-model"])
+
+    assert result.exit_code == 1
+    assert "add --warm-up" in result.output
+
+
+def test_warm_up_writes_notes_with_the_notes_model_and_the_scan_reads_them(git_repo: Path, tmp_path: Path):
+    """End to end: entry -> mid -> target, where target changed. The scan
+    sees mid in full and entry through its note."""
+    git = lambda *a: subprocess.run(["git", *a], cwd=git_repo, check=True, capture_output=True)
+    lib = git_repo / "lib.py"
+    lib.write_text("def entry(req):\n    return mid(req)\n\ndef mid(x):\n    return target(x)\n\ndef target(y):\n    return y\n")
+    git("add", "lib.py")
+    git("commit", "-q", "-m", "add lib")
+    lib.write_text("def entry(req):\n    return mid(req)\n\ndef mid(x):\n    return target(x)\n\ndef target(y):\n    return run(y)\n")
+    git("commit", "-q", "-am", "change target")
+    calls = []
+
+    def complete(model, messages, max_tokens):
+        prompt = messages[0]["content"]
+        calls.append((model, prompt))
+        response = MagicMock()
+        response.usage = None
+        if prompt.startswith(NOTE_INSTRUCTIONS):
+            labels = re.findall(r"^=== (F\d+): (\w+)", prompt, re.M)
+            response.choices[0].message.content = json.dumps({label: {"does": f"note on {name}"} for label, name in labels})
+        else:
+            response.choices[0].message.content = '{"vulnerabilities": []}'
+        return response
+
+    fake_litellm = MagicMock()
+    fake_litellm.completion.side_effect = complete
+    output_dir = tmp_path / "out"
+
+    with patch("zairo.llm_scanner.litellm", fake_litellm), patch("zairo.llm_scanner._ensure_litellm", return_value=fake_litellm):
+        result = runner.invoke(app, [
+            str(git_repo), "--from", "HEAD~1", "--to", "HEAD", "--warm-up", "--notes-model", "cheap-model",
+            "--model", "big-model", "--output", str(output_dir),
+        ])
+
+    assert result.exit_code == 0, result.output
+    assert "note(s) written, 0 failed" in result.output
+    assert {model for model, prompt in calls if prompt.startswith(NOTE_INSTRUCTIONS)} == {"cheap-model"}
+    [scan_prompt] = [prompt for model, prompt in calls if "Modified Function: target" in prompt]
+    assert "Callers of its callers:\n- entry (calls mid): does: note on entry" in scan_prompt
+    assert (output_dir / ".notes_cache.json").exists()

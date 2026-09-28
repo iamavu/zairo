@@ -4,6 +4,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from trailmark import parse_directory
+from trailmark.analysis.entrypoints import detect_entrypoints
 from .git_utils import get_changed_file_paths, get_diff_hunks, hunk_lines, hunks_in_range
 from ._util import display_name as _display_name, is_test_file
 
@@ -34,6 +35,65 @@ def _in_test_file(file_path: str, root: str) -> bool:
         return is_test_file(os.path.relpath(file_path, root))
     except ValueError:  # another drive, on Windows
         return False
+
+
+# Trailmark finds a decorator-based entry point by looking for decorator-
+# like lines within this many lines before and after a function's start.
+_DECORATOR_LOOKBACK, _DECORATOR_LOOKAHEAD = 12, 3
+
+
+def _looks_like_decorator(line: str) -> bool:
+    s = line.strip()
+    return s.startswith("@") or s.startswith("#[") or (s.startswith("[") and not s.startswith("[["))
+
+
+def _decorator_is_anothers(unit, prev_end: int, lines: List[str]) -> bool:
+    """Whether a decorator-based entry-point tag on `unit` rests only on
+    decorators that belong to other functions. Trailmark's window around a
+    function reaches into its neighbors: a helper right after a Flask route
+    gets tagged as a route too. A decorator is this function's own if it
+    comes after the previous definition in the file ends (`prev_end`) and
+    before this one does. With no decorator-like line in the window at all,
+    the tag came from something else (a name like main(), a file path) and
+    stands."""
+    start, end = unit.location.start_line, unit.location.end_line
+    window = range(max(1, start - _DECORATOR_LOOKBACK), min(len(lines), start + _DECORATOR_LOOKAHEAD) + 1)
+    decorators = [ln for ln in window if _looks_like_decorator(lines[ln - 1])]
+    return bool(decorators) and not any(prev_end < ln <= end for ln in decorators)
+
+
+def _entrypoints(graph, root: str, log: Callable[[str], None]) -> Dict[str, Dict[str, Any]]:
+    """Trailmark's entry points -- HTTP routes, CLI commands, task handlers,
+    ... -- as {node id: {"kind", "trust", "description"}}. Best effort: an
+    error here just means no entry points."""
+    try:
+        tags = detect_entrypoints(graph, root)
+    except Exception as e:
+        log(f"Skipping entry-point detection: {e}")
+        return {}
+    definitions: Dict[str, list] = {}
+    for unit in graph.nodes.values():
+        if unit.kind.value in ('function', 'method', 'class'):
+            definitions.setdefault(unit.location.file_path, []).append(unit)
+    file_lines: Dict[str, List[str]] = {}
+    found = {}
+    for node_id, tag in tags.items():
+        unit = graph.nodes.get(node_id)
+        if unit is None:
+            continue
+        path = unit.location.file_path
+        if path not in file_lines:
+            try:
+                with open(path, encoding='utf-8', errors='replace') as f:
+                    file_lines[path] = f.read().splitlines()
+            except OSError:
+                file_lines[path] = []
+        start = unit.location.start_line
+        prev_end = max((u.location.end_line for u in definitions.get(path, []) if u.location.end_line < start), default=0)
+        if _decorator_is_anothers(unit, prev_end, file_lines[path]):
+            continue
+        found[node_id] = {"kind": tag.kind.value, "trust": tag.trust_level.value, "description": tag.description}
+    return found
 
 
 def _node_name(unit, root: str) -> str:
@@ -210,6 +270,8 @@ def analyze_impact(
         _edge_dict(e) for e in graph.edges
         if e.source_id not in test_nodes and e.target_id not in test_nodes
     ]
+    entrypoints = _entrypoints(graph, analysis_root, log)
+    log(f"Found {len(entrypoints)} entry point(s)")
 
     # 1. Identify seed nodes (modified/added)
     seed_nodes = set()
@@ -238,6 +300,8 @@ def analyze_impact(
             "complexity": unit.cyclomatic_complexity,
             "status": "unchanged" # default
         }
+        if node_id in entrypoints:
+            node_metadata[node_id]["entrypoint"] = entrypoints[node_id]
 
         if not is_proxy and location.file_path in diff_hunks:
             start = location.start_line
