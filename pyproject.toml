@@ -31,6 +31,11 @@ dev = [
     "pytest>=8.0",
     "build>=1.0",
 ]
+# For tests/test_report_html.py, which opens report.html in a browser; it's
+# skipped without this. Then: python -m playwright install chromium
+browser = [
+    "playwright>=1.45",
+]
 
 [project.scripts]
 zairo = "zairo.cli:main"
@@ -49,7 +54,7 @@ version = { attr = "zairo.__version__" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-zairo = ["templates/*.html"]
+zairo = ["templates/*.html", "templates/vendor/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

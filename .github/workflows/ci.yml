@@ -24,7 +24,11 @@ jobs:
           git config --global user.name "CI"
 
       - name: Install package with dev dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,browser]"
+
+      # For the test that opens report.html in a browser.
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
 
       - name: Run tests
         run: pytest

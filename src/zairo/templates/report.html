@@ -295,8 +295,9 @@
     </main>
     <div class="toast" id="toast" role="status" hidden></div>
     <noscript><style>#canvas-state { display: none; }</style><p style="position:fixed;inset:0 0 auto;padding:24px;background:#191f21;z-index:50">Enable JavaScript to explore this report. The same data is available in report.json.</p></noscript>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js" integrity="sha512-RcuA+PEnJcg1caTn53YLhZ3bYVFXphzcPL1BjBoAwFiA3bErav+AndZz1xrqpAtv/8Waep2X+9zn8KWpwacUSA==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/dagre/0.8.5/dagre.min.js" integrity="sha512-psLUZfcgPmi012lcpVHkWoOqyztollwCGu4w/mXijFMK/YcdUdP06voJNVOJ7f/dUIlO2tGlDLuypRyXX2lcvQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <!-- Cytoscape.js 3.28.1 and dagre 0.8.5, both MIT-licensed (notices inside), bundled so the report works offline -->
+    <script>{{ cytoscape_js }}</script>
+    <script>{{ dagre_js }}</script>
     <script>
         const graphData = {{ graph_json }};
         const reportMeta = {{ report_meta_json }};

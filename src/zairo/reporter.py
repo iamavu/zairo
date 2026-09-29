@@ -8,6 +8,13 @@ from .sarif import build_sarif
 from ._util import is_complete
 
 HTML_TEMPLATE = files("zairo").joinpath("templates/report.html").read_text(encoding="utf-8")
+# The graph libraries report.html runs on, written into every report so it
+# opens offline and loads nothing from anywhere else. Rendered in as
+# values, not template source: Cytoscape's code has "{{" in it.
+_SCRIPTS = {
+    f"{name}_js": files("zairo").joinpath(f"templates/vendor/{name}.min.js").read_text(encoding="utf-8")
+    for name in ("cytoscape", "dagre")
+}
 
 
 def _json_for_script(data: dict) -> str:
@@ -112,6 +119,7 @@ def generate_reports(
 
     template = Template(HTML_TEMPLATE)
     html_content = template.render(
+        **_SCRIPTS,
         graph_json=_json_for_script(report),
         report_meta_json=_json_for_script({
             "repo_name": repo_name or "",
