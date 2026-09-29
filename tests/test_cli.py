@@ -12,6 +12,11 @@ from zairo.notes import NOTE_INSTRUCTIONS
 runner = CliRunner()
 
 
+def _text(messages) -> str:
+    """A request's messages -- system, then user -- as one text."""
+    return "\n".join(m["content"] for m in messages)
+
+
 def test_single_repo_writes_a_direct_report(git_repo: Path, tmp_path: Path):
     output_dir = tmp_path / "out"
     result = runner.invoke(
@@ -413,7 +418,7 @@ def test_depth_only_shapes_the_report_not_what_the_model_sees(git_repo: Path, tm
         result = runner.invoke(app, [str(git_repo), "--from", "HEAD~1", "--to", "HEAD", "--depth", "0", "--no-cache", "--output", str(output_dir)])
 
     assert result.exit_code == 0, result.output
-    prompts = [call.kwargs["messages"][0]["content"] for call in fake_litellm.completion.call_args_list]
+    prompts = [_text(call.kwargs["messages"]) for call in fake_litellm.completion.call_args_list]
     [prompt] = [p for p in prompts if "Modified Function: helper" in p]
     assert "Caller: caller\n" in prompt
     report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
@@ -432,7 +437,7 @@ def _fake_llm_writing_notes(calls: list) -> MagicMock:
     """Answers note requests with "note on <function name>" and scan
     requests with no findings, recording (model, prompt) in `calls`."""
     def complete(model, messages, max_tokens):
-        prompt = messages[0]["content"]
+        prompt = _text(messages)
         calls.append((model, prompt))
         response = MagicMock()
         response.usage = None

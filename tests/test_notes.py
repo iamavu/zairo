@@ -1,5 +1,8 @@
+import re
+
 from zairo.notes import (
-    NOTE_MAX_LINES, build_notes_prompt, format_note, is_notable, load_notes, note_key, save_notes, validated_note,
+    NOTE_INSTRUCTIONS, NOTE_MAX_LINES, format_note, is_notable, load_notes, note_key, notes_messages, save_notes,
+    validated_note,
 )
 
 
@@ -36,9 +39,12 @@ def test_note_key_depends_on_the_code_only():
 def test_notes_prompt_labels_functions_and_cuts_long_ones():
     long_code = "\n".join(f"    x{i} = {i}" for i in range(NOTE_MAX_LINES + 50))
 
-    prompt = build_notes_prompt([("short", "def short():\n    pass"), ("long", long_code)])
+    system, user = notes_messages([("short", "def short():\n    pass"), ("long", long_code)])
 
-    assert "=== F1: short ===" in prompt
+    assert system == {"role": "system", "content": NOTE_INSTRUCTIONS}
+    prompt = user["content"]
+    tag = re.search(r"<<<REPO TEXT ([0-9a-f]+)>>>", prompt).group(1)
+    assert f"=== F1: short ===\n<<<REPO TEXT {tag}>>>\ndef short():\n    pass\n<<<END REPO TEXT {tag}>>>" in prompt
     assert f"=== F2: long (its first {NOTE_MAX_LINES} of {NOTE_MAX_LINES + 50} lines) ===" in prompt
     assert f"x{NOTE_MAX_LINES - 1} =" in prompt and f"x{NOTE_MAX_LINES} =" not in prompt
 
