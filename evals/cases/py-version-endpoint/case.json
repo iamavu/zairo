@@ -1,0 +1,5 @@
+{
+  "description": "Adds a /version endpoint that runs git through subprocess -- with a fixed argument list, no shell and nothing from the request -- to report the deployed commit.",
+  "vulnerable": false,
+  "source": "synthetic"
+}

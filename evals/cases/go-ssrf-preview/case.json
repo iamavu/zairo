@@ -1,0 +1,7 @@
+{
+  "description": "A link-preview handler that fetched only https URLs on two allowlisted hosts now fetches any http or https URL it's given, internal addresses included.",
+  "vulnerable": true,
+  "symbol": "PreviewURL",
+  "cwe": "CWE-918",
+  "source": "synthetic"
+}

@@ -1,0 +1,7 @@
+{
+  "description": "A download route stops going through the helper that resolves the path and checks it stays inside the upload directory, and joins the requested name onto it directly.",
+  "vulnerable": true,
+  "symbol": "download",
+  "cwe": "CWE-22",
+  "source": "synthetic"
+}

@@ -1,0 +1,5 @@
+{
+  "description": "Adds sorting to a product listing by formatting an ORDER BY clause into the query -- but only from a fixed allowlist of columns, with the user's value never in the SQL. Looks like injection; isn't.",
+  "vulnerable": false,
+  "source": "synthetic"
+}

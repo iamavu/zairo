@@ -1,0 +1,7 @@
+{
+  "description": "A search endpoint gains a sort parameter, and its parameterized query becomes an f-string with both the search term and the sort column in it.",
+  "vulnerable": true,
+  "symbol": "search_users",
+  "cwe": "CWE-89",
+  "source": "synthetic"
+}

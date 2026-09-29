@@ -1,0 +1,7 @@
+{
+  "description": "A config import endpoint switches from yaml.safe_load to yaml.load with the full Loader, to accept custom tags, on a request body anyone can send.",
+  "vulnerable": true,
+  "symbol": "import_config",
+  "cwe": "CWE-502",
+  "source": "synthetic"
+}

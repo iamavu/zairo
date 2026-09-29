@@ -1,0 +1,7 @@
+{
+  "description": "The payment client turns off TLS certificate verification, for a staging server with a self-signed certificate, on the client that sends the API key with every charge.",
+  "vulnerable": true,
+  "symbol": "NewPaymentClient",
+  "cwe": "CWE-295",
+  "source": "synthetic"
+}

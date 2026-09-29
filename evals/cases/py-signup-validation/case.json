@@ -1,0 +1,5 @@
+{
+  "description": "Tightens a signup handler: normalizes the email, checks its shape and length, and requires a 12-character password before creating the user. Only adds checks.",
+  "vulnerable": false,
+  "source": "synthetic"
+}

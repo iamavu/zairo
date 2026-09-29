@@ -213,3 +213,23 @@ so a new push only asks the model about what changed since. Its companion,
 [zairo-warm-up.yml](examples/github-actions/zairo-warm-up.yml), writes
 warm-up notes on every push to your default branch for the PR scans to
 restore.
+
+Before you gate PRs on a model, measure it: see below.
+
+## Measuring it
+
+[`evals/`](evals) holds 16 small labelled changes (9 that introduce a
+vulnerability, 7 that don't, some of them built to look risky) and a
+runner that scans each one several times with the model you give it:
+
+```bash
+python evals/run.py --model gemini/gemini-2.5-flash --repeats 3
+```
+
+It reports recall (the vulnerable changes it caught, on the right
+symbol), false alarms (the clean changes it would have blocked), precision,
+how stable its verdicts are between runs, and what it cost. That tells you
+how far to trust a `--fail-on` gate with that model, and whether a prompt
+change or a new model made things better or worse. See
+[evals/README.md](evals/README.md) for the cases, the scores, and adding
+your own.

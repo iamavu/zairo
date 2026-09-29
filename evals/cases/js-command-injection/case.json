@@ -1,0 +1,7 @@
+{
+  "description": "A ping endpoint adds a count parameter and moves from execFile with a validated host to exec with both values in a shell command string, dropping the host check.",
+  "vulnerable": true,
+  "symbol": "ping",
+  "cwe": "CWE-78",
+  "source": "synthetic"
+}

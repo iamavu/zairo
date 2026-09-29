@@ -1,0 +1,7 @@
+{
+  "description": "The API-key check that guards every route learns to wave through requests whose X-Forwarded-For starts with 10., taking them to come from the internal load balancer -- a header any client can set.",
+  "vulnerable": true,
+  "symbol": "check_api_key",
+  "cwe": "CWE-290",
+  "source": "synthetic, after an auth bypass zairo --dig found in a real Go service"
+}

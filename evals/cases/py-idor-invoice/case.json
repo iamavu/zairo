@@ -1,0 +1,7 @@
+{
+  "description": "Fetching an invoice by id loses the check that it belongs to the caller's tenant, in a change that reads like it only adds line items to the response.",
+  "vulnerable": true,
+  "symbol": "get_invoice",
+  "cwe": "CWE-639",
+  "source": "synthetic"
+}

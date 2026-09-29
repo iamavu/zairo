@@ -1,0 +1,5 @@
+{
+  "description": "Adds a middleware that logs each request's method, path, status and duration -- no headers, bodies or query strings.",
+  "vulnerable": false,
+  "source": "synthetic"
+}

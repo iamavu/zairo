@@ -1,0 +1,5 @@
+{
+  "description": "The change fixes a SQL injection: an f-string query becomes a parameterized one. Nothing it introduces is a problem; a finding marked introduced is a false alarm.",
+  "vulnerable": false,
+  "source": "synthetic"
+}

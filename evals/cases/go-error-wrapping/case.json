@@ -1,0 +1,5 @@
+{
+  "description": "Refactors a store method: takes a context, uses errors.Is, and wraps unexpected errors with the user id. The query stays parameterized.",
+  "vulnerable": false,
+  "source": "synthetic"
+}

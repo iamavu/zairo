@@ -1,0 +1,7 @@
+{
+  "description": "After a successful login, the redirect stops going through the check that keeps it on this site, to support SSO return URLs, and follows the next parameter wherever it points.",
+  "vulnerable": true,
+  "symbol": "finishLogin",
+  "cwe": "CWE-601",
+  "source": "synthetic"
+}
