@@ -22,7 +22,7 @@ zairo . --from HEAD~1 --to HEAD
 # Scan a PR/branch diff
 zairo . --from main --to HEAD
 
-# Fail the build if anything high-severity turns up
+# Fail the build if the change introduces anything high-severity
 zairo . --from main --to HEAD --fail-on high
 
 # Write notes on the repo's functions for later scans to read (no scan, no reports)
@@ -63,7 +63,7 @@ zairo backend frontend infra --from main --fail-on high -o zairo_multi_out
 **Output & gating**
 
 - `--output`, `-o` *(`zairo_out`)*: where the reports go. Multi-repo mode: each repo gets its own `<output>/<repo-slug>/`, plus a combined `rollup.*` here too.
-- `--fail-on` *(none)*: exit non-zero if a finding at or above this severity turns up (`low`/`medium`/`high`/`critical`), or if the scan is incomplete (any symbol the model couldn't assess). Errors if combined with `--graph-only` (nothing to gate on). Multi-repo mode: checked across all repos combined. See [CI / PR gating](#ci--pr-gating).
+- `--fail-on` *(none)*: exit non-zero if the change introduces a finding at or above this severity (`low`/`medium`/`high`/`critical`), meaning one marked `introduced_by_change: true`, or if the scan is incomplete (any symbol the model couldn't assess). Findings that were already there are still reported, just not gated on. Errors if combined with `--graph-only` (nothing to gate on). Multi-repo mode: checked across all repos combined. See [CI / PR gating](#ci--pr-gating).
 - `--verbose`, `-v` *(off)*: print what's happening step by step (git commands, worktree setup, per-symbol scan progress).
 - `--debug`, `-vv` *(off)*: everything `--verbose` prints, plus the exact prompt sent to the LLM and its raw response for every symbol -- written to `<output>/debug.log` (per-repo in multi-repo mode), since it's too much to print to the console.
 
@@ -152,10 +152,17 @@ A function/class/module removed entirely (not just edited) still shows up in `re
 
 ## CI / PR gating
 
-`--fail-on <low|medium|high|critical>` exits non-zero if any finding at or
-above that severity is found (across all repos combined, in multi-repo
-mode), so a CI step can block a merge on it. A few things worth knowing:
+`--fail-on <low|medium|high|critical>` exits non-zero if the change
+introduces a finding at or above that severity (across all repos combined,
+in multi-repo mode), so a CI step can block a merge on it. A few things
+worth knowing:
 
+- It only counts findings marked `introduced_by_change: true`. A problem
+  that was already there before the change is in the reports, but it
+  doesn't fail the PR: it isn't the PR's to fix, and failing every PR on it
+  would teach people to ignore the gate. Nor does a finding where the
+  model didn't say either way. When findings at or above the threshold are
+  left out, zairo says how many.
 - It also fails whenever the scan is incomplete: a node the model couldn't
   assess (a provider error, a missing API key, a response that wasn't a
   scan result) is code nobody reviewed, so it can't count as a pass. On

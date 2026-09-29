@@ -11,7 +11,7 @@ from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, T
 from . import __version__
 from .rollup import unique_slug, write_rollup_reports
 from .scan import run_scan, run_warm_up
-from ._util import max_severity, severity_rank
+from ._util import max_severity, normalize_severity, severity_rank
 
 app = typer.Typer(add_completion=False)
 console = Console()
@@ -132,13 +132,43 @@ def _require_from_for_to(from_ref: Optional[str], to_ref: Optional[str]) -> None
         raise typer.Exit(1)
 
 
+def _introduced(vulnerabilities: dict) -> dict:
+    """The findings the change introduced: the ones marked
+    introduced_by_change: true. They're what --fail-on gates on -- a
+    problem that was there before the change isn't the change's to fix, and
+    blocking every PR on it would make the gate useless."""
+    introduced = {}
+    for node_id, findings in vulnerabilities.items():
+        kept = [f for f in findings if f.get("introduced_by_change") is True]
+        if kept:
+            introduced[node_id] = kept
+    return introduced
+
+
 def _severity_gate_failure(vulnerabilities: dict, fail_on: Severity) -> Optional[str]:
-    """The worst severity found, if it meets or exceeds fail_on's threshold
-    -- None if the gate passes (including when there are no findings)."""
-    worst = max_severity(vulnerabilities)
+    """The worst severity among the findings the change introduced, if it
+    meets or exceeds fail_on's threshold -- None if the gate passes
+    (including when there are no such findings)."""
+    worst = max_severity(_introduced(vulnerabilities))
     if worst is not None and severity_rank(worst) >= severity_rank(fail_on.value):
         return worst
     return None
+
+
+def _print_not_gated(vulnerabilities: dict, fail_on: Severity, indent: str = "") -> None:
+    """Says how many findings at or above the threshold --fail-on left out
+    because they weren't marked as introduced by the change -- so a passing
+    gate never hides that they're there."""
+    at_threshold = sum(
+        1 for findings in vulnerabilities.values() for f in findings
+        if f.get("introduced_by_change") is not True
+        and severity_rank(normalize_severity(f.get("severity"))) >= severity_rank(fail_on.value)
+    )
+    if at_threshold:
+        console.print(
+            f"{indent}[dim]--fail-on left out {at_threshold} finding(s) at or above {fail_on.value} that weren't "
+            f"marked as introduced by this change (see the reports).[/dim]"
+        )
 
 
 def _print_scan_errors(token_usage: dict, indent: str = "") -> None:
@@ -314,9 +344,10 @@ def _run_single_repo(
             if worst is not None:
                 should_fail = True
                 console.print(
-                    f"[bold red]Gate failed:[/bold red] found a '{worst}' severity finding "
+                    f"[bold red]Gate failed:[/bold red] this change introduces a '{worst}' severity finding "
                     f"(threshold: {fail_on.value})."
                 )
+            _print_not_gated(result.vulnerabilities, fail_on)
             num_failed = len(result.token_usage['failed_nodes'])
             if num_failed:
                 should_fail = True
@@ -483,9 +514,10 @@ def _run_multi_repo(
         if worst is not None:
             should_fail = True
             console.print(
-                f"[bold red]Gate failed:[/bold red] found a '{worst}' severity finding across all repos "
-                f"(threshold: {fail_on.value})."
+                f"[bold red]Gate failed:[/bold red] the changes introduce a '{worst}' severity finding "
+                f"across all repos (threshold: {fail_on.value})."
             )
+        _print_not_gated(combined_vulns, fail_on)
         num_failed = sum(len(r["result"].token_usage['failed_nodes']) for r in ok_results)
         if num_failed:
             should_fail = True
@@ -560,7 +592,7 @@ def analyze(
     dig: bool = typer.Option(False, "--dig", help="Experimental. Let the model look up what it needs before it answers -- warm-up notes, source, callers and callees, a text search of the repo -- up to 8 lookups per changed symbol, instead of seeing only the context zairo picks. Slower and costlier (every lookup is another request), and answers vary more between runs; cached per commit when scanning --from/--to. Needs a model that can call tools."),
     max_tokens: int = typer.Option(4096, "--max-tokens", help="Max output tokens per LLM scan request. Reasoning models count internal thinking against this budget too — too low can cause empty responses"),
     tokens: bool = typer.Option(False, "--tokens", help="Show total LLM tokens used across real API calls (cache hits don't count)"),
-    fail_on: Severity = typer.Option(None, "--fail-on", help="Exit with a non-zero status if any finding at or above this severity is found -- for gating CI/PR checks. Errors if combined with --graph-only."),
+    fail_on: Severity = typer.Option(None, "--fail-on", help="Exit with a non-zero status if the change introduces a finding at or above this severity (one marked introduced_by_change: true), or if any symbol couldn't be assessed -- for gating CI/PR checks. Findings that were already there are reported, not gated on. Errors if combined with --graph-only."),
     continue_on_error: bool = typer.Option(True, "--continue-on-error/--stop-on-error", help="Multi-repo mode: keep scanning remaining repos if one fails (default), instead of aborting the run"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Print detailed diagnostic output (git commands, worktree setup, symbol matching, per-symbol LLM scan progress)"),
     debug: bool = typer.Option(False, "-vv", "--debug", help="Maximum verbosity: everything --verbose prints, plus the exact prompt sent to the LLM and its raw response for every symbol -- written to <output>/debug.log (too much to print to the console). Implies --verbose."),

@@ -351,6 +351,55 @@ def test_fail_on_passes_a_complete_clean_scan(git_repo: Path, tmp_path: Path):
     assert result.exit_code == 0, result.output
 
 
+def _finding(severity: str, introduced) -> dict:
+    return {"title": f"{severity} thing", "severity": severity, "introduced_by_change": introduced}
+
+
+def test_fail_on_fails_on_a_finding_the_change_introduced(git_repo: Path, tmp_path: Path):
+    vulnerabilities = {"n1": [_finding("low", True), _finding("high", True)]}
+    with patch("zairo.scan.scan_graph_for_vulnerabilities", return_value=(vulnerabilities, _scan_usage({}))):
+        result = runner.invoke(
+            app,
+            [str(git_repo), "--from", "HEAD~1", "--to", "HEAD", "--fail-on", "high", "--output", str(tmp_path / "out")],
+        )
+
+    assert result.exit_code == 1
+    assert "Gate failed: this change introduces a 'high' severity finding (threshold: high)." in " ".join(result.output.split())
+
+
+def test_fail_on_leaves_out_findings_the_change_did_not_introduce(git_repo: Path, tmp_path: Path):
+    """Already there before the change, or not marked either way: reported,
+    not gated on -- and the output says how many were left out."""
+    vulnerabilities = {"n1": [_finding("critical", False), _finding("high", None), _finding("low", True)]}
+    output_dir = tmp_path / "out"
+    with patch("zairo.scan.scan_graph_for_vulnerabilities", return_value=(vulnerabilities, _scan_usage({}))):
+        result = runner.invoke(
+            app,
+            [str(git_repo), "--from", "HEAD~1", "--to", "HEAD", "--fail-on", "high", "--output", str(output_dir)],
+        )
+
+    assert result.exit_code == 0, result.output
+    output = " ".join(result.output.split())
+    assert "Gate failed" not in output
+    assert "--fail-on left out 2 finding(s) at or above high that weren't marked as introduced by this change" in output
+    sarif = json.loads((output_dir / "report.sarif").read_text(encoding="utf-8"))
+    assert len(sarif["runs"][0]["results"]) == 3  # every finding is still reported
+
+
+def test_multi_repo_fail_on_counts_only_introduced_findings(make_git_repo, tmp_path: Path):
+    repo_a = make_git_repo("repo_a")
+    repo_b = make_git_repo("repo_b")
+    scans = iter([({"n1": [_finding("high", False)]}, _scan_usage({})), ({"n1": [_finding("high", True)]}, _scan_usage({}))])
+
+    with patch("zairo.scan.scan_graph_for_vulnerabilities", side_effect=lambda *a, **kw: next(scans)):
+        result = runner.invoke(app, [str(repo_a), str(repo_b), "--fail-on", "high", "--output", str(tmp_path / "out")])
+
+    assert result.exit_code == 1
+    output = " ".join(result.output.split())
+    assert "the changes introduce a 'high' severity finding across all repos" in output
+    assert "--fail-on left out 1 finding(s)" in output
+
+
 def test_multi_repo_fail_on_fails_when_any_repo_scan_is_incomplete(make_git_repo, tmp_path: Path):
     repo_a = make_git_repo("repo_a")
     repo_b = make_git_repo("repo_b")
