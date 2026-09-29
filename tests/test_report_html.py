@@ -40,7 +40,10 @@ def _report(output_dir: Path) -> str:
         failed_nodes={"app:upload": "RateLimitError: slow down"},
         changed_files=[{"path": "app.py", "outcome": "analyzed"}, {"path": "deploy.yaml", "outcome": "not_parsed"}],
         problems=[{"level": "warning", "message": "Couldn't find the repo's entry points (boom)."}],
-        seen={"app:save": {"lines": 340, "lines_shown": 60, "related": 23, "code_shown": 8, "noted": 5}},
+        seen={
+            "app:save": {"lines": 340, "lines_shown": 60, "related": 23, "code_shown": 8, "noted": 5},
+            "app": {"related": 2, "code_shown": 2, "noted": 0},  # saw it all: nothing to say
+        },
     )
     return html_path
 
@@ -86,8 +89,11 @@ def test_report_renders_offline(tmp_path: Path):
             assert "Command injection in save" in details
             assert "app.py" in details
             assert (
-                "The model was shown 60 of its 340 lines; the code of 8 of 23 related symbols, and notes on 5 more."
+                "The model saw only 60 of its 340 lines, and the code of 8 of the 23 symbols around it (notes on 5 more)."
                 in " ".join(details.split())
             )
+
+            page.evaluate("selectNode('app')")  # shown all of what's around it
+            assert "The model saw" not in page.inner_text("#node-details")
         finally:
             browser.close()
