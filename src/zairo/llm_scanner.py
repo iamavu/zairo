@@ -456,21 +456,14 @@ _REACH_MAX_HOPS = 4
 _REACH_MAX_PATHS = 3
 
 
-def _reach_section(
-    mod_node: Dict[str, Any], nodes: Dict[str, Dict[str, Any]], calls_in: Dict[str, List[str]], any_entrypoints: bool,
-) -> str:
-    """How a changed function is reached from the repo's entry points (HTTP
-    routes, CLI commands, ...), following callers up to _REACH_MAX_HOPS
-    calls -- what the model needs to say who can trigger a flaw in it.
-    Nothing when the repo has no entry point Trailmark recognizes: "none
-    found" would then say nothing about this function."""
-    if mod_node.get('kind') not in ('function', 'method'):
-        return ""
-    name = inline(mod_node['name'])
-    if mod_node.get('entrypoint'):
-        return f"Entry point: {name} is itself one ({_entry_label(mod_node)})."
-    if not any_entrypoints:
-        return ""
+def _reach_paths(mod_node: Dict[str, Any], nodes: Dict[str, Dict[str, Any]], calls_in: Dict[str, List[str]]) -> List[List[str]]:
+    """The paths of callers from a changed function up to the repo's entry
+    points (HTTP routes, CLI commands, ...), each [the function, its caller,
+    ..., the entry point], at most _REACH_MAX_HOPS calls up -- more than
+    _REACH_MAX_PATHS of them when there are more. None for a function that's
+    an entry point itself."""
+    if mod_node.get('kind') not in ('function', 'method') or mod_node.get('entrypoint'):
+        return []
     paths, seen, frontier = [], {mod_node['id']}, [[mod_node['id']]]
     for _hop in range(_REACH_MAX_HOPS):
         next_frontier = []
@@ -484,6 +477,23 @@ def _reach_section(
         frontier = next_frontier
         if len(paths) >= _REACH_MAX_PATHS or not frontier:
             break
+    return paths
+
+
+def _reach_section(
+    mod_node: Dict[str, Any], nodes: Dict[str, Dict[str, Any]], paths: List[List[str]], any_entrypoints: bool,
+) -> str:
+    """How a changed function is reached from the repo's entry points, from
+    its _reach_paths -- what the model needs to say who can trigger a flaw
+    in it. Nothing when the repo has no entry point Trailmark recognizes:
+    "none found" would then say nothing about this function."""
+    if mod_node.get('kind') not in ('function', 'method'):
+        return ""
+    name = inline(mod_node['name'])
+    if mod_node.get('entrypoint'):
+        return f"Entry point: {name} is itself one ({_entry_label(mod_node)})."
+    if not any_entrypoints:
+        return ""
     if not paths:
         return (
             f"No entry point found within {_REACH_MAX_HOPS} calls up from {name}. It may still be reachable "
@@ -505,12 +515,16 @@ _SECOND_HOP_MAX = 10
 def _notes_section(
     mod_node: Dict[str, Any], nodes: Dict[str, Dict[str, Any]], calls_in: Dict[str, List[str]],
     calls_out: Dict[str, List[str]], noted: List[str], direct_ids: Set[str],
-    note_of: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]],
+    note_of: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]], reach_paths: List[List[str]] = (),
 ) -> str:
     """--warm-up's notes on code further out than the prompt shows in full:
-    direct neighbors past the cap (`noted`), callers of its callers, and
-    what its callees call. Only code that has a note is listed."""
+    direct neighbors past the cap (`noted`), callers of its callers, the
+    rest of the way up `reach_paths` (the ones the prompt shows) -- where
+    the check that makes a flaw unreachable, or the lack of one, often is
+    -- and what its callees call. Only code that has a note is listed, and
+    each function once."""
     exclude = direct_ids | {mod_node['id']}
+    listed: Set[str] = set()
 
     def live(n_id: str) -> bool:
         # Not a deleted function: its edges are the old code's calls.
@@ -530,6 +544,7 @@ def _notes_section(
             note = note_of(nodes[hop2])
             if note:
                 lines.append(f"- {inline(nodes[hop2]['name'])} ({relation} {inline(nodes[via[hop2]]['name'])}): {format_note(note)}")
+                listed.add(hop2)
             if len(lines) == _SECOND_HOP_MAX:
                 break
         return lines
@@ -540,6 +555,18 @@ def _notes_section(
     up = second_hop(calls_in, calls_in, "calls")
     if up:
         parts.append("Callers of its callers:\n" + block("\n".join(up)))
+    along = []
+    for path in reach_paths:
+        for n_id in reversed(path[1:]):  # from the entry point down
+            if n_id in exclude or n_id in listed:
+                continue
+            listed.add(n_id)
+            note = note_of(nodes[n_id])
+            if note:
+                entry = " (entry point)" if nodes[n_id].get('entrypoint') else ""
+                along.append(f"- {inline(nodes[n_id]['name'])}{entry}: {format_note(note)}")
+    if along:
+        parts.append("Further up its paths from entry points:\n" + block("\n".join(along)))
     down = second_hop(calls_out, calls_out, "called by")
     if down:
         parts.append("What its callees call:\n" + block("\n".join(down)))
@@ -1013,8 +1040,11 @@ def scan_graph_for_vulnerabilities(
         neighbor_contexts, noted, direct_ids = _neighbor_contexts(
             mod_node, nodes, edges_by_node.get(mod_node['id'], []), note_of,
         )
-        reach_text = _reach_section(mod_node, nodes, calls_in, any_entrypoints)
-        notes_text = _notes_section(mod_node, nodes, calls_in, calls_out, noted, direct_ids, note_of)
+        reach_paths = _reach_paths(mod_node, nodes, calls_in) if any_entrypoints else []
+        reach_text = _reach_section(mod_node, nodes, reach_paths, any_entrypoints)
+        notes_text = _notes_section(
+            mod_node, nodes, calls_in, calls_out, noted, direct_ids, note_of, reach_paths[:_REACH_MAX_PATHS],
+        )
         diff_text = _diff_section(hunks, fully_added, mod_node.get('kind') or 'function')
         section = _node_section(mod_node, mod_code, diff_text, neighbor_contexts, reach_text, notes_text)
 

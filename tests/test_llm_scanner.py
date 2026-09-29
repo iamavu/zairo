@@ -1156,3 +1156,32 @@ def test_zairos_own_notes_on_what_is_left_out_are_never_inside_a_block(monkeypat
                    "line(s) not shown)", "more diff line(s) not shown", "Other definitions in this file", "@@ line 120 @@"):
         assert zairos in combined
         assert all(zairos not in _inside_blocks(p) for p in prompts), zairos
+
+
+def test_scan_notes_the_functions_further_up_its_paths_from_entry_points(monkeypatch, tmp_path):
+    """route -> a -> b -> c -> target: c is shown in full and b noted as a
+    caller of its callers. a and route -- where a check that decides
+    whether target is reachable could be -- get their notes too, not just
+    their names in the path."""
+    fake_litellm = _fake_llm(monkeypatch)
+    src = tmp_path / "lib.py"
+    names = ["route", "a", "b", "c", "target"]
+    src.write_text("".join(f"def {name}(x):\n    return {callee}(x)\n\n" for name, callee in zip(names, names[1:] + ["run"])))
+    nodes = [{"id": name, "name": name, "kind": "function", "file": str(src), "start_line": 1 + 3 * i, "end_line": 2 + 3 * i,
+              "status": "unchanged"} for i, name in enumerate(names)]
+    nodes[0]["entrypoint"] = {"kind": "api", "trust": "untrusted_external", "description": "Python HTTP route decorator"}
+    nodes[-1].update(status="modified", diff_hunks=[{"start": 14, "removed": ["    return x"], "added": ["    return run(x)"]}])
+    edges = [{"source": caller, "target": callee, "kind": "calls", "confidence": "certain", "lines": [2 + 3 * i]}
+             for i, (caller, callee) in enumerate(zip(names, names[1:]))]
+    graph = {"nodes": nodes, "edges": edges}
+    notes_path = str(tmp_path / "notes.json")
+    llm_scanner.write_notes(nodes, "cheap-model", notes_path)
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(graph, "fake-model", cache_path=None, notes_path=notes_path)
+
+    [prompt] = _scan_prompts(fake_litellm)
+    note = notes.format_note(_NOTE)
+    assert "- route (entry point: Python HTTP route decorator, untrusted input) -> a -> b -> c -> target" in prompt
+    assert "Callers of its callers:\n" + _block(prompt, f"- b (calls c): {note}") in prompt
+    assert "Further up its paths from entry points:\n" + _block(prompt, f"- route (entry point): {note}\n- a: {note}") in prompt
+    assert token_usage["notes_used"] == 3  # b, a and route; c is shown in full

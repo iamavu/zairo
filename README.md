@@ -89,7 +89,7 @@ For each changed function, the model gets:
 - **The code after the change**, numbered, and **the diff**: what was removed and added.
 - **How it's reached**: the paths from the repo's entry points (HTTP routes, CLI commands, task handlers, ... as Trailmark recognizes them) up to 4 calls away, e.g. `upload (entry point: Python HTTP route decorator, untrusted input) -> save_file -> write_blob`. When the repo has entry points but none reaches this function, it says so.
 - **Its direct callers and callees**: up to 8 in full, with a long caller shown around where it calls the changed code.
-- **Notes on code further out**, if `--warm-up` has written them: callers of its callers, what its callees call, and the direct neighbors past the 8.
+- **Notes on code further out**, if `--warm-up` has written them: callers of its callers, the rest of the way up the paths from its entry points (where a check that decides whether it's reachable often is), what its callees call, and the direct neighbors past the 8.
 
 ### Warm-up notes
 
