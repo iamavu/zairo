@@ -2,7 +2,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ._util import NOT_REVIEWED, normalize_confidence, normalize_cwe, normalize_severity
+from ._util import NOT_REVIEWED, normalize_confidence, normalize_cwe, normalize_severity, severity_rank
 
 SARIF_SCHEMA_URI = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
 
@@ -102,12 +102,14 @@ def _location(node: Dict[str, Any], repo_root: str, line: Optional[int] = None) 
     }
 
 
-def _rule_for(finding: Dict[str, Any], level: str, severity: str) -> Tuple[str, Dict[str, Any]]:
+def _rule_for(finding: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     """Picks a stable rule id/definition for a finding: keyed by CWE when the
     model gave one (so "SQL Injection" and "SQLi in query builder" -- two
     different titles for the same underlying category -- collapse into one
     rule instead of spawning a new one every time the wording differs), or a
-    slug of the finding's own title as a fallback when it didn't."""
+    slug of the finding's own title as a fallback when it didn't. Its level
+    and security-severity are build_sarif's to set: they depend on every
+    finding under the rule, not just this one."""
     cwe = normalize_cwe(finding.get("cwe"))
     if cwe:
         number = cwe.split("-", 1)[1]
@@ -118,8 +120,7 @@ def _rule_for(finding: Dict[str, Any], level: str, severity: str) -> Tuple[str, 
             "shortDescription": {"text": name},
             "fullDescription": {"text": f"{name} ({cwe})."},
             "helpUri": f"https://cwe.mitre.org/data/definitions/{number}.html",
-            "defaultConfiguration": {"level": level},
-            "properties": {"security-severity": _SECURITY_SEVERITY_SCORE[severity], "tags": [cwe]},
+            "properties": {"tags": [cwe]},
         }
 
     title = finding.get("title") or "Potential vulnerability"
@@ -129,8 +130,7 @@ def _rule_for(finding: Dict[str, Any], level: str, severity: str) -> Tuple[str, 
         "name": title,
         "shortDescription": {"text": title},
         "fullDescription": {"text": finding.get("description") or title},
-        "defaultConfiguration": {"level": level},
-        "properties": {"security-severity": _SECURITY_SEVERITY_SCORE[severity]},
+        "properties": {},
     }
 
 
@@ -159,6 +159,7 @@ def build_sarif(
     nodes = {n["id"]: n for n in graph_data["nodes"]}
 
     rules: Dict[str, Dict[str, Any]] = {}
+    rule_severity: Dict[str, str] = {}  # {rule id: the worst severity among its findings}
     results: List[Dict[str, Any]] = []
 
     for node_id, findings in vulnerabilities.items():
@@ -170,9 +171,11 @@ def build_sarif(
             level = _LEVEL_BY_SEVERITY[severity]
             cwe = normalize_cwe(finding.get("cwe"))
 
-            rule_id, rule = _rule_for(finding, level, severity)
-            if rule_id not in rules:
-                rules[rule_id] = rule
+            rule_id, rule = _rule_for(finding)
+            rules.setdefault(rule_id, rule)
+            worst = rule_severity.get(rule_id)
+            if worst is None or severity_rank(severity) > severity_rank(worst):
+                rule_severity[rule_id] = severity
 
             message = finding.get("description") or title
             if finding.get("trigger"):
@@ -200,6 +203,14 @@ def build_sarif(
             if location:
                 result["locations"] = [location]
             results.append(result)
+
+    # A rule's own level and security-severity are what GitHub shows on its
+    # alerts, and what its code-scanning check can fail a PR on: they're
+    # the worst of its findings', so a critical SQL injection is never
+    # badged low because a low one came first.
+    for rule_id, severity in rule_severity.items():
+        rules[rule_id]["defaultConfiguration"] = {"level": _LEVEL_BY_SEVERITY[severity]}
+        rules[rule_id]["properties"]["security-severity"] = _SECURITY_SEVERITY_SCORE[severity]
 
     notifications: List[Dict[str, Any]] = []
     for node_id, error in (failed_nodes or {}).items():

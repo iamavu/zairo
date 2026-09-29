@@ -27,6 +27,23 @@ def test_maps_severity_to_sarif_level():
     assert levels["weak-random"] == "note"
 
 
+def test_a_rule_takes_the_worst_severity_among_its_findings():
+    """Findings with the same CWE share a rule, and GitHub badges -- and
+    can gate on -- the rule's security-severity: a low one coming first
+    mustn't mark a critical one low."""
+    vulnerabilities = {"n1": [
+        {"title": "SQLi in a report", "severity": "low", "cwe": "CWE-89"},
+        {"title": "SQLi in login", "severity": "critical", "cwe": "CWE-89"},
+        {"title": "Weak Random", "severity": "medium"},
+    ]}
+    sarif = build_sarif(_graph("/repo/src/app.py"), vulnerabilities, repo_root="/repo")
+
+    rules = {r["id"]: r for r in sarif["runs"][0]["tool"]["driver"]["rules"]}
+    assert (rules["cwe-89"]["defaultConfiguration"], rules["cwe-89"]["properties"]["security-severity"]) == ({"level": "error"}, "9.5")
+    assert (rules["weak-random"]["defaultConfiguration"], rules["weak-random"]["properties"]["security-severity"]) == ({"level": "warning"}, "5.0")
+    assert [r["level"] for r in sarif["runs"][0]["results"]] == ["note", "error", "warning"]  # each result keeps its own
+
+
 def test_location_is_repo_relative_posix_path():
     graph_data = _graph("/repo/src/app.py")
     vulnerabilities = {"n1": [{"title": "X", "description": "d", "severity": "high"}]}
