@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from trailmark import parse_directory
 from trailmark.analysis.entrypoints import detect_entrypoints
+from trailmark.parse import detect_languages
 from .git_utils import get_changed_file_paths, get_diff_hunks, hunk_lines, hunks_in_range
 from ._util import display_name as _display_name, is_test_file
 
@@ -225,7 +226,10 @@ def _find_deleted_nodes(
                         f.write(content)
                     found_any = True
 
-        if not found_any:
+        # Nothing Trailmark parses changed (only a YAML file, say): there's
+        # nothing that could have been deleted -- where parse_directory
+        # would raise "No supported languages detected".
+        if not found_any or (language == "auto" and not detect_languages(tmp_dir)):
             return {}, [], set()
 
         base_graph = parse_directory(tmp_dir, language=language)

@@ -246,6 +246,18 @@ def test_every_changed_file_gets_an_outcome(git_repo: Path):
     assert coverage["problems"] == []
 
 
+def test_a_change_only_to_files_zairo_doesnt_parse_is_no_problem(git_repo: Path):
+    """Nothing that could have been deleted: not a failed look for it."""
+    (git_repo / "settings.yaml").write_text("debug: false\n")
+    _git(git_repo, "add", "-A")
+    _git(git_repo, "commit", "-q", "-m", "add settings")
+    (git_repo / "settings.yaml").write_text("debug: true\n")
+
+    _, _, coverage = analyze_impact(str(git_repo), depth=0)
+
+    assert coverage == {"changed_files": [{"path": "settings.yaml", "outcome": "not_parsed"}], "problems": []}
+
+
 def test_a_renamed_file_changes_no_symbols(git_repo: Path):
     _git(git_repo, "mv", "test.py", "renamed.py")
     _git(git_repo, "commit", "-q", "-m", "rename")
