@@ -91,6 +91,27 @@ def _entrypoints(graph, root: str) -> Dict[str, Dict[str, Any]]:
     return found
 
 
+def _entirely_added(hunks: List[Dict[str, Any]], start: int, end: int) -> bool:
+    """Whether the change added every line start..end and removed nothing
+    there: the symbol is new, not modified. Removed lines anywhere in its
+    hunks rule that out, even ones that may have been a neighbor's -- a
+    hunk doesn't say, and "modified" shows the model what was removed."""
+    added = {ln for hunk in hunks if hunk["added"] for ln in hunk_lines(hunk)}
+    return not any(hunk["removed"] for hunk in hunks) and added >= set(range(start, end + 1))
+
+
+def _last_line(path: str) -> int:
+    """The number of the file's last line (0 if it's empty or unreadable).
+    Trailmark ends a module one line past it when the file ends in a
+    newline."""
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+    except OSError:
+        return 0
+    return data.count(b"\n") + (0 if not data or data.endswith(b"\n") else 1)
+
+
 def _rel(path: str, root: str) -> str:
     """`path` relative to `root`, with forward slashes, as git names files."""
     return os.path.relpath(path, root).replace(os.sep, '/')
@@ -340,6 +361,7 @@ def analyze_impact(
     seed_nodes = set()
     node_metadata = {}
     proxies = set()
+    last_lines: Dict[str, int] = {}  # {changed file: its last line's number}
 
     for node_id, unit in graph.nodes.items():
         if node_id in test_nodes:
@@ -358,7 +380,10 @@ def analyze_impact(
             node_hunks = hunks_in_range(diff_hunks[location.file_path], start, end)
             if node_hunks:
                 seed_nodes.add(node_id)
-                node_metadata[node_id]["status"] = "modified"
+                if location.file_path not in last_lines:
+                    last_lines[location.file_path] = _last_line(location.file_path)
+                new = _entirely_added(node_hunks, start, min(end, last_lines[location.file_path]))
+                node_metadata[node_id]["status"] = "added" if new else "modified"
                 node_metadata[node_id]["diff_hunks"] = node_hunks
                 log(f"  seed: {_display_name(node_metadata[node_id]['name'])} ({location.file_path}:{start}-{end}), {len(node_hunks)} hunk(s)")
 

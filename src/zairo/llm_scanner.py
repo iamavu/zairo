@@ -1101,13 +1101,9 @@ def scan_graph_for_vulnerabilities(
         hunks = mod_node.get('diff_hunks') or []
         start, end = mod_node.get('start_line'), mod_node.get('end_line')
         is_module = mod_node.get('kind') == 'module' and start is not None and end is not None
-        # Every line added and nothing removed: the node is new, and a diff
-        # would only repeat its code as "+" lines.
-        added = {ln for hunk in hunks if hunk["added"] for ln in hunk_lines(hunk)}
-        fully_added = (
-            start is not None and end is not None
-            and not any(hunk["removed"] for hunk in hunks) and added >= set(range(start, end + 1))
-        )
+        # New in its entirety (see analyze_impact): a diff would only repeat
+        # its code as "+" lines.
+        fully_added = mod_node['status'] == 'added'
 
         nested = []
         if is_module:

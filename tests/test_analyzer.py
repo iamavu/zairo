@@ -291,3 +291,30 @@ def test_failing_to_look_for_deleted_symbols_is_an_error(git_repo: Path, monkeyp
     assert problem["level"] == "error"
     assert "(unsupported syntax)" in problem["message"]
     assert "vulnerable_exec" in {n["name"] for n in graph["nodes"]}  # the rest of the analysis still ran
+
+
+def test_a_symbol_the_change_wrote_from_scratch_is_added(git_repo: Path):
+    """Not "modified": nothing of it was there before. Its module is
+    modified, unless the whole file is new."""
+    with open(git_repo / "test.py", "a") as f:
+        f.write("\ndef fresh(x):\n    return x\n")
+    (git_repo / "new.py").write_text("def h(y):\n    return eval(y)\n")
+
+    graph, _, _ = analyze_impact(str(git_repo), depth=0)
+
+    status = {n["name"]: n["status"] for n in graph["nodes"]}
+    assert (status["fresh"], status["h"], status["new.py"]) == ("added", "added", "added")
+    assert status["test.py"] == "modified"
+
+
+def test_a_hunk_that_also_removed_lines_leaves_the_symbol_modified(git_repo: Path):
+    """The removed lines may have been an earlier version of it: the model
+    has to see them."""
+    (git_repo / "test.py").write_text(
+        "import os\ndef vulnerable_exec(user_input):\n    return os.system(user_input + '')\n\n"
+        "def fresh(x):\n    return x\n"
+    )
+
+    graph, _, _ = analyze_impact(str(git_repo), depth=0)
+
+    assert {n["name"]: n["status"] for n in graph["nodes"]}["fresh"] == "modified"

@@ -455,10 +455,12 @@ def test_prompt_shows_what_the_change_removed(monkeypatch):
 def test_entirely_new_node_says_so_instead_of_repeating_its_code(monkeypatch):
     fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
 
-    llm_scanner.scan_graph_for_vulnerabilities({"nodes": [_node("n1", "fn_one")], "edges": []}, "fake-model", cache_path=None)
+    node = dict(_node("n1", "fn_one"), status="added")
+    llm_scanner.scan_graph_for_vulnerabilities({"nodes": [node], "edges": []}, "fake-model", cache_path=None)
 
     [prompt] = _prompts(fake_litellm)
     assert "entirely new in this change" in prompt
+    assert "+__version__" not in prompt
     assert "What this change did here" not in prompt
 
 
