@@ -1,0 +1,42 @@
+# Example workflow that keeps zairo's warm-up notes up to date from your
+# default branch, for zairo-pr-scan.yml to read. Copy this into your own
+# repo's .github/workflows/ (this file is not run by the zairo repo itself).
+#
+# Notes are written from the code they describe, so they're written here,
+# from code that's already merged, and never from a PR's code. Each run
+# only notes functions that are new or changed since the last one.
+name: zairo warm-up
+
+on:
+  push:
+    branches: [main]  # your default branch
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  warm-up:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install zairo
+
+      # Restores the newest notes, and saves them under this commit after
+      # the run, so zairo-pr-scan.yml finds them for PRs based on it.
+      - name: Cache warm-up notes
+        uses: actions/cache@v4
+        with:
+          path: zairo_out/.notes_cache.json
+          key: zairo-notes-${{ github.sha }}
+          restore-keys: zairo-notes-
+
+      - name: Write notes for new and changed functions
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: zairo . --warm-up --model gemini/gemini-2.5-flash --output zairo_out

@@ -1,6 +1,8 @@
 # Example workflow for a repo that wants zairo to scan every PR and block
-# merges on high/critical findings. Copy this into your own repo's
-# .github/workflows/ (this file is not run by the zairo repo itself).
+# merges on high/critical findings the PR introduces. Copy this into your
+# own repo's .github/workflows/ (this file is not run by the zairo repo
+# itself). Pair it with zairo-warm-up.yml, which writes the notes this scan
+# reads from your default branch.
 name: zairo security scan
 
 on:
@@ -24,7 +26,27 @@ jobs:
 
       - run: pip install zairo
 
-      - name: Run zairo (diff PR base..head, fail on high/critical)
+      # Notes written by zairo-warm-up.yml on the default branch: restored,
+      # never saved from here, so a PR's code never writes the notes later
+      # scans trust.
+      - name: Restore warm-up notes
+        uses: actions/cache/restore@v4
+        with:
+          path: zairo_out/.notes_cache.json
+          key: zairo-notes-${{ github.event.pull_request.base.sha }}
+          restore-keys: zairo-notes-
+
+      # Answers from earlier runs on this PR: a new push only asks the model
+      # about symbols whose prompt changed. Caches saved by a PR's runs are
+      # only visible to that PR.
+      - name: Restore LLM answers
+        uses: actions/cache/restore@v4
+        with:
+          path: zairo_out/.llm_cache.json
+          key: zairo-llm-${{ github.event.pull_request.number }}-${{ github.sha }}-${{ github.run_attempt }}
+          restore-keys: zairo-llm-${{ github.event.pull_request.number }}-
+
+      - name: Run zairo (diff PR base..head, fail on high/critical it introduces)
         env:
           # Whichever API key your --model provider needs — see LiteLLM's
           # provider docs (https://docs.litellm.ai/docs/providers).
@@ -36,6 +58,15 @@ jobs:
             --output zairo_out
         continue-on-error: true
         id: scan
+
+      # Saved even when the gate fails -- that's the run most likely to be
+      # pushed to again. (actions/cache's own save skips failed jobs.)
+      - name: Save LLM answers
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: zairo_out/.llm_cache.json
+          key: zairo-llm-${{ github.event.pull_request.number }}-${{ github.sha }}-${{ github.run_attempt }}
 
       - name: Upload SARIF to code scanning
         if: always()

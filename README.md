@@ -109,7 +109,7 @@ Each note says what the function does, where its data comes from, the checks it 
 
 - The notes are kept in `<output>/.notes_cache.json` (`<output>/<repo-slug>/` in multi-repo mode, one repo at a time), keyed on each function's code, so a later warm-up only notes new or changed functions. Every scan with that `--output` reads them.
 - The first warm-up on a large repo makes many requests, about one per 10 functions, with a progress bar. A cheaper `--model` is usually fine for them. The warm-up exits non-zero if it couldn't write any of the notes it needed (a missing API key, say).
-- In CI, keep `.notes_cache.json` between runs (e.g. with `actions/cache`), or every run starts from scratch.
+- In CI, keep `.notes_cache.json` between runs, or every run starts from scratch. [examples/github-actions/zairo-warm-up.yml](examples/github-actions/zairo-warm-up.yml) writes the notes on every push to your default branch and saves them with `actions/cache`, and the PR workflow restores them without ever saving notes from a PR's code.
 - The model is told notes are machine-written hints about code it hasn't seen, not a place to report findings. The changed code itself is always shown in full.
 - Run the warm-up on code you trust, such as your default branch, not on a PR's code: a note is written from the code it describes, and stays in the cache (see [Prompt injection](#prompt-injection)).
 
@@ -180,4 +180,8 @@ zairo . --from "$BASE_REF" --to HEAD --fail-on high -o zairo_out
 See [examples/github-actions/zairo-pr-scan.yml](examples/github-actions/zairo-pr-scan.yml)
 for a full PR-scan workflow: it runs zairo on the PR diff, uploads
 `report.sarif` to GitHub's code scanning, and fails the job if the gate
-fails.
+fails. It keeps `.llm_cache.json` per PR, saved even when the gate fails,
+so a new push only asks the model about what changed since. Its companion,
+[zairo-warm-up.yml](examples/github-actions/zairo-warm-up.yml), writes
+warm-up notes on every push to your default branch for the PR scans to
+restore.
