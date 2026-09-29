@@ -1,4 +1,5 @@
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -241,15 +242,18 @@ def _hunks_text(hunks: List[Dict[str, Any]]) -> str:
         room -= len(shown)
         if not shown:
             continue
-        if hunk["added"]:
-            last = hunk["start"] + len(hunk["added"]) - 1
-            where = f"line {hunk['start']}" if last == hunk["start"] else f"lines {hunk['start']}-{last}"
-        else:
-            where = f"removed after line {hunk['start']}" if hunk["start"] else "removed at the top of the file"
-        parts.append(f"@@ {where} @@\n{block(chr(10).join(shown))}")
+        parts.append(f"@@ {_hunk_where(hunk)} @@\n{block(chr(10).join(shown))}")
     if cut:
         parts.append(f"({cut} more diff line(s) not shown)")
     return "\n".join(parts)
+
+
+def _hunk_where(hunk: Dict[str, Any]) -> str:
+    """Where a hunk is, in the file after the change."""
+    if hunk["added"]:
+        last = hunk["start"] + len(hunk["added"]) - 1
+        return f"line {hunk['start']}" if last == hunk["start"] else f"lines {hunk['start']}-{last}"
+    return f"removed after line {hunk['start']}" if hunk["start"] else "removed at the top of the file"
 
 
 # Words nearly every file is full of -- keywords, literals, the obvious
@@ -269,31 +273,74 @@ def _identifiers(lines: List[str]) -> Set[str]:
     return {w for line in lines for w in _IDENTIFIER_RE.findall(line) if len(w) > 1 and w not in _COMMON_WORDS}
 
 
-def _file_changes_used(file_hunks: List[Dict[str, Any]], code: str, hunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+_STRING_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\'|`(?:[^`\\]|\\.)*`')
+
+
+def _names_used(lines: List[str]) -> Set[str]:
+    """The identifiers code uses: not the words of its strings and
+    comments -- "Too many attempts" doesn't use an `attempts` map."""
+    code = [_STRING_RE.sub(" ", line) for line in lines if not line.strip().startswith(_COMMENT_PREFIXES)]
+    return _identifiers(code)
+
+
+def _file_changes_used(file_hunks: List[Dict[str, Any]], code: str, hunks: List[Dict[str, Any]]) -> List[int]:
     """Which of a file's changes outside every function and class (its
-    module's own hunks) a changed definition in it uses: the ones naming
-    something its code -- as it is now, or the lines the change removed
-    from it -- names too. An import it calls, a constant it used to check
-    against."""
-    used = _identifiers(code.splitlines() + [text for hunk in hunks for text in hunk["removed"]])
-    return [h for h in file_hunks if _identifiers(h["removed"] + h["added"]) & used]
+    module's own hunks, by index) a changed definition in it uses: the ones
+    naming something its code -- as it is now, or the lines the change
+    removed from it -- uses. An import it calls, a constant it used to
+    check against. A change's own strings count, so a route decorator
+    naming "/version" goes with version().
+
+    One git hunk spanning a top-level change and the definition leaves its
+    removed lines whole on both sides (see hunks_in_range): those aren't
+    the definition's, so they don't make it a user of that change."""
+    in_code = _names_used(code.splitlines())
+    removed = [text for hunk in hunks for text in hunk["removed"]]
+    return [
+        i for i, h in enumerate(file_hunks)
+        if _identifiers(h["removed"] + h["added"]) & (in_code | _names_used([t for t in removed if t not in h["removed"]]))
+    ]
 
 
-def _file_changes_section(file_hunks: List[Dict[str, Any]]) -> str:
-    return (
-        "Elsewhere in this file, outside any function or class, the same change also did this, to things "
-        "this code uses or used to. The file's own review leaves to this one any problem that causes here, "
-        'so report it here ("-" lines were removed, "+" lines added):\n' + _hunks_text(file_hunks)
-    )
+def _file_changes_section(owned: List[Dict[str, Any]], shared: List[Tuple[Dict[str, Any], str]]) -> str:
+    """A changed definition's view of the changes outside it that it uses:
+    the ones it `owned` (the first changed definition in the file to use
+    one owns it) and reports any problem in, and the ones `shared` with
+    the definition that owns them, where it reports only what they do to
+    it -- or two functions using the same new constant would both report
+    the constant."""
+    parts = [
+        "Elsewhere in this file, outside any function or class, the same change also did this, to things this "
+        'code uses or used to ("-" lines were removed, "+" lines added). The file\'s own review doesn\'t cover it.'
+    ]
+    if owned:
+        parts.append("Reviewed here -- report any problem in it, or that it causes in this code:\n" + _hunks_text(owned))
+    for owner, group in itertools.groupby(sorted(shared, key=lambda item: (item[1], item[0]["start"])), key=lambda item: item[1]):
+        parts.append(
+            f"Reviewed with `{inline(owner)}`, which reports problems in it -- report here only a problem it "
+            "causes in this code:\n" + _hunks_text([h for h, _ in group])
+        )
+    return "\n".join(parts)
 
 
-# Told to a module's review when some of its definitions changed too.
-_MODULE_SCOPE = (
-    "The functions and classes marked changed above are reviewed on their own, and each is shown the "
-    "changes here to things its code uses or used to. Report a problem here only if the code here causes it itself -- "
-    "not one that arises through how a changed function or class uses something changed here: its own "
-    "review reports that."
-)
+def _module_scope(reviewed_elsewhere: List[Tuple[Dict[str, Any], List[str]]]) -> str:
+    """Told to a module's review when some of its definitions changed too:
+    they're reviewed on their own, and so -- with them -- are the changes
+    here they use (`reviewed_elsewhere`: (hunk, the names of the definitions
+    that use it)), which it's not shown as changes. Named, since it can't
+    see which definition uses what: told only that such changes exist, the
+    model reported them anyway."""
+    text = "The functions and classes marked changed above are reviewed on their own."
+    if reviewed_elsewhere:
+        where = "; ".join(
+            f"{_hunk_where(h)}, with {', '.join(f'`{inline(name)}`' for name in names)}"
+            for h, names in sorted(reviewed_elsewhere, key=lambda item: item[0]["start"])
+        )
+        text += (
+            " So are these changes here, with the ones that use them, and they're left out of the diff "
+            f"above: {where}."
+        )
+    return text + " Report a problem here only if the rest of the code here causes it itself."
 
 
 def _sibling_outline(mod_node: Dict[str, Any], same_file: List[Dict[str, Any]]) -> str:
@@ -1183,11 +1230,13 @@ def scan_graph_for_vulnerabilities(
         ]
         return nested, _outside_nested(mod_node.get('diff_hunks') or [], nested)
 
-    # Each file's changes outside every function and class, for the changed
-    # definitions in it to be shown the ones they use: an import switched to
-    # an unsafe call, a constant their check needed. The module's own review
-    # leaves those to them, or one bug would be reported twice. Not a
-    # comment-only change, which that review skips too.
+    # Each file's changes outside every function and class, and which of
+    # them each changed definition there uses: an import switched to an
+    # unsafe call, a constant its check needed. Those are reviewed with the
+    # definitions that use them and left out of the module's own review --
+    # which can't see what uses them, so reported the same bug again from
+    # its side, even told not to. Not a comment-only change, which that
+    # review skips too.
     changed_ids = {n['id'] for n in modified_nodes}
     file_hunks: Dict[str, List[Dict[str, Any]]] = {}
     for n in modified_nodes:
@@ -1195,6 +1244,22 @@ def scan_graph_for_vulnerabilities(
             own = module_parts(n)[1]
             if own and not _is_trivial_change(own):
                 file_hunks[n['file']] = own
+    uses: Dict[str, List[int]] = {}  # {changed definition's id: indexes into its file's hunks}
+    # {file: {hunk index: the definitions using it, as (start line, id, name), first one first -- its owner}}
+    hunk_users: Dict[str, Dict[int, List[Tuple[int, str, str]]]] = {}
+    for n in modified_nodes:
+        if n.get('kind') == 'module' or n.get('file') not in file_hunks or n.get('start_line') is None or n.get('end_line') is None:
+            continue
+        used = _file_changes_used(
+            file_hunks[n['file']], get_source_code(n['file'], n['start_line'], n['end_line']), n.get('diff_hunks') or [],
+        )
+        if used:
+            uses[n['id']] = used
+            for i in used:
+                hunk_users.setdefault(n['file'], {}).setdefault(i, []).append((n['start_line'], n['id'], n['name']))
+    for users in hunk_users.values():
+        for found in users.values():
+            found.sort()
 
     jobs = []
     for mod_node in modified_nodes:
@@ -1205,7 +1270,7 @@ def scan_graph_for_vulnerabilities(
         # its code as "+" lines.
         fully_added = mod_node['status'] == 'added'
 
-        nested = []
+        nested, reviewed_elsewhere = [], []
         if is_module:
             nested, own_hunks = module_parts(mod_node)
             if hunks and not own_hunks:
@@ -1214,12 +1279,25 @@ def scan_graph_for_vulnerabilities(
             hunks = own_hunks
 
         # Added lines that address an AI reviewer are flagged whatever the
-        # model makes of them (see untrusted.py).
+        # model makes of them (see untrusted.py) -- including ones in changes
+        # reviewed with a definition below.
         bait = {ln: text for hunk in hunks if hunk["added"]
                 for ln, text in zip(hunk_lines(hunk), hunk["added"]) if aimed_at_reviewer(text)}
         if bait:
             bait_lines[mod_node['id']] = bait
             log(f"  text aimed at the AI reviewer: {_display_name(mod_node['name'])}, line(s) {', '.join(map(str, sorted(bait)))}")
+
+        # The module's changes that a changed definition uses are reviewed
+        # with it (see hunk_users above).
+        if is_module and hunk_users.get(mod_node['file']):
+            users = hunk_users[mod_node['file']]
+            reviewed_elsewhere = [
+                (file_hunks[mod_node['file']][i], [name for _, _, name in found]) for i, found in users.items()
+            ]
+            hunks = [h for i, h in enumerate(file_hunks[mod_node['file']]) if i not in users]
+            if not hunks or (not bait and _is_trivial_change(hunks)):
+                skip(mod_node, "its changes are reviewed with the functions or classes that use them, but for comments and blank lines")
+                continue
 
         # Trivial-skip only applies to module-level edits (e.g. a version
         # bump, a standalone doc comment). Skipping a function-kind node
@@ -1281,13 +1359,14 @@ def scan_graph_for_vulnerabilities(
         file_text = ""
         if is_module:
             if any(n['id'] in changed_ids for n in nested):
-                file_text = _MODULE_SCOPE
-        elif mod_node.get('file') in file_hunks and start is not None and end is not None:
-            used = _file_changes_used(file_hunks[mod_node['file']], get_source_code(mod_node['file'], start, end), hunks)
-            if used:
-                file_text = _file_changes_section(used)
-                # A finding may cite a line of them: the model was shown it.
-                shown_lines = shown_lines + [ln for h in used if h["added"] for ln in hunk_lines(h)]
+                file_text = _module_scope(reviewed_elsewhere)
+        elif mod_node['id'] in uses:
+            here, users = file_hunks[mod_node['file']], hunk_users[mod_node['file']]
+            owned = [here[i] for i in uses[mod_node['id']] if users[i][0][1] == mod_node['id']]
+            shared = [(here[i], users[i][0][2]) for i in uses[mod_node['id']] if users[i][0][1] != mod_node['id']]
+            file_text = _file_changes_section(owned, shared)
+            # A finding may cite a line of them: the model was shown it.
+            shown_lines = shown_lines + [ln for h in owned + [h for h, _ in shared] if h["added"] for ln in hunk_lines(h)]
         section = _node_section(mod_node, mod_code, diff_text, neighbor_contexts, reach_text, notes_text, file_text)
 
         # Keyed on the full single-node prompt, not just the code inside it,
