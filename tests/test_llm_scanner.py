@@ -687,6 +687,42 @@ def test_neighbors_beyond_the_cap_are_named_not_shown(monkeypatch, tmp_path):
     assert "3 more related symbol(s), not shown: caller_07 (caller), caller_08 (caller), caller_09 (caller)" in prompt
 
 
+def test_callers_outside_input_comes_through_are_shown_before_the_rest(monkeypatch, tmp_path):
+    """Past the cap, an entry point, and a caller on the way up to one, beat
+    callers that just sort first by id."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    helper, callers, edges = _helper_and_callers(tmp_path, 11)
+    callers[9]["entrypoint"] = {"kind": "api", "trust": "untrusted_external", "description": "route"}
+    # caller_08 is called by a route that isn't one of helper's callers.
+    route = {"id": "r", "name": "route", "kind": "function", "file": callers[0]["file"], "start_line": 4,
+             "end_line": 5, "status": "unchanged", "entrypoint": {"kind": "api", "trust": "untrusted_external", "description": "route"}}
+    edges.append({"source": "r", "target": "c08", "kind": "calls", "confidence": "certain", "lines": [5]})
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(
+        {"nodes": [helper, *callers, route], "edges": edges}, "fake-model", cache_path=None,
+    )
+
+    [prompt] = [p for p in _prompts(fake_litellm) if "Modified Function: helper" in p]
+    shown = re.findall(r"^Caller: (caller_\d+)", prompt, re.M)
+    assert shown[:2] == ["caller_08", "caller_09"]
+    assert len(shown) == 8
+    assert token_usage["seen"]["h"] == {"related": 11, "code_shown": 8, "noted": 0, "lines": 2, "lines_shown": 2}
+
+
+def test_how_much_of_a_long_function_the_model_saw_is_recorded(monkeypatch, tmp_path):
+    _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    src = tmp_path / "big.py"
+    src.write_text("def big(x):\n" + "".join(f"    y{i} = x\n" for i in range(300)) + "    return x\n")
+    node = {"id": "b", "name": "big", "kind": "function", "file": str(src), "start_line": 1, "end_line": 302,
+            "status": "modified", "diff_hunks": [{"start": 200, "removed": ["    y198 = 0"], "added": ["    y198 = x"]}]}
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities({"nodes": [node], "edges": []}, "fake-model", cache_path=None)
+
+    seen = token_usage["seen"]["b"]
+    assert seen["lines"] == 302
+    assert 0 < seen["lines_shown"] < 302
+
+
 def test_context_comes_from_the_context_graph_not_the_scanned_one(monkeypatch, tmp_path):
     """At --depth 0 the report's graph holds only the change; the model
     still gets its callers, from the whole graph."""

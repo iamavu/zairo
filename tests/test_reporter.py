@@ -147,6 +147,14 @@ def test_coverage_is_in_every_report(tmp_path: Path):
     assert "graphData.changed_files" in Path(html_path).read_text(encoding="utf-8")
 
 
+def test_how_much_the_model_saw_reaches_report_json(tmp_path: Path):
+    seen = {"n1": {"lines": 340, "lines_shown": 60, "related": 23, "code_shown": 8, "noted": 5}}
+    json_path, _, _ = generate_reports(_graph_data("x.py"), str(tmp_path / "out"), {}, seen=seen)
+
+    with open(json_path) as f:
+        assert json.load(f)["symbols"][0]["seen"] == seen["n1"]
+
+
 def test_a_graph_only_run_is_complete_unless_the_analysis_failed(tmp_path: Path):
     graph_data = _graph_data("x.py")
     json_path, _, _ = generate_reports(graph_data, str(tmp_path / "out"), None)

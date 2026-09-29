@@ -403,13 +403,21 @@ def _no_note(n: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def _neighbor_contexts(
     mod_node: Dict[str, Any], nodes: Dict[str, Dict[str, Any]], edges: List[Dict[str, Any]],
     note_of: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]] = _no_note,
-) -> Tuple[List[str], List[str], Set[str]]:
+    toward_entrypoints: Set[str] = frozenset(),
+) -> Tuple[List[str], List[str], Set[str], Dict[str, int]]:
     """The code around a changed node that the prompt shows for context:
     its direct callers and callees, and whatever else it's linked to, from
     `edges` (which need only be the ones touching it) -- up to
-    _MAX_NEIGHBORS of them in full. Returns (contexts, noted, direct ids):
-    the rest go into `noted` as note lines when --warm-up wrote a note for
-    them, and are listed by name at the end of `contexts` otherwise."""
+    _MAX_NEIGHBORS of them in full. Returns (contexts, noted, direct ids,
+    seen): the rest go into `noted` as note lines when --warm-up wrote a
+    note for them, and are listed by name at the end of `contexts`
+    otherwise; `seen` counts them -- {"related", "code_shown", "noted"} --
+    for the reports to say how much of its surroundings the model saw.
+
+    Which come first when there are more than _MAX_NEIGHBORS: changed ones,
+    then an entry point or a caller on the way up to one
+    (`toward_entrypoints`) -- where outside input arrives, and what it goes
+    through before the change sees it -- then the rest, by id."""
     roles: Dict[str, Set[str]] = {}
     call_lines: Dict[str, List[int]] = {}
     for e in edges:
@@ -444,9 +452,13 @@ def _neighbor_contexts(
         and nodes[n_id].get('status') != 'deleted' and nodes[n_id].get('kind') != 'proxy'
     ]
     # Changed neighbors first -- a change can span both sides of a call --
-    # then by id: sorted either way, since the prompt, and so its cache key,
-    # can't depend on edge order.
-    candidates.sort(key=lambda n_id: (nodes[n_id].get('status') not in ('modified', 'added'), n_id))
+    # then the ones outside input comes through, then by id: sorted either
+    # way, since the prompt, and so its cache key, can't depend on edge order.
+    candidates.sort(key=lambda n_id: (
+        nodes[n_id].get('status') not in ('modified', 'added'),
+        not (nodes[n_id].get('entrypoint') or n_id in toward_entrypoints),
+        n_id,
+    ))
     contexts, noted, unshown = [], [], []
     for n_id in candidates:
         if len(contexts) < _MAX_NEIGHBORS:
@@ -460,11 +472,12 @@ def _neighbor_contexts(
             noted.append(f"- {label}: {format_note(note)}")
         else:
             unshown.append(label)
+    seen = {"related": len(candidates), "code_shown": len(contexts), "noted": len(noted)}
     if unshown:
         listed = unshown[:_MAX_UNSHOWN_NAMES]
         more = f", and {len(unshown) - len(listed)} more" if len(unshown) > len(listed) else ""
         contexts.append(f"{len(unshown)} more related symbol(s), not shown: {', '.join(listed)}{more}")
-    return contexts, noted, set(roles)
+    return contexts, noted, set(roles), seen
 
 
 # How far up the callers to look for an entry point, and how many of the
@@ -1044,6 +1057,7 @@ def scan_graph_for_vulnerabilities(
     assessed_nodes = []
     skipped_nodes = {}
     unreadable: Dict[str, str] = {}  # {node id: why its code couldn't be read}
+    seen_by_node: Dict[str, Dict[str, int]] = {}  # {node id: how much the model saw -- see _neighbor_contexts}
     bait_lines: Dict[str, Dict[int, str]] = {}  # {node id: {added line: its text}} -- see aimed_at_reviewer
     context = context or graph_data
     nodes = {n['id']: n for n in context['nodes']}
@@ -1172,10 +1186,17 @@ def scan_graph_for_vulnerabilities(
             if outline:
                 mod_code = outline + "\n\n" + mod_code
 
-        neighbor_contexts, noted, direct_ids = _neighbor_contexts(
-            mod_node, nodes, edges_by_node.get(mod_node['id'], []), note_of,
-        )
         reach_paths = _reach_paths(mod_node, nodes, calls_in) if any_entrypoints else []
+        neighbor_contexts, noted, direct_ids, seen = _neighbor_contexts(
+            mod_node, nodes, edges_by_node.get(mod_node['id'], []), note_of,
+            toward_entrypoints={path[1] for path in reach_paths if len(path) > 1},
+        )
+        # How much of it the model saw: of its own code -- a module's nested
+        # definitions aside, which are reviewed on their own -- and of the
+        # symbols around it.
+        if not is_module and start is not None and end is not None:
+            seen.update(lines=end - start + 1, lines_shown=len({ln for ln in shown_lines if start <= ln <= end}))
+        seen_by_node[mod_node['id']] = seen
         reach_text = _reach_section(mod_node, nodes, reach_paths, any_entrypoints)
         notes_text = _notes_section(
             mod_node, nodes, calls_in, calls_out, noted, direct_ids, note_of, reach_paths[:_REACH_MAX_PATHS],
@@ -1398,6 +1419,10 @@ def scan_graph_for_vulnerabilities(
         'notes_used': 0,  # counted at the end: a --dig lookup can use one too
         'lookups': lookups_by_node,
         'lookups_made': 0,
+        # {node id: {"lines", "lines_shown", "related", "code_shown",
+        # "noted"}}: how much of its own code (not for a module) and of
+        # the symbols around it the model was shown.
+        'seen': seen_by_node,
     }
     for node_id, error_message in unreadable.items():
         token_usage['failed_nodes'][node_id] = error_message

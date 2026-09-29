@@ -40,6 +40,7 @@ def _report(output_dir: Path) -> str:
         failed_nodes={"app:upload": "RateLimitError: slow down"},
         changed_files=[{"path": "app.py", "outcome": "analyzed"}, {"path": "deploy.yaml", "outcome": "not_parsed"}],
         problems=[{"level": "warning", "message": "Couldn't find the repo's entry points (boom)."}],
+        seen={"app:save": {"lines": 340, "lines_shown": 60, "related": 23, "code_shown": 8, "noted": 5}},
     )
     return html_path
 
@@ -84,5 +85,9 @@ def test_report_renders_offline(tmp_path: Path):
             details = page.inner_text("#node-details")
             assert "Command injection in save" in details
             assert "app.py" in details
+            assert (
+                "The model was shown 60 of its 340 lines; the code of 8 of 23 related symbols, and notes on 5 more."
+                in " ".join(details.split())
+            )
         finally:
             browser.close()

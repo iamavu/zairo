@@ -49,6 +49,7 @@ def generate_reports(
     changed_files: list = None,
     problems: list = None,
     commits: dict = None,
+    seen: dict = None,
 ):
     """Returns (json_path, html_path, sarif_path). sarif_path is None unless
     an LLM scan actually ran (vulnerabilities is not None, including when it
@@ -82,11 +83,15 @@ def generate_reports(
 
     `lookups` ({node id: [{"tool", "input"[, "from_line"]}]}) are what a
     --dig scan looked up before answering for each node, which report.html
-    lists -- what the answer rests on."""
+    lists -- what the answer rests on. `seen` ({node id: {"lines",
+    "lines_shown", "related", "code_shown", "noted"}}) is how much of its
+    own code and its surroundings the model was shown: a clean answer
+    about a 400-line function it saw 60 lines of is worth less."""
     os.makedirs(output_dir, exist_ok=True)
     failed_nodes = failed_nodes or {}
     skipped_nodes = skipped_nodes or {}
     lookups = lookups or {}
+    seen = seen or {}
     changed_files = changed_files or []
     problems = problems or []
 
@@ -100,6 +105,8 @@ def generate_reports(
             node['scan_skipped'] = skipped_nodes[node['id']]
         if node['id'] in lookups:
             node['lookups'] = lookups[node['id']]
+        if node['id'] in seen:
+            node['seen'] = seen[node['id']]
 
     json_path = os.path.join(output_dir, "report.json")
     html_path = os.path.join(output_dir, "report.html")

@@ -181,6 +181,7 @@ def run_scan(
             assessed_nodes=token_usage['assessed_nodes'] if token_usage else None,
             skipped_nodes=token_usage['skipped_nodes'] if token_usage else None,
             lookups=token_usage['lookups'] if token_usage else None,
+            seen=token_usage['seen'] if token_usage else None,
             changed_files=coverage['changed_files'],
             problems=coverage['problems'],
         )
