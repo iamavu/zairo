@@ -48,27 +48,44 @@ packaged or run, but a scanner pointed at this repository will find them.
 
 ## The scores
 
-A run counts as **flagged** when it has a finding that `--fail-on` would
-block the PR on: marked `introduced_by_change: true`, at or above
-`--fail-on` (default `high`). Incomplete runs (a provider error, say) are
-counted separately and left out of the scores, since they say nothing
-about what the model would have found.
+A finding **gates** when `--fail-on` would block the PR on it: marked
+`introduced_by_change: true`, at or above `--fail-on` (default `high`).
+Each run gets a verdict:
 
-- **recall**: of the runs on vulnerable cases, the share with a gating
-  finding on the case's `symbol`. A finding somewhere else doesn't count.
-- **false alarms**: of the runs on clean cases, the share with any gating
-  finding: a PR blocked for nothing.
+- On a vulnerable case, it **caught** the bug (a gating finding on the
+  case's `symbol`), found it **below the gate** (a finding the change
+  introduced there, at a lower severity), or **missed** it.
+- On a clean case, it **flagged** the change (any gating finding) or
+  **passed** it.
+
+A run is left unscored only when it says nothing either way: the symbol
+that matters couldn't be assessed, or a clean case wasn't flagged but some
+symbol failed. A gating finding counts whatever else failed, since the
+gate would still have blocked the PR on it. The runner prints the most
+common reasons symbols failed, and `--out` keeps them per run. A reasoning
+model that spends all of `--max-tokens` thinking never answers, so raise
+it (to 16384, say) if that's the reason given.
+
+- **recall**: of the scored runs on vulnerable cases, the share that
+  caught it. A finding on another symbol doesn't count.
+- **found**: the share that found it at any severity. A bug found below
+  the gate is still reported; it just doesn't block. An open redirect is
+  commonly rated medium, for instance.
+- **false alarms**: of the scored runs on clean cases, the share flagged:
+  a PR blocked for nothing.
 - **precision**: of the runs with a gating finding, the share where it was
   on target in a vulnerable case.
-- **stable**: the share of cases where every run gave the same verdict.
+- **stable**: the share of cases where every scored run agreed on whether
+  the gate blocks.
   Model answers vary; a case that's caught one run in three is a coin
   toss in CI.
 - **CWE matched**: of the on-target runs, the share that also named the
   case's CWE. It's secondary: the right bug under a neighbouring CWE
   still blocks the right PR.
 
-`--out` writes every run's gating findings (symbol, title, severity, CWE,
-line), token counts and timings, so two runs, such as two models or
+`--out` writes every run's findings (symbol, title, severity, CWE, line,
+whether the change introduced it and whether it gates), the symbols that
+failed and why, token counts and timings, so two runs, such as two models or
 before and after a prompt change, can be compared case by case.
 
 ## Limits

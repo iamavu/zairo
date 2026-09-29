@@ -33,7 +33,8 @@ def main() -> int:
     parser.add_argument("--cases", help="comma-separated case ids to run (default: all)")
     parser.add_argument("--jobs", type=int, default=4, help="scans to run at once (default 4)")
     parser.add_argument("--dig", action="store_true", help="scan with --dig")
-    parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--max-tokens", type=int, default=4096,
+                        help="as zairo --max-tokens: a reasoning model that thinks past it never answers (default 4096)")
     parser.add_argument("--out", help="write every run's details and the scores here as JSON")
     args = parser.parse_args()
 
@@ -46,8 +47,8 @@ def main() -> int:
             run = scan_case(
                 case, run_scan, args.fail_on, root, model=args.model, max_tokens=args.max_tokens, dig=args.dig,
             )
-            mark = "incomplete" if not run.complete else ("flagged" if run.flagged() else "clean")
-            print(f"  {case.id}: {mark}{' -- ' + run.error if run.error else ''}", flush=True)
+            verdict = run.verdict(case) or "not scored"
+            print(f"  {case.id}: {verdict}{'' if run.complete else ' (incomplete)'}", flush=True)
             return run
 
         with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
@@ -59,18 +60,27 @@ def main() -> int:
     for case in cases:
         c = scores["cases"][case.id]
         kind = "vulnerable" if case.vulnerable else "clean"
-        said = f"caught {c['hits']}/{c['runs']}" if case.vulnerable else f"flagged {c['hits']}/{c['runs']}"
-        notes = [n for n in ("" if c["stable"] else "unstable", f"{c['incomplete']} incomplete" if c["incomplete"] else "") if n]
+        said = f"caught {c['hits']}/{c['scored']}" if case.vulnerable else f"flagged {c['hits']}/{c['scored']}"
+        notes = [
+            f"{c['below_gate']} found below the gate" if c["below_gate"] else "",
+            "" if c["stable"] else "unstable",
+            f"{c['runs'] - c['scored']} not scored" if c["runs"] > c["scored"] else "",
+        ]
+        notes = [n for n in notes if n]
         print(f"{case.id:<{width}}  {kind:<10}  {said}{'  (' + ', '.join(notes) + ')' if notes else ''}")
     print(
-        f"\nrecall {_pct(scores['recall'])}, false alarms {_pct(scores['false_alarms'])}, "
-        f"precision {_pct(scores['precision'])}, stable {_pct(scores['stable'])}, "
-        f"CWE matched {_pct(scores['cwe_matched'])}"
+        f"\nrecall {_pct(scores['recall'])} (found at any severity {_pct(scores['found'])}), "
+        f"false alarms {_pct(scores['false_alarms'])}, precision {_pct(scores['precision'])}, "
+        f"stable {_pct(scores['stable'])}, CWE matched {_pct(scores['cwe_matched'])}"
     )
     print(
-        f"{scores['runs']} run(s), {scores['incomplete_runs']} incomplete (not scored); "
+        f"{scores['runs']} run(s): {scores['incomplete_runs']} incomplete, {scores['unscored_runs']} not scored; "
         f"{scores['tokens']:,} tokens; {scores['seconds']:.0f}s of scanning"
     )
+    if scores["failures"]:
+        print("Why symbols failed (runs):")
+        for message, count in list(scores["failures"].items())[:5]:
+            print(f"  ({count}x) {message}")
     if args.out:
         Path(args.out).write_text(json.dumps({
             "model": args.model, "repeats": args.repeats, "fail_on": args.fail_on, "dig": args.dig,

@@ -50,29 +50,63 @@ def _case(case_id, vulnerable):
     )
 
 
-def _finding(symbol, cwe="CWE-89"):
-    return {"symbol": symbol, "title": "t", "severity": "high", "cwe": cwe, "line": 3}
+def _finding(symbol, severity="high", introduced=True, cwe="CWE-89"):
+    return {
+        "symbol": symbol, "title": "t", "severity": severity, "cwe": cwe, "line": 3, "introduced": introduced,
+        "gates": introduced is True and severity in ("high", "critical"),
+    }
+
+
+@pytest.mark.parametrize("run, verdict", [
+    (Run("v", complete=True, findings=[_finding("handler")]), "caught"),
+    # Another symbol failing doesn't undo a catch -- nor a miss on the one that matters.
+    (Run("v", complete=False, findings=[_finding("handler")], failed={"helper": "boom"}), "caught"),
+    (Run("v", complete=False, failed={"helper": "boom"}), "missed"),
+    (Run("v", complete=True, findings=[_finding("handler", severity="medium")]), "below the gate"),
+    (Run("v", complete=True, findings=[_finding("handler", introduced=False)]), "missed"),
+    (Run("v", complete=True, findings=[_finding("helper")]), "missed"),
+    (Run("v", complete=False, failed={"handler": "empty response"}), None),
+    (Run("v", complete=False, error="git failed"), None),
+])
+def test_a_run_on_a_vulnerable_case_says(run, verdict):
+    assert run.verdict(_case("v", True)) == verdict
+
+
+@pytest.mark.parametrize("run, verdict", [
+    (Run("c", complete=True), "passed"),
+    (Run("c", complete=True, findings=[_finding("handler", severity="low")]), "passed"),
+    # A PR blocked for nothing, whatever else failed.
+    (Run("c", complete=False, findings=[_finding("handler")], failed={"helper": "boom"}), "flagged"),
+    (Run("c", complete=False, failed={"helper": "boom"}), None),
+])
+def test_a_run_on_a_clean_case_says(run, verdict):
+    assert run.verdict(_case("c", False)) == verdict
 
 
 def test_scores():
     cases = [_case("sqli", True), _case("clean", False)]
     runs = [
-        Run("sqli", complete=True, gating=[_finding("handler")], tokens=10),
-        Run("sqli", complete=True, gating=[_finding("helper")], tokens=10),  # flagged, but somewhere else
-        Run("sqli", complete=False, error="rate limited"),
+        Run("sqli", complete=True, findings=[_finding("handler")], tokens=10),
+        Run("sqli", complete=True, findings=[_finding("helper")], tokens=10),  # flagged, but somewhere else
+        Run("sqli", complete=True, findings=[_finding("handler", severity="medium")]),
+        Run("sqli", complete=False, failed={"handler": "empty response"}),
         Run("clean", complete=True),
-        Run("clean", complete=True, gating=[_finding("handler")]),
+        Run("clean", complete=False, findings=[_finding("handler")], failed={"helper": "empty response"}),
     ]
 
     scores = summarize(cases, runs)
 
-    assert scores["recall"] == 1 / 2
+    assert scores["recall"] == 1 / 3
+    assert scores["found"] == 2 / 3
     assert scores["false_alarms"] == 1 / 2
     assert scores["precision"] == 1 / 3
     assert scores["stable"] == 0
     assert scores["cwe_matched"] == 1
-    assert (scores["runs"], scores["incomplete_runs"], scores["tokens"]) == (5, 1, 20)
-    assert scores["cases"]["sqli"] == {"vulnerable": True, "runs": 2, "incomplete": 1, "hits": 1, "stable": False}
+    assert (scores["runs"], scores["incomplete_runs"], scores["unscored_runs"], scores["tokens"]) == (6, 2, 1, 20)
+    assert scores["failures"] == {"empty response": 2}
+    assert scores["cases"]["sqli"] == {
+        "vulnerable": True, "runs": 4, "scored": 3, "hits": 1, "below_gate": 1, "stable": False,
+    }
 
 
 def test_a_scan_counts_what_would_fail_the_gate(tmp_path: Path):
@@ -89,12 +123,20 @@ def test_a_scan_counts_what_would_fail_the_gate(tmp_path: Path):
                 {"title": "Old", "severity": "critical", "introduced_by_change": False},
                 {"title": "Minor", "severity": "low", "introduced_by_change": True},
             ]},
-            complete=True, token_usage={"total_tokens": 1234},
+            complete=False, token_usage={"total_tokens": 1234},
+            failed_nodes={"app": "empty response"}, problems=[{"level": "warning", "message": "no entry points"}],
         )
 
     run = scan_case(case, scan, "high", str(tmp_path), model="m")
 
-    assert run.gating == [{"symbol": "search_users", "title": "SQLi", "severity": "critical", "cwe": "CWE-89", "line": 19}]
-    assert (run.findings, run.tokens, run.on_target(case), run.cwe_matched(case)) == (3, 1234, True, True)
+    assert run.gating() == [{
+        "symbol": "search_users", "title": "SQLi", "severity": "critical", "cwe": "CWE-89", "line": 19,
+        "introduced": True, "gates": True,
+    }]
+    assert [(f["title"], f["introduced"], f["gates"]) for f in run.findings] == [
+        ("SQLi", True, True), ("Old", False, False), ("Minor", True, False),
+    ]
+    assert (run.failed, run.problems) == ({"app": "empty response"}, [])
+    assert (run.tokens, run.verdict(case), run.cwe_matched(case)) == (1234, "caught", True)
     [options] = calls
     assert (options["from_ref"], options["to_ref"], options["cache_path"], options["notes_path"]) == ("HEAD~1", "HEAD", None, None)
