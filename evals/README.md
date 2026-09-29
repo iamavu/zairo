@@ -82,6 +82,11 @@ it (to 16384, say) if that's the reason given.
 - **CWE matched**: of the on-target runs, the share that also named the
   case's CWE. It's secondary: the right bug under a neighbouring CWE
   still blocks the right PR.
+- **extra**: in the runs that caught the bug, the gating findings beyond
+  the first. Mostly that's the same bug reported again, under the file
+  that holds the function, say: one bug, several alerts. A genuinely
+  second problem counts too, so check `--out` before reading much into
+  a small number.
 
 `--out` writes every run's findings (symbol, title, severity, CWE, line,
 whether the change introduced it and whether it gates), the symbols that

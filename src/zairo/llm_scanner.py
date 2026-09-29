@@ -224,6 +224,15 @@ def _diff_section(hunks: List[Dict[str, Any]], fully_added: bool, kind_label: st
         return f"This {kind_label} is entirely new in this change: every line shown above was added."
     if not hunks:
         return ""
+    return (
+        'What this change did here ("-" lines were removed, "+" lines added; '
+        "line numbers are in the file after the change):\n" + _hunks_text(hunks)
+    )
+
+
+def _hunks_text(hunks: List[Dict[str, Any]]) -> str:
+    """Hunks as the prompt shows them: each headed by where it is, its
+    lines in a block, cut off past _MAX_DIFF_LINES."""
     parts, room, cut = [], _MAX_DIFF_LINES, 0
     for hunk in sorted(hunks, key=lambda h: h["start"]):
         lines = ["-" + text for text in hunk["removed"]] + ["+" + text for text in hunk["added"]]
@@ -240,10 +249,51 @@ def _diff_section(hunks: List[Dict[str, Any]], fully_added: bool, kind_label: st
         parts.append(f"@@ {where} @@\n{block(chr(10).join(shown))}")
     if cut:
         parts.append(f"({cut} more diff line(s) not shown)")
+    return "\n".join(parts)
+
+
+# Words nearly every file is full of -- keywords, literals, the obvious
+# builtins -- so sharing one says nothing about whether a change outside a
+# function matters to it.
+_COMMON_WORDS = frozenset("""
+    and as assert async await break case catch class const continue def default del do elif else end enum
+    except export extends false False final finally fn for from func function global go if impl import in
+    interface is lambda let map match mod module mut new nil None nonlocal not null of or package pass
+    private protected pub public raise require return self Self static str string struct super switch this
+    throw true True try type typeof undefined use var void while with yield int bool byte error exports
+""".split())
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
+
+
+def _identifiers(lines: List[str]) -> Set[str]:
+    return {w for line in lines for w in _IDENTIFIER_RE.findall(line) if len(w) > 1 and w not in _COMMON_WORDS}
+
+
+def _file_changes_used(file_hunks: List[Dict[str, Any]], code: str, hunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Which of a file's changes outside every function and class (its
+    module's own hunks) a changed definition in it uses: the ones naming
+    something its code -- as it is now, or the lines the change removed
+    from it -- names too. An import it calls, a constant it used to check
+    against."""
+    used = _identifiers(code.splitlines() + [text for hunk in hunks for text in hunk["removed"]])
+    return [h for h in file_hunks if _identifiers(h["removed"] + h["added"]) & used]
+
+
+def _file_changes_section(file_hunks: List[Dict[str, Any]]) -> str:
     return (
-        'What this change did here ("-" lines were removed, "+" lines added; '
-        "line numbers are in the file after the change):\n" + "\n".join(parts)
+        "Elsewhere in this file, outside any function or class, the same change also did this, to things "
+        "this code uses or used to. The file's own review leaves to this one any problem that causes here, "
+        'so report it here ("-" lines were removed, "+" lines added):\n' + _hunks_text(file_hunks)
     )
+
+
+# Told to a module's review when some of its definitions changed too.
+_MODULE_SCOPE = (
+    "The functions and classes marked changed above are reviewed on their own, and each is shown the "
+    "changes here to things its code uses or used to. Report a problem here only if the code here causes it itself -- "
+    "not one that arises through how a changed function or class uses something changed here: its own "
+    "review reports that."
+)
 
 
 def _sibling_outline(mod_node: Dict[str, Any], same_file: List[Dict[str, Any]]) -> str:
@@ -266,16 +316,18 @@ def _sibling_outline(mod_node: Dict[str, Any], same_file: List[Dict[str, Any]]) 
 
 
 def _collapse_nested_definitions(
-    file_path: str, start_line: int, end_line: int, nested: List[Dict[str, Any]]
+    file_path: str, start_line: int, end_line: int, nested: List[Dict[str, Any]], changed: Set[str] = frozenset(),
 ) -> Tuple[str, List[int]]:
     """For a module/file-level node, replace the body of each nested
     top-level function/class with a one-line placeholder instead of sending
-    it in full. A nested definition that changed is already covered by its
-    own, more specific seed node — including its full body here too means
-    the same vulnerable line gets independently re-flagged under the
-    enclosing module as well: wasted cost, and a confusing/duplicate
-    attribution in the report (e.g. a vulnerability inside `parse` showing
-    up as "module X is vulnerable" instead of "parse is vulnerable").
+    it in full. A nested definition that changed (its id in `changed`) is
+    already covered by its own, more specific seed node — including its full
+    body here too means the same vulnerable line gets independently
+    re-flagged under the enclosing module as well: wasted cost, and a
+    confusing/duplicate attribution in the report (e.g. a vulnerability
+    inside `parse` showing up as "module X is vulnerable" instead of "parse
+    is vulnerable"). One that didn't is left out for cost, and its
+    placeholder says so rather than claim it's reviewed elsewhere.
     Returns the numbered code and the line numbers in it -- placeholders
     have none, so a finding can't cite a line the model never saw. A
     placeholder is zairo's, so it goes between blocks of the repo's code,
@@ -284,7 +336,7 @@ def _collapse_nested_definitions(
         return _numbered_blocks(file_path, [(start_line, end_line)])
 
     skip_ranges = sorted(
-        (max(start_line, n['start_line']), min(end_line, n['end_line']), n['name'])
+        (max(start_line, n['start_line']), min(end_line, n['end_line']), n['name'], n['id'] in changed)
         for n in nested
         if n.get('start_line') is not None and n.get('end_line') is not None
         and n['end_line'] >= start_line and n['start_line'] <= end_line
@@ -299,13 +351,14 @@ def _collapse_nested_definitions(
             shown.extend(numbers)
 
     cursor = start_line
-    for lo, hi, name in skip_ranges:
+    for lo, hi, name, was_changed in skip_ranges:
         if lo < cursor:
             continue  # nested-within-nested overlap already covered by a prior placeholder
         if lo > cursor:
             show(cursor, lo - 1)
         where = f"line {lo}" if lo == hi else f"lines {lo}-{hi}"
-        parts.append(f"({where}: `{inline(name)}`, reviewed on its own, so not shown here -- don't guess what it contains)")
+        status = "changed, so reviewed on its own" if was_changed else "unchanged"
+        parts.append(f"({where}: `{inline(name)}`, {status}; not shown here -- don't guess what it contains)")
         cursor = hi + 1
 
     if cursor <= end_line:
@@ -860,14 +913,16 @@ _FINDING_FORMAT = """Each finding is an object with these keys:
 
 def _node_section(
     mod_node: Dict[str, Any], mod_code: str, diff_text: str, neighbor_contexts: List[str],
-    reach_text: str = "", notes_text: str = "",
+    reach_text: str = "", notes_text: str = "", file_text: str = "",
 ) -> str:
     """One node's part of a prompt -- its code after the change, what the
-    change did to it, how it's reached, its callers/callees, and notes on
-    code further out -- shared by the single-node and batch prompts so both
-    always describe a node the same way."""
+    change did to it and to the rest of its file (`file_text`), how it's
+    reached, its callers/callees, and notes on code further out -- shared by
+    the single-node and batch prompts so both always describe a node the
+    same way."""
     kind_label = mod_node.get('kind') or 'function'
     diff_part = f"\n{diff_text}" if diff_text else ""
+    diff_part += f"\n{file_text}" if file_text else ""
     reach_part = f"\n{reach_text}" if reach_text else ""
     context_part = (
         f"\nRelated code, for context (its callers, callees and other links):\n{chr(10).join(neighbor_contexts)}"
@@ -1110,6 +1165,37 @@ def scan_graph_for_vulnerabilities(
 
     # Build prompts up front (cheap, local) so trivial/cached nodes never
     # touch the network, and only real work goes into the thread pool.
+    def module_parts(mod_node: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """A module's nested top-level definitions, and its own changes: the
+        parts of its hunks outside every one of them. Its own scan doesn't
+        re-send the full bodies of those definitions -- a changed one is
+        covered by its own, more specific seed node, and including it here
+        too just duplicates cost and mis-attributes its findings to the
+        enclosing module instead of the actual function. Not a deleted
+        definition: its lines are where it used to be."""
+        start, end = mod_node['start_line'], mod_node['end_line']
+        nested = [
+            n for n in nodes_by_file.get(mod_node['file'], [])
+            if n['id'] != mod_node['id'] and n.get('status') != 'deleted'
+            and n.get('kind') in ('function', 'class')
+            and n.get('start_line') is not None and n.get('end_line') is not None
+            and n['start_line'] >= start and n['end_line'] <= end
+        ]
+        return nested, _outside_nested(mod_node.get('diff_hunks') or [], nested)
+
+    # Each file's changes outside every function and class, for the changed
+    # definitions in it to be shown the ones they use: an import switched to
+    # an unsafe call, a constant their check needed. The module's own review
+    # leaves those to them, or one bug would be reported twice. Not a
+    # comment-only change, which that review skips too.
+    changed_ids = {n['id'] for n in modified_nodes}
+    file_hunks: Dict[str, List[Dict[str, Any]]] = {}
+    for n in modified_nodes:
+        if n.get('kind') == 'module' and n.get('start_line') is not None and n.get('end_line') is not None:
+            own = module_parts(n)[1]
+            if own and not _is_trivial_change(own):
+                file_hunks[n['file']] = own
+
     jobs = []
     for mod_node in modified_nodes:
         hunks = mod_node.get('diff_hunks') or []
@@ -1121,20 +1207,7 @@ def scan_graph_for_vulnerabilities(
 
         nested = []
         if is_module:
-            # A module/file node's own scan shouldn't re-send full bodies of
-            # nested functions/classes -- those are already covered by their
-            # own, more specific seed node when they change, and including
-            # them here too just duplicates cost and mis-attributes their
-            # findings to the enclosing module instead of the actual function.
-            # Not a deleted definition: its lines are where it used to be.
-            nested = [
-                n for n in nodes_by_file.get(mod_node['file'], [])
-                if n['id'] != mod_node['id'] and n.get('status') != 'deleted'
-                and n.get('kind') in ('function', 'class')
-                and n.get('start_line') is not None and n.get('end_line') is not None
-                and n['start_line'] >= start and n['end_line'] <= end
-            ]
-            own_hunks = _outside_nested(hunks, nested)
+            nested, own_hunks = module_parts(mod_node)
             if hunks and not own_hunks:
                 skip(mod_node, "every change is inside a function or class scanned on its own")
                 continue
@@ -1161,7 +1234,7 @@ def scan_graph_for_vulnerabilities(
             continue
 
         if is_module:
-            mod_code, shown_lines = _collapse_nested_definitions(mod_node['file'], start, end, nested)
+            mod_code, shown_lines = _collapse_nested_definitions(mod_node['file'], start, end, nested, changed_ids)
         elif hunks and start is not None and end is not None:
             mod_code, shown_lines = _windowed_source(mod_node['file'], start, end, [ln for hunk in hunks for ln in hunk_lines(hunk)])
         else:
@@ -1202,7 +1275,20 @@ def scan_graph_for_vulnerabilities(
             mod_node, nodes, calls_in, calls_out, noted, direct_ids, note_of, reach_paths[:_REACH_MAX_PATHS],
         )
         diff_text = _diff_section(hunks, fully_added, mod_node.get('kind') or 'function')
-        section = _node_section(mod_node, mod_code, diff_text, neighbor_contexts, reach_text, notes_text)
+        # Where this node's review stands on the rest of its file's change:
+        # a changed definition is shown the changes outside it that it uses,
+        # and owns what they do to it; a module leaves those to it.
+        file_text = ""
+        if is_module:
+            if any(n['id'] in changed_ids for n in nested):
+                file_text = _MODULE_SCOPE
+        elif mod_node.get('file') in file_hunks and start is not None and end is not None:
+            used = _file_changes_used(file_hunks[mod_node['file']], get_source_code(mod_node['file'], start, end), hunks)
+            if used:
+                file_text = _file_changes_section(used)
+                # A finding may cite a line of them: the model was shown it.
+                shown_lines = shown_lines + [ln for h in used if h["added"] for ln in hunk_lines(h)]
+        section = _node_section(mod_node, mod_code, diff_text, neighbor_contexts, reach_text, notes_text, file_text)
 
         # Keyed on the full single-node prompt, not just the code inside it,
         # so changing the prompt's wording or answer format invalidates

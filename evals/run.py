@@ -63,6 +63,7 @@ def main() -> int:
         said = f"caught {c['hits']}/{c['scored']}" if case.vulnerable else f"flagged {c['hits']}/{c['scored']}"
         notes = [
             f"{c['below_gate']} found below the gate" if c["below_gate"] else "",
+            f"{c['extra']} extra gating finding(s)" if c["extra"] else "",
             "" if c["stable"] else "unstable",
             f"{c['runs'] - c['scored']} not scored" if c["runs"] > c["scored"] else "",
         ]
@@ -73,6 +74,7 @@ def main() -> int:
         f"false alarms {_pct(scores['false_alarms'])}, precision {_pct(scores['precision'])}, "
         f"stable {_pct(scores['stable'])}, CWE matched {_pct(scores['cwe_matched'])}"
     )
+    print(f"{scores['extra']} extra gating finding(s) in the {scores['caught_runs']} run(s) that caught the bug")
     print(
         f"{scores['runs']} run(s): {scores['incomplete_runs']} incomplete, {scores['unscored_runs']} not scored; "
         f"{scores['tokens']:,} tokens; {scores['seconds']:.0f}s of scanning"

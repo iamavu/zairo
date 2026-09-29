@@ -507,6 +507,71 @@ def test_module_diff_leaves_out_its_functions_lines(monkeypatch, tmp_path):
     assert "os.system" not in diff
 
 
+def _file_with_top_level_changes(tmp_path):
+    """The import f calls switched, an unrelated setting flipped, and f changed to use the new import."""
+    src = tmp_path / "app.py"
+    src.write_text("import subprocess\nDEBUG = True\n\ndef f(x):\n    return subprocess.run(x, shell=True)\n")
+    import_hunk = {"start": 1, "removed": ["import shlex"], "added": ["import subprocess"]}
+    debug_hunk = {"start": 2, "removed": ["DEBUG = False"], "added": ["DEBUG = True"]}
+    f_hunk = {"start": 5, "removed": ["    return shlex.split(x)"], "added": ["    return subprocess.run(x, shell=True)"]}
+    module = {"id": "m", "name": "app.py", "kind": "module", "file": str(src), "start_line": 1, "end_line": 5,
+              "status": "modified", "diff_hunks": [import_hunk, debug_hunk, f_hunk]}
+    function = {"id": "f", "name": "f", "kind": "function", "file": str(src), "start_line": 4, "end_line": 5,
+                "status": "modified", "diff_hunks": [f_hunk]}
+    return {"nodes": [module, function], "edges": []}
+
+
+def test_a_changed_function_is_shown_the_top_level_changes_it_uses(monkeypatch, tmp_path):
+    """Its review owns the whole bug -- the switched import included -- and
+    not the setting it never touches."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+
+    llm_scanner.scan_graph_for_vulnerabilities(_file_with_top_level_changes(tmp_path), "fake-model", cache_path=None)
+
+    [prompt] = [p for p in _prompts(fake_litellm) if "Modified Function: f" in p]
+    file_changes = prompt.split("Elsewhere in this file")[1]
+    assert "report it here" in file_changes.split("\n")[0]
+    assert _block(prompt, "-import shlex\n+import subprocess") in file_changes
+    assert "DEBUG" not in prompt
+    assert "Elsewhere in this file" not in _inside_blocks(prompt)
+
+
+def test_a_module_leaves_what_its_changed_functions_use_to_them(monkeypatch, tmp_path):
+    """Or the same bug is reported twice: once by f, once by the module
+    from the import it switched."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+
+    llm_scanner.scan_graph_for_vulnerabilities(_file_with_top_level_changes(tmp_path), "fake-model", cache_path=None)
+
+    [prompt] = [p for p in _prompts(fake_litellm) if "Modified Module: app.py" in p]
+    assert "(lines 4-5: `f`, changed, so reviewed on its own; not shown here -- don't guess what it contains)" in prompt
+    assert llm_scanner._MODULE_SCOPE in prompt and llm_scanner._MODULE_SCOPE not in _inside_blocks(prompt)
+    assert "+import subprocess" in prompt and "+DEBUG = True" in prompt  # still its own changes to review
+
+
+def test_a_finding_can_cite_a_top_level_line_its_function_was_shown(monkeypatch, tmp_path):
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    answers = {"Modified Function: f": [{"title": "via the import", "severity": "high", "line": 1},
+                                        {"title": "via the setting", "severity": "high", "line": 2}]}
+    fake_litellm.completion.side_effect = lambda **kw: _answer_for(kw["messages"], answers)
+
+    vulnerabilities, _ = llm_scanner.scan_graph_for_vulnerabilities(
+        _file_with_top_level_changes(tmp_path), "fake-model", cache_path=None,
+    )
+
+    assert [f["line"] for f in vulnerabilities["f"]] == [1, None]  # it wasn't shown line 2
+
+
+def _answer_for(messages, answers):
+    user = messages[-1]["content"]
+    findings = next((found for marker, found in answers.items() if marker in user), [])
+    response = MagicMock()
+    response.choices[0].message.content = json.dumps({"vulnerabilities": findings})
+    response.choices[0].finish_reason = "stop"
+    response.usage = None
+    return response
+
+
 def test_code_is_numbered_so_findings_can_cite_lines(monkeypatch):
     fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
 
@@ -557,8 +622,9 @@ def test_module_code_is_numbered_and_collapsed_lines_cannot_be_cited(monkeypatch
     )
 
     [prompt] = _prompts(fake_litellm)
-    assert "(lines 3-4: `f`, reviewed on its own, so not shown here -- don't guess what it contains)\n" + _block(prompt, "    5 | \n    6 | X = 1") in prompt
+    assert "(lines 3-4: `f`, unchanged; not shown here -- don't guess what it contains)\n" + _block(prompt, "    5 | \n    6 | X = 1") in prompt
     assert "    4 | " not in prompt
+    assert llm_scanner._MODULE_SCOPE not in prompt  # nothing in it changed to leave anything to
     assert [finding["line"] for finding in vulnerabilities["m"]] == [None, 6]
 
 
@@ -753,7 +819,7 @@ def test_deleted_definitions_do_not_hide_or_outline_module_code(monkeypatch, tmp
 
     [prompt] = _prompts(fake_litellm)
     assert "    3 | os.system(ARGS)" in prompt
-    assert "reviewed on its own" not in prompt and "Other definitions in this file" not in prompt
+    assert "don't guess what it contains" not in prompt and "Other definitions in this file" not in prompt
 
 
 def test_no_context_section_without_neighbors(monkeypatch):
@@ -1216,7 +1282,7 @@ def test_zairos_own_notes_on_what_is_left_out_are_never_inside_a_block(monkeypat
     assert len(prompts) == 3
     assert all(code in "\n".join(_inside_blocks(p) for p in prompts) for code in ("    6 | X = 1", "  120 |     x += 120", "invoice_20 ="))
     combined = "\n".join(prompts)
-    for zairos in ("reviewed on its own", "(lines 16-99 not shown)", "(2 more call site(s) not shown)",
+    for zairos in ("don't guess what it contains", "(lines 16-99 not shown)", "(2 more call site(s) not shown)",
                    "line(s) not shown)", "more diff line(s) not shown", "Other definitions in this file", "@@ line 120 @@"):
         assert zairos in combined
         assert all(zairos not in _inside_blocks(p) for p in prompts), zairos

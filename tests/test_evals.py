@@ -86,7 +86,8 @@ def test_a_run_on_a_clean_case_says(run, verdict):
 def test_scores():
     cases = [_case("sqli", True), _case("clean", False)]
     runs = [
-        Run("sqli", complete=True, findings=[_finding("handler")], tokens=10),
+        # Caught -- and reported again under its module.
+        Run("sqli", complete=True, findings=[_finding("handler"), _finding("app.py", cwe="CWE-20")], tokens=10),
         Run("sqli", complete=True, findings=[_finding("helper")], tokens=10),  # flagged, but somewhere else
         Run("sqli", complete=True, findings=[_finding("handler", severity="medium")]),
         Run("sqli", complete=False, failed={"handler": "empty response"}),
@@ -104,8 +105,9 @@ def test_scores():
     assert scores["cwe_matched"] == 1
     assert (scores["runs"], scores["incomplete_runs"], scores["unscored_runs"], scores["tokens"]) == (6, 2, 1, 20)
     assert scores["failures"] == {"empty response": 2}
+    assert (scores["extra"], scores["caught_runs"]) == (1, 1)
     assert scores["cases"]["sqli"] == {
-        "vulnerable": True, "runs": 4, "scored": 3, "hits": 1, "below_gate": 1, "stable": False,
+        "vulnerable": True, "runs": 4, "scored": 3, "hits": 1, "below_gate": 1, "extra": 1, "stable": False,
     }
 
 

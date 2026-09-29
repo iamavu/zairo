@@ -185,7 +185,10 @@ def summarize(cases: List[Case], runs: List[Run]) -> Dict[str, Any]:
       stable:       the share of cases where every scored run agreed on
                     whether the gate blocks;
       cwe matched:  of the runs that caught it, the share that also named
-                    the case's CWE.
+                    the case's CWE;
+      extra:        in the runs that caught it, the gating findings beyond
+                    the first -- mostly the same bug reported again, under
+                    the enclosing module, say: one bug, several alerts.
     `failures` counts why symbols failed across every run, the scored ones
     too: one failed symbol can leave a run's verdict standing."""
     by_case = {c.id: c for c in cases}
@@ -203,6 +206,7 @@ def summarize(cases: List[Case], runs: List[Run]) -> Dict[str, Any]:
             # one, how often it was falsely flagged.
             "hits": sum(gated),
             "below_gate": mine.count("below the gate"),
+            "extra": sum(len(r.gating()) - 1 for r, v in scored if r.case == case.id and v == "caught"),
             "stable": len(set(gated)) <= 1,
         }
     vulnerable = [v for r, v in scored if by_case[r.case].vulnerable]
@@ -220,6 +224,8 @@ def summarize(cases: List[Case], runs: List[Run]) -> Dict[str, Any]:
         "precision": _ratio(len(caught), sum(1 for r in runs if r.flagged())),
         "stable": _ratio(sum(1 for c in per_case.values() if c["scored"] and c["stable"]), sum(1 for c in per_case.values() if c["scored"])),
         "cwe_matched": _ratio(sum(1 for r in caught if r.cwe_matched(by_case[r.case])), len(caught)),
+        "extra": sum(c["extra"] for c in per_case.values()),
+        "caught_runs": len(caught),
         "runs": len(runs),
         "incomplete_runs": sum(1 for r in runs if not r.complete),
         "unscored_runs": len(runs) - len(scored),
