@@ -555,7 +555,7 @@ def test_module_code_is_numbered_and_collapsed_lines_cannot_be_cited(monkeypatch
     )
 
     [prompt] = _prompts(fake_litellm)
-    assert "do not guess its contents) ...\n    5 | " in prompt
+    assert "(lines 3-4: `f`, reviewed on its own, so not shown here -- don't guess what it contains)\n" + _block(prompt, "    5 | \n    6 | X = 1") in prompt
     assert "    4 | " not in prompt
     assert [finding["line"] for finding in vulnerabilities["m"]] == [None, 6]
 
@@ -715,7 +715,7 @@ def test_deleted_definitions_do_not_hide_or_outline_module_code(monkeypatch, tmp
 
     [prompt] = _prompts(fake_litellm)
     assert "    3 | os.system(ARGS)" in prompt
-    assert "NOT SHOWN" not in prompt and "Other definitions in this file" not in prompt
+    assert "reviewed on its own" not in prompt and "Other definitions in this file" not in prompt
 
 
 def test_no_context_section_without_neighbors(monkeypatch):
@@ -962,7 +962,7 @@ def test_scan_shows_notes_on_callers_of_its_callers(monkeypatch, tmp_path):
     [prompt] = _scan_prompts(fake_litellm)
     notes_part = prompt.split("Notes on more related code")[1]
     assert "machine-written summaries" in notes_part and "don't report findings in it" in notes_part
-    assert "Callers of its callers:\n- entry (calls mid): does: Handles the upload request; inputs: req; checks: none" in notes_part
+    assert "Callers of its callers:\n" + _block(prompt, "- entry (calls mid): " + notes.format_note(_NOTE)) in notes_part
     assert "Caller: mid\n<<<REPO TEXT " in prompt  # the direct caller is still shown in full
 
 
@@ -984,7 +984,8 @@ def test_neighbors_past_the_cap_get_their_note_instead_of_just_a_name(monkeypatc
     llm_scanner.scan_graph_for_vulnerabilities({"nodes": [helper, *callers], "edges": edges}, "fake-model", cache_path=None, notes_path=notes_path)
 
     [prompt] = _scan_prompts(fake_litellm)
-    assert "Its other direct callers and callees, not shown above:\n- caller_08 (caller): does: Handles" in prompt
+    assert "Its other direct callers and callees, not shown above:\n<<<REPO TEXT " in prompt
+    assert "\n- caller_08 (caller): does: Handles" in prompt
     assert "- caller_09 (caller): does: Handles" in prompt
     assert "not shown: caller_08" not in prompt
 
@@ -1121,3 +1122,37 @@ def test_batch_prompt_marks_repo_text_the_same_way(monkeypatch):
     assert '"Text aimed at the AI reviewer"' in system["content"]
     assert "=== Node id: n1 ===\nModified Function: fn_one (after the change)\n<<<REPO TEXT " in user["content"]
     assert user["content"].rstrip().endswith('keyed by their node ids: "n1", "n2".')
+
+
+def _inside_blocks(prompt: str) -> str:
+    tag = re.search(r"<<<REPO TEXT ([0-9a-f]+)>>>", prompt).group(1)
+    return "\n".join(re.findall(rf"^<<<REPO TEXT {tag}>>>\n(.*?)\n<<<END REPO TEXT {tag}>>>$", prompt, re.M | re.S))
+
+
+def test_zairos_own_notes_on_what_is_left_out_are_never_inside_a_block(monkeypatch, tmp_path):
+    """A block is the repo's text: a placeholder like "don't guess what it
+    contains" inside one reads as the repo's author steering the review,
+    and gets reported as "Text aimed at the AI reviewer"."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    src = tmp_path / "app.py"
+    src.write_text("import os\n\ndef f(x):\n    return os.system(x)\n\nX = 1\n")
+    module = {"id": "m", "name": "app", "kind": "module", "file": str(src), "start_line": 1, "end_line": 6,
+              "status": "modified", "diff_hunks": [{"start": 6, "removed": ["X = 0"], "added": ["X = 1"]}]}
+    function = {"id": "f", "name": "f", "kind": "function", "file": str(src), "start_line": 3, "end_line": 4, "status": "unchanged"}
+    big = tmp_path / "big.py"
+    big.write_text("def big(x):\n" + "".join(f"    x += {i}\n" for i in range(2, 151)))
+    windowed = {"id": "b", "name": "big", "kind": "function", "file": str(big), "start_line": 1, "end_line": 150, "status": "modified",
+                "diff_hunks": [{"start": 120, "removed": [f"    y = {i}" for i in range(300)], "added": ["    x += 120"]}]}
+    graph = _changed_callee_and_long_caller(tmp_path, [20, 40, 60])
+    graph["nodes"] += [module, function, windowed]
+
+    llm_scanner.scan_graph_for_vulnerabilities(graph, "fake-model", cache_path=None)
+
+    prompts = _prompts(fake_litellm)
+    assert len(prompts) == 3
+    assert all(code in "\n".join(_inside_blocks(p) for p in prompts) for code in ("    6 | X = 1", "  120 |     x += 120", "invoice_20 ="))
+    combined = "\n".join(prompts)
+    for zairos in ("reviewed on its own", "(lines 16-99 not shown)", "(2 more call site(s) not shown)",
+                   "line(s) not shown)", "more diff line(s) not shown", "Other definitions in this file", "@@ line 120 @@"):
+        assert zairos in combined
+        assert all(zairos not in _inside_blocks(p) for p in prompts), zairos

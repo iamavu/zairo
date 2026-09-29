@@ -515,7 +515,7 @@ def test_warm_up_writes_notes_with_its_model_and_the_scan_reads_them(git_repo: P
     assert scan.exit_code == 0, scan.output
     assert {model for model, prompt in calls if prompt.startswith(NOTE_INSTRUCTIONS)} == {"cheap-model"}
     [scan_prompt] = [prompt for model, prompt in calls if "Modified Function: target" in prompt]
-    assert "Callers of its callers:\n- entry (calls mid): does: note on entry" in scan_prompt
+    assert re.search(r"Callers of its callers:\n<<<REPO TEXT \w+>>>\n- entry \(calls mid\): does: note on entry", scan_prompt)
     # Notes on test.py's vulnerable_exec, entry, mid and target; only entry's
     # is needed -- mid is shown in full, target is the change.
     assert "Used 1 of 4 note(s) from an earlier --warm-up" in " ".join(scan.output.split())
