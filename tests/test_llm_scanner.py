@@ -406,7 +406,7 @@ def test_assessed_nodes_lists_every_node_with_a_valid_answer(monkeypatch, tmp_pa
     assessed; a failed node doesn't -- and neither does a skipped one."""
     fake_litellm = MagicMock()
 
-    def answer(model, messages, max_tokens):
+    def answer(model, messages, max_tokens, timeout):
         prompt = _text(messages)
         response = MagicMock()
         response.choices[0].finish_reason = "stop"
@@ -797,7 +797,7 @@ def _fake_llm(monkeypatch, scan_answer='{"vulnerabilities": []}', note=_NOTE, dr
     `scan_answer`."""
     fake_litellm = MagicMock()
 
-    def complete(model, messages, max_tokens):
+    def complete(model, messages, max_tokens, timeout):
         prompt = _text(messages)
         response = MagicMock()
         response.usage = None
@@ -880,7 +880,7 @@ def _cut_off_llm(monkeypatch, cut_after: int) -> MagicMock:
     covers them all."""
     fake_litellm = MagicMock()
 
-    def complete(model, messages, max_tokens):
+    def complete(model, messages, max_tokens, timeout):
         labels = re.findall(r"^=== (F\d+): ", _text(messages), re.M)
         response = MagicMock()
         response.usage = None
@@ -1276,3 +1276,49 @@ def test_a_batch_answer_after_prose_is_found(monkeypatch):
 
     assert token_usage["failed_nodes"] == {}
     assert list(vulnerabilities) == ["n2"]
+
+
+class RateLimitError(Exception):
+    """Named like LiteLLM's: _transient goes by the class name."""
+
+
+class _ProviderError(Exception):
+    def __init__(self, status_code):
+        super().__init__(f"status {status_code}")
+        self.status_code = status_code
+
+
+def test_a_request_that_may_pass_next_time_is_retried(monkeypatch):
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    answer = fake_litellm.completion.return_value
+    fake_litellm.completion.side_effect = [RateLimitError("slow down"), _ProviderError(503), answer]
+    monkeypatch.setattr(llm_scanner, "_RETRY_PAUSE", 0)
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(
+        {"nodes": [_node("n1", "fn")], "edges": []}, "fake-model", cache_path=None, timeout=42,
+    )
+
+    assert token_usage["assessed_nodes"] == ["n1"]
+    assert fake_litellm.completion.call_count == 3
+    assert {call.kwargs["timeout"] for call in fake_litellm.completion.call_args_list} == {42}
+
+
+def test_retries_stop_after_two(monkeypatch):
+    fake_litellm = _mock_litellm(monkeypatch, RateLimitError("slow down"))
+    monkeypatch.setattr(llm_scanner, "_RETRY_PAUSE", 0)
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(
+        {"nodes": [_node("n1", "fn")], "edges": []}, "fake-model", cache_path=None,
+    )
+
+    assert fake_litellm.completion.call_count == 3
+    assert token_usage["failed_nodes"] == {"n1": "slow down"}
+
+
+def test_a_request_that_cant_pass_is_not_retried(monkeypatch):
+    """A bad API key fails the same way every time."""
+    fake_litellm = _mock_litellm(monkeypatch, _ProviderError(401))
+
+    llm_scanner.scan_graph_for_vulnerabilities({"nodes": [_node("n1", "fn")], "edges": []}, "fake-model", cache_path=None)
+
+    assert fake_litellm.completion.call_count == 1

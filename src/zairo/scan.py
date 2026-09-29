@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, List, Optional
 from . import __version__
 from .analyzer import analyze_impact, list_symbols
 from .git_utils import create_worktree, head_commit, remove_worktree, resolve_commit
-from .llm_scanner import scan_graph_for_vulnerabilities, supports_tools, write_notes
+from .llm_scanner import DEFAULT_TIMEOUT, scan_graph_for_vulnerabilities, supports_tools, write_notes
 from .reporter import generate_reports
 from ._util import is_complete
 
@@ -43,6 +43,7 @@ def run_warm_up(
     log: Optional[Callable[[str], None]] = None,
     on_event: Optional[Callable[..., None]] = None,
     debug_log: Optional[Callable[[str], None]] = None,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> Dict[str, Any]:
     """--warm-up: writes notes for every function in the repo as it is on
     disk that doesn't have one yet, into `notes_path`, for later scans to
@@ -50,7 +51,7 @@ def run_warm_up(
     `on_event` gets its "notes_*" events."""
     return write_notes(
         list_symbols(repo_path, language, log=log), model, notes_path, log=log, concurrency=concurrency,
-        max_tokens=max_tokens, debug_log=debug_log, on_event=on_event,
+        max_tokens=max_tokens, debug_log=debug_log, on_event=on_event, timeout=timeout,
     )
 
 
@@ -72,6 +73,7 @@ def run_scan(
     batch_size: int = 1,
     notes_path: Optional[str] = None,
     dig: bool = False,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> ScanResult:
     """Runs the full single-repo pipeline: diff -> impact graph -> optional
     LLM scan -> reports on disk. Shared by the single-repo and multi-repo
@@ -151,6 +153,7 @@ def run_scan(
                 on_progress=lambda done, total: on_event("llm_scan_progress", done=done, total=total),
                 # A --dig answer is cached per commit: a working tree has none.
                 dig=dig, repo_root=analysis_root, dig_revision=to_ref if (from_ref and to_ref) else None,
+                timeout=timeout,
             )
             num_vulnerabilities = sum(len(findings) for findings in vulnerabilities.values())
             on_event(

@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn
 from . import __version__
+from .llm_scanner import DEFAULT_TIMEOUT
 from .rollup import unique_slug, write_rollup_reports
 from .scan import run_scan, run_warm_up
 from ._util import max_severity, normalize_severity, severity_rank
@@ -355,6 +356,7 @@ def _run_single_repo(
     repo_path: str, output_dir: str, depth: int, from_ref: Optional[str], to_ref: Optional[str],
     language: str, llm: bool, model: str, concurrency: int, cache: bool, max_tokens: int,
     tokens: bool, fail_on: Optional[Severity], verbose: bool, debug: bool, batch_size: int, dig: bool,
+    timeout: float,
 ) -> int:
     """Runs the one-repo path: live per-stage progress, reports written
     directly to output_dir. Returns the exit status: EXIT_FAILED if a
@@ -376,7 +378,7 @@ def _run_single_repo(
         result = run_scan(
             repo_path, output_dir, depth, from_ref, to_ref, language, llm, model, concurrency,
             cache_path, max_tokens, log=log, debug_log=debug_log, batch_size=batch_size, notes_path=notes_path,
-            on_event=lambda event, **kw: _single_repo_on_event(event, progress, **kw), dig=dig,
+            on_event=lambda event, **kw: _single_repo_on_event(event, progress, **kw), dig=dig, timeout=timeout,
         )
     except Exception as e:
         progress.stop()
@@ -420,7 +422,7 @@ def _run_multi_repo(
     paths: List[str], output_dir: str, depth: int, from_ref: Optional[str], to_ref: Optional[str],
     language: str, llm: bool, model: str, concurrency: int, repo_concurrency: int, cache: bool,
     max_tokens: int, tokens: bool, fail_on: Optional[Severity], continue_on_error: bool, verbose: bool,
-    debug: bool, batch_size: int, dig: bool,
+    debug: bool, batch_size: int, dig: bool, timeout: float,
 ) -> int:
     """Runs the multi-repo path: per-repo subdirectories plus an aggregate
     rollup.json/.html/.sarif. Returns the exit status: EXIT_FAILED if a repo
@@ -444,7 +446,7 @@ def _run_multi_repo(
             scan_result = run_scan(
                 repo_path, repo_output_dir, depth, from_ref, to_ref, language, llm, model, concurrency,
                 cache_path, max_tokens, log=log, on_event=on_event, debug_log=debug_log,
-                batch_size=batch_size, notes_path=notes_path, dig=dig,
+                batch_size=batch_size, notes_path=notes_path, dig=dig, timeout=timeout,
             )
             return {"repo": repo_path, "slug": slug, "status": "ok", "result": scan_result}
         except Exception as e:
@@ -580,7 +582,7 @@ def _run_multi_repo(
 
 def _run_warm_up(
     paths: List[str], output_dir: str, language: str, model: str, concurrency: int, max_tokens: int,
-    verbose: bool, debug: bool,
+    verbose: bool, debug: bool, timeout: float,
 ) -> bool:
     """--warm-up: writes notes for each repo, one at a time, where its scans
     read them from -- <output>/.notes_cache.json, or
@@ -604,7 +606,7 @@ def _run_warm_up(
         progress = _Progress(indent=indent)
         try:
             stats = run_warm_up(
-                repo_path, notes_path, model, language, concurrency, max_tokens, log=log, debug_log=debug_log,
+                repo_path, notes_path, model, language, concurrency, max_tokens, log=log, debug_log=debug_log, timeout=timeout,
                 on_event=lambda event, **kw: _print_notes_event(event, kw, progress, indent),
             )
         except Exception as e:
@@ -640,6 +642,7 @@ def analyze(
     warm_up: bool = typer.Option(False, "--warm-up", help="Instead of scanning, write a short note on what each function in the repo does (skipping ones already noted), into <output>/.notes_cache.json -- no reports. Later scans with the same --output read these notes as hints about code they don't show in full. The first run on a large repo makes many LLM requests."),
     dig: bool = typer.Option(False, "--dig", help="Experimental. Let the model look up what it needs before it answers -- warm-up notes, source, callers and callees, a text search of the repo -- up to 8 lookups per changed symbol, instead of seeing only the context zairo picks. Slower and costlier (every lookup is another request), and answers vary more between runs; cached per commit when scanning --from/--to. Needs a model that can call tools."),
     max_tokens: int = typer.Option(4096, "--max-tokens", help="Max output tokens per LLM scan request. Reasoning models count internal thinking against this budget too — too low can cause empty responses"),
+    timeout: float = typer.Option(DEFAULT_TIMEOUT, "--timeout", min=1, help="Seconds each LLM request gets to answer. One that times out, or hits a rate limit or a provider error, is retried twice with a pause; one that still fails leaves its symbols unassessed and the run incomplete."),
     tokens: bool = typer.Option(False, "--tokens", help="Show total LLM tokens used across real API calls (cache hits don't count)"),
     fail_on: Severity = typer.Option(None, "--fail-on", help="Exit with status 1 if the change introduces a finding at or above this severity (one marked introduced_by_change: true) -- for gating CI/PR checks. Findings that were already there are reported, not gated on. However it's set, an incomplete run exits with status 3. Errors if combined with --graph-only."),
     continue_on_error: bool = typer.Option(True, "--continue-on-error/--stop-on-error", help="Multi-repo mode: keep scanning remaining repos if one fails (default), instead of aborting the run"),
@@ -672,19 +675,19 @@ def analyze(
 
     if warm_up:
         failed = _run_warm_up(
-            paths, output_dir, language, model, concurrency, max_tokens, verbose, debug,
+            paths, output_dir, language, model, concurrency, max_tokens, verbose, debug, timeout,
         )
         status = EXIT_FAILED if failed else 0
     elif len(paths) == 1:
         status = _run_single_repo(
             paths[0], output_dir, depth, from_ref, to_ref, language, llm, model, concurrency,
-            cache, max_tokens, tokens, fail_on, verbose, debug, batch_size, dig,
+            cache, max_tokens, tokens, fail_on, verbose, debug, batch_size, dig, timeout,
         )
     else:
         status = _run_multi_repo(
             paths, output_dir, depth, from_ref, to_ref, language, llm, model, concurrency,
             repo_concurrency, cache, max_tokens, tokens, fail_on, continue_on_error, verbose, debug,
-            batch_size, dig,
+            batch_size, dig, timeout,
         )
 
     if status:

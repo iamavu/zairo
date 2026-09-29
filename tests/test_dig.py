@@ -252,7 +252,7 @@ def test_dig_takes_no_graph_only_batching_or_warm_up(tmp_path):
 
 
 def test_dig_end_to_end_records_the_lookups_in_the_report(git_repo: Path, tmp_path: Path):
-    def complete(model, messages, max_tokens, tools=None):
+    def complete(model, messages, max_tokens, timeout, tools=None):
         asked = any(isinstance(m, dict) and m.get("role") == "tool" for m in messages)
         return _answer('{"vulnerabilities": []}') if asked else _ask(("callers", {"symbol": "vulnerable_exec"}))
 

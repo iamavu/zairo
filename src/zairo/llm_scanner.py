@@ -3,8 +3,9 @@ import json
 import os
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Callable, Dict, List, Optional, Set, Tuple, Any
 
 # `litellm` transitively imports the openai/anthropic SDKs and their full
@@ -599,6 +600,42 @@ def _notes_section(
 _TRACEBACK_MARKER = "Traceback (most recent call last):"
 _MAX_ERROR_SUMMARY_LEN = 300
 
+# Every request's limits. It gets `timeout` seconds to answer (--timeout).
+# One that fails on something likely to pass the next time -- a rate
+# limit, a timeout, a dropped connection, a provider's 5xx -- is tried
+# again after a pause, up to _RETRIES more times; anything else (a bad API
+# key, a request the provider refuses) fails at once. A request that still
+# fails leaves its symbols unassessed, and the run incomplete.
+DEFAULT_TIMEOUT = 300
+_RETRIES = 2
+_RETRY_PAUSE = 5  # seconds before the first retry, doubling after each
+# LiteLLM's exceptions for those, by class name -- a subclass counts --
+# and the HTTP statuses they stand for, for any other exception carrying one.
+_TRANSIENT_ERRORS = {
+    "RateLimitError", "Timeout", "APIConnectionError", "InternalServerError", "ServiceUnavailableError",
+    "BadGatewayError",
+}
+_TRANSIENT_STATUSES = {408, 429, 500, 502, 503, 504}
+
+
+def _transient(e: Exception) -> bool:
+    """Whether a failed request may well pass if it's sent again."""
+    return (
+        any(cls.__name__ in _TRANSIENT_ERRORS for cls in type(e).__mro__)
+        or getattr(e, "status_code", None) in _TRANSIENT_STATUSES
+    )
+
+
+def _ask(timeout: float, **request: Any) -> Any:
+    """litellm.completion(**request), within the limits above."""
+    for attempt in range(_RETRIES + 1):
+        try:
+            return litellm.completion(timeout=timeout, **request)
+        except Exception as e:
+            if attempt == _RETRIES or not _transient(e):
+                raise
+            time.sleep(_RETRY_PAUSE * 2 ** attempt)
+
 
 def _summarize_error(e: Exception) -> str:
     """A short, single-line, stable summary of an exception for the always-on
@@ -931,10 +968,14 @@ def scan_graph_for_vulnerabilities(
     dig: bool = False,
     repo_root: Optional[str] = None,
     dig_revision: Optional[str] = None,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> Tuple[Dict[str, List[Dict]], Dict[str, int]]:
     """Returns (vulnerabilities, token_usage). vulnerabilities also holds a
     finding for every added line that addresses an AI reviewer (see
     untrusted.py), found without the model.
+
+    Each request gets `timeout` seconds, and a few retries if it fails on
+    something that may pass next time (see _ask).
 
     `dig` (--dig, see dig.py) lets the model look things up in the repo at
     `repo_root` before it answers, one symbol per conversation. Its answers
@@ -1183,7 +1224,7 @@ def scan_graph_for_vulnerabilities(
             debug_log(f"\n{'='*80}\nPROMPT -- {node_label}\n{'='*80}\n{_as_text(prompt)}\n")
         usage = None  # unavailable if the provider doesn't report it
         try:
-            response = litellm.completion(model=model, messages=prompt, max_tokens=max_tokens)
+            response = _ask(timeout, model=model, messages=prompt, max_tokens=max_tokens)
             choice = response.choices[0]
             content = choice.message.content or ""
             finish_reason = getattr(choice, 'finish_reason', 'unknown')
@@ -1240,7 +1281,7 @@ def scan_graph_for_vulnerabilities(
             return [(mod_node['id'], prompt_hash, None, run.usage(), error_message)]
 
         try:
-            content, finish_reason = _dig(litellm.completion, model, prompt, tools, max_tokens, run, lookup_log)
+            content, finish_reason = _dig(partial(_ask, timeout), model, prompt, tools, max_tokens, run, lookup_log)
         except Exception as e:
             if debug_log:
                 debug_log(f"\n{'-'*80}\nERROR -- {node_label}\n{'-'*80}\n{e}\n")
@@ -1279,7 +1320,7 @@ def scan_graph_for_vulnerabilities(
             debug_log(f"\n{'='*80}\nPROMPT -- {batch_label}\n{'='*80}\n{_as_text(prompt)}\n")
         usage = None
         try:
-            response = litellm.completion(model=model, messages=prompt, max_tokens=max_tokens)
+            response = _ask(timeout, model=model, messages=prompt, max_tokens=max_tokens)
             choice = response.choices[0]
             content = choice.message.content or ""
             finish_reason = getattr(choice, 'finish_reason', 'unknown')
@@ -1485,10 +1526,11 @@ def write_notes(
     max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
     debug_log: Optional[Callable[[str], None]] = None,
     on_event: Optional[Callable[..., None]] = None,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> Dict[str, Any]:
     """--warm-up: writes a note (see notes.py) for every function and method
     in `nodes` that doesn't have one yet, several to a request (see
-    _note_groups), and saves them to `notes_path` -- also when interrupted,
+    _note_groups, and _ask for each request's limits), and saves them to `notes_path` -- also when interrupted,
     keeping the ones done so far. Identical functions share one note. A
     response cut off at max_tokens keeps the notes it finished, and the
     functions it didn't get to go again in a request of their own, as long
@@ -1538,7 +1580,7 @@ def write_notes(
         label = f"notes for {len(batch)} function(s): " + ", ".join(_display_name(n['name']) for _key, (n, _code) in batch)
         if debug_log:
             debug_log(f"\n{'='*80}\nPROMPT -- {label}\n{'='*80}\n{_as_text(prompt)}\n")
-        response = litellm.completion(model=model, messages=prompt, max_tokens=max_tokens)
+        response = _ask(timeout, model=model, messages=prompt, max_tokens=max_tokens)
         usage = getattr(response, 'usage', None)
         tokens = (getattr(usage, 'total_tokens', 0) or 0) if usage is not None else 0
         content = response.choices[0].message.content or ""

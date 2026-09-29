@@ -546,7 +546,7 @@ def test_warm_up_takes_no_scan_options(tmp_path: Path):
 def _fake_llm_writing_notes(calls: list) -> MagicMock:
     """Answers note requests with "note on <function name>" and scan
     requests with no findings, recording (model, prompt) in `calls`."""
-    def complete(model, messages, max_tokens):
+    def complete(model, messages, max_tokens, timeout):
         prompt = _text(messages)
         calls.append((model, prompt))
         response = MagicMock()
