@@ -1,5 +1,5 @@
 {
-  "description": "Adds an in-memory rate limit to the login handler: more than five attempts from one address in fifteen minutes get a 429. Only adds a check.",
+  "description": "Adds an in-memory rate limit to the login handler: more than five attempts from one address in fifteen minutes get a 429. Its memory is bounded -- the latest six attempts per address, the 10,000 addresses seen most recently. Only adds a check.",
   "vulnerable": false,
   "source": "synthetic"
 }

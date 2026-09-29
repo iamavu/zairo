@@ -26,9 +26,12 @@ class Case:
     before: Path
     after: Path
     # Where a finding should be, for a vulnerable case: the changed
-    # symbol's name, and the CWE it's an instance of.
+    # symbol's name, and the CWE it's an instance of -- plus any others
+    # that describe it as well (a spoofable header is CWE-290, but CWE-287
+    # and CWE-306 aren't wrong).
     symbol: Optional[str] = None
     cwe: Optional[str] = None
+    also_cwe: List[str] = field(default_factory=list)
     source: str = ""
 
 
@@ -41,7 +44,8 @@ def load_cases(cases_dir: Path = CASES_DIR, only: Optional[List[str]] = None) ->
         cases.append(Case(
             id=case_dir.name, description=meta["description"], vulnerable=meta["vulnerable"],
             before=case_dir / "before", after=case_dir / "after",
-            symbol=meta.get("symbol"), cwe=meta.get("cwe"), source=meta.get("source", ""),
+            symbol=meta.get("symbol"), cwe=meta.get("cwe"), also_cwe=meta.get("also_cwe", []),
+            source=meta.get("source", ""),
         ))
     if only:
         missing = set(only) - {c.id for c in cases}
@@ -108,7 +112,8 @@ class Run:
         return any(f["symbol"] == case.symbol and f["introduced"] is True for f in self.findings)
 
     def cwe_matched(self, case: Case) -> bool:
-        return any(f["symbol"] == case.symbol and f["cwe"] == normalize_cwe(case.cwe) for f in self.gating())
+        accepted = {normalize_cwe(cwe) for cwe in [case.cwe, *case.also_cwe]}
+        return any(f["symbol"] == case.symbol and f["cwe"] in accepted for f in self.gating())
 
     def verdict(self, case: Case) -> Optional[str]:
         """What this run says about the case, or None when it says nothing.

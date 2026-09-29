@@ -3,5 +3,6 @@
   "vulnerable": true,
   "symbol": "check_api_key",
   "cwe": "CWE-290",
+  "also_cwe": ["CWE-287", "CWE-306"],
   "source": "synthetic, after an auth bypass zairo --dig found in a real Go service"
 }

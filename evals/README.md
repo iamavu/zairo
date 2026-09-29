@@ -33,7 +33,11 @@ hold the whole (small) repo on each side, and `case.json` labels it:
 ```
 
 A vulnerable case names the changed `symbol` the vulnerability is in and
-its `cwe`. A clean case has neither. The runner commits `before`, then
+its `cwe`, plus, in `also_cwe`, any others that describe it as well: a
+spoofable header is CWE-290, but CWE-287 and CWE-306 aren't wrong. A clean
+case has none of these, and should be clean beyond argument. A change
+that's safe at `high` but has a fair `medium` finding in it measures noise,
+not false alarms. The runner commits `before`, then
 `after`, into a fresh repo and scans `HEAD~1..HEAD`, as a PR scan would.
 
 There are 9 vulnerable cases (SQL injection, path traversal, a dropped

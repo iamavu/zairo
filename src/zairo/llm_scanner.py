@@ -490,7 +490,9 @@ def _neighbor_snippet(n: Dict[str, Any], roles: Set[str], call_lines: List[int],
     if n.get('entrypoint'):
         header += f" (entry point: {_entry_label(n)})"
     if n.get('status') in ('modified', 'added'):
-        header += " (also changed in this change)"
+        # It has a review of its own, which reports problems in it -- or a
+        # caller shown it here reports them again.
+        header += " (also changed in this change, and reviewed on its own: report here only what it does to this code, not a problem in it)"
     if around_calls:
         header += f" -- shown around where it calls {inline(mod_name)}"
     return f"{header}\n{code}"

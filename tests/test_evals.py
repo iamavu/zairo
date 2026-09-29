@@ -28,9 +28,9 @@ def test_a_case_is_a_change_zairo_sees_where_its_label_says(case: Case, tmp_path
     no scan could ever be scored as catching it."""
     assert case.description and case.before.is_dir() and case.after.is_dir()
     if case.vulnerable:
-        assert case.symbol and normalize_cwe(case.cwe) == case.cwe
+        assert case.symbol and all(normalize_cwe(cwe) == cwe for cwe in [case.cwe, *case.also_cwe])
     else:
-        assert case.symbol is None and case.cwe is None
+        assert case.symbol is None and case.cwe is None and not case.also_cwe
     repo = build_repo(case, str(tmp_path))
 
     graph, _, coverage = analyze_impact(repo, depth=0, from_ref="HEAD~1", to_ref="HEAD")
@@ -81,6 +81,16 @@ def test_a_run_on_a_vulnerable_case_says(run, verdict):
 ])
 def test_a_run_on_a_clean_case_says(run, verdict):
     assert run.verdict(_case("c", False)) == verdict
+
+
+def test_a_cwe_that_describes_the_bug_as_well_matches():
+    case = Case(
+        id="v", description="", vulnerable=True, before=Path(), after=Path(),
+        symbol="handler", cwe="CWE-290", also_cwe=["CWE-287"],
+    )
+
+    assert Run("v", complete=True, findings=[_finding("handler", cwe="CWE-287")]).cwe_matched(case)
+    assert not Run("v", complete=True, findings=[_finding("handler", cwe="CWE-20")]).cwe_matched(case)
 
 
 def test_scores():

@@ -818,6 +818,22 @@ def test_neighbors_beyond_the_cap_are_named_not_shown(monkeypatch, tmp_path):
     assert "3 more related symbol(s), not shown: caller_07 (caller), caller_08 (caller), caller_09 (caller)" in prompt
 
 
+def test_a_changed_neighbor_is_left_to_its_own_review(monkeypatch, tmp_path):
+    """Its caller's review sees its code, and reported the problem in it
+    again: told that one's reviewed on its own, it has what it needs to
+    leave it there."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    helper, callers, edges = _helper_and_callers(tmp_path, 1)
+    callers[0]["status"] = "modified"
+    callers[0]["diff_hunks"] = [{"start": 5, "removed": ["    return None"], "added": ["    return helper(0)"]}]
+
+    llm_scanner.scan_graph_for_vulnerabilities({"nodes": [helper, *callers], "edges": edges}, "fake-model", cache_path=None)
+
+    [prompt] = [p for p in _prompts(fake_litellm) if "Modified Function: caller_00" in p]
+    header = "Callee: helper (also changed in this change, and reviewed on its own: report here only what it does to this code, not a problem in it)\n"
+    assert header in prompt and "reviewed on its own" not in _inside_blocks(prompt)
+
+
 def test_callers_outside_input_comes_through_are_shown_before_the_rest(monkeypatch, tmp_path):
     """Past the cap, an entry point, and a caller on the way up to one, beat
     callers that just sort first by id."""
