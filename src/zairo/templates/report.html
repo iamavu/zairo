@@ -70,6 +70,9 @@
         .count { padding: 1px 6px; border-radius: 4px; font: 10px/17px var(--mono); color: var(--muted); background: var(--raised); }
         .tab[aria-selected="true"] .count { background: var(--accent-wash); color: var(--accent); }
         .scan-notice { margin: 12px 20px 0; padding: 9px 12px; border: 1px solid var(--border); border-left: 3px solid var(--sev-medium); border-radius: 6px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+        .scan-notice span { display: block; }
+        .scan-notice span + span { margin-top: 6px; }
+        .scan-notice b { color: var(--text); font-weight: 600; }
         .list-toolbar { padding: 13px 20px 11px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
         select { color: var(--muted); background: var(--surface); border: 1px solid transparent; border-radius: 4px; padding: 5px 2px; max-width: 180px; cursor: pointer; font-size: 11px; }
         select:hover { color: var(--text); border-color: var(--border); }
@@ -229,7 +232,7 @@
                     <button id="tab-symbols" class="tab" role="tab" aria-controls="review-panel" aria-selected="false" tabindex="-1">Symbols <span class="count" id="symbol-count">0</span></button>
                 </div>
             </div>
-            <p class="scan-notice" id="scan-notice" role="status" hidden></p>
+            <div class="scan-notice" id="scan-notice" role="status" hidden></div>
             <div id="review-panel" role="tabpanel" aria-labelledby="tab-findings" style="display:flex;flex-direction:column;flex:1;min-height:0">
                 <div class="list-toolbar">
                     <label class="sr-only" for="severity-filter">Filter findings by severity</label>
@@ -332,6 +335,11 @@
         const scannedIds = new Set(reportMeta.scanned_symbol_ids);
         // Symbols the model couldn't assess: no findings on them proves nothing.
         const unassessed = nodes.filter(n => n.scan_error).length;
+        const problems = graphData.problems || [];
+        const failedSteps = problems.filter(p => p.level === 'error').length;
+        // The outcomes of a changed file that mean nothing in it was reviewed (see analyze_impact).
+        const NOT_REVIEWED = { not_parsed: 'zairo doesn’t parse', no_symbols_changed: 'where the change touched no symbol' };
+        const notReviewed = (graphData.changed_files || []).filter(f => Object.hasOwn(NOT_REVIEWED, f.outcome));
         const oneLine = value => String(value).replace(/\s+/g, ' ').trim();
         const shortName = n => oneLine(n.name).split(':').pop();
         function relativeFile(n) {
@@ -350,8 +358,18 @@
         $('finding-count').textContent = formatNumber(findings.length);
         $('symbol-count').textContent = formatNumber(nodes.length);
         ['unchanged', 'deleted'].forEach(s => $(s + '-count').textContent = formatNumber(nodes.filter(n => n.status === s).length));
-        if (unassessed) {
-            $('scan-notice').textContent = `Scan incomplete: ${plural(unassessed, 'symbol')} could not be assessed, so no findings there is not a clean result.`;
+        const notices = [];
+        if (!graphData.complete) {
+            const reasons = [unassessed ? `${plural(unassessed, 'changed symbol')} could not be assessed` : '', failedSteps ? `${plural(failedSteps, 'part')} of the analysis failed` : ''].filter(Boolean);
+            notices.push(`<b>Incomplete:</b> ${reasons.join(' and ')}, so no findings there is not a clean result.`);
+        }
+        problems.forEach(p => notices.push(`<b>${p.level === 'error' ? 'Error' : 'Warning'}:</b> ${escapeHtml(p.message)}`));
+        Object.entries(NOT_REVIEWED).forEach(([outcome, saying]) => {
+            const paths = notReviewed.filter(f => f.outcome === outcome).map(f => f.path);
+            if (paths.length) notices.push(`<b>Not reviewed:</b> ${plural(paths.length, 'changed file')} ${saying}: ${escapeHtml(paths.join(', '))}`);
+        });
+        if (notices.length) {
+            $('scan-notice').innerHTML = notices.map(n => `<span>${n}</span>`).join('');
             $('scan-notice').hidden = false;
         }
         for (const option of $('severity-filter').options) {
@@ -401,7 +419,7 @@
             if (!results.length) {
                 const filtered = $('search').value.trim() || (activeTab === 'findings' ? $('severity-filter').value !== 'all' : $('status-filter').value !== 'changed');
                 if (filtered) $('results').innerHTML = emptyState('No matches', 'Try another search or reset the filters.', '<button class="button" data-action="reset-filters">Reset filters</button>');
-                else if (activeTab === 'findings') $('results').innerHTML = emptyState(!reportMeta.scan_performed ? 'Security scan not run' : unassessed ? 'Scan incomplete' : 'No findings reported', '', '<button class="button" data-action="show-symbols">Explore symbols</button>', reportMeta.scan_performed && !unassessed ? 'check' : 'shield');
+                else if (activeTab === 'findings') $('results').innerHTML = emptyState(!reportMeta.scan_performed ? 'Security scan not run' : !graphData.complete ? 'Scan incomplete' : 'No findings reported', '', '<button class="button" data-action="show-symbols">Explore symbols</button>', reportMeta.scan_performed && graphData.complete ? 'check' : 'shield');
                 else $('results').innerHTML = emptyState(nodes.length ? 'No changed symbols' : 'No symbols to show', '', nodes.length ? '<button class="button" data-action="all-symbols">Show all symbols</button>' : '', 'graph');
                 return;
             }

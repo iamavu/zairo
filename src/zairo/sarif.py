@@ -2,7 +2,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ._util import normalize_confidence, normalize_cwe, normalize_severity
+from ._util import NOT_REVIEWED, normalize_confidence, normalize_cwe, normalize_severity
 
 SARIF_SCHEMA_URI = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
 
@@ -140,6 +140,8 @@ def build_sarif(
     repo_root: str,
     tool_version: str = "0.0.0",
     failed_nodes: Optional[Dict[str, str]] = None,
+    changed_files: Optional[List[Dict[str, str]]] = None,
+    problems: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """Converts zairo's LLM findings into a SARIF 2.1.0 log for GitHub code
     scanning (or any other SARIF-consuming viewer). Always returns a valid
@@ -149,7 +151,11 @@ def build_sarif(
     `failed_nodes` ({node id: error}) are nodes the scan couldn't assess:
     each becomes an error-level tool execution notification, and the run's
     invocation records executionSuccessful: false -- so zero results from
-    an incomplete scan never look like a clean one."""
+    an incomplete scan never look like a clean one. `problems` (see
+    analyze_impact) become notifications at their own level, an error one
+    failing the run the same way; and each of `changed_files` that nothing
+    reviewed -- not parsed, or no symbol in it changed -- a note-level one,
+    so the log says what it doesn't cover."""
     nodes = {n["id"]: n for n in graph_data["nodes"]}
 
     rules: Dict[str, Dict[str, Any]] = {}
@@ -206,8 +212,17 @@ def build_sarif(
         if location:
             notification["locations"] = [location]
         notifications.append(notification)
+    for problem in problems or []:
+        notifications.append({"level": problem["level"], "message": {"text": problem["message"]}})
+    for changed in changed_files or []:
+        if changed["outcome"] in NOT_REVIEWED:
+            notifications.append({
+                "level": "note",
+                "message": {"text": f"Not reviewed: {changed['path']} ({NOT_REVIEWED[changed['outcome']]})."},
+                "locations": [{"physicalLocation": {"artifactLocation": {"uri": changed["path"]}}}],
+            })
 
-    invocation: Dict[str, Any] = {"executionSuccessful": not notifications}
+    invocation: Dict[str, Any] = {"executionSuccessful": not any(n["level"] == "error" for n in notifications)}
     if notifications:
         invocation["toolExecutionNotifications"] = notifications
 

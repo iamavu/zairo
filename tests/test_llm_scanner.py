@@ -740,11 +740,37 @@ def test_skipped_nodes_record_why_they_were_not_scanned(monkeypatch, tmp_path):
 
     _, token_usage = llm_scanner.scan_graph_for_vulnerabilities({"nodes": nodes, "edges": []}, "fake-model", cache_path=None)
 
-    assert token_usage["skipped_nodes"] == {
-        "g": "source not found",
-        "m": "only comments or blank lines changed",
-    }
+    assert token_usage["skipped_nodes"] == {"m": "only comments or blank lines changed"}
     assert token_usage["assessed_nodes"] == ["n1"]
+
+
+def test_a_changed_symbol_whose_code_cant_be_read_failed(monkeypatch, tmp_path):
+    """Nobody reviewed it: that makes the scan incomplete, not a skip."""
+    _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    gone = dict(_node("g", "fn_gone"), file=str(tmp_path / "missing.py"))
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities({"nodes": [gone], "edges": []}, "fake-model", cache_path=None)
+
+    assert token_usage["skipped_nodes"] == {}
+    assert token_usage["failed_nodes"] == {"g": "couldn't read missing.py: No such file or directory"}
+    assert token_usage["errors"] == {"couldn't read missing.py: No such file or directory": 1}
+
+
+def test_code_that_isnt_utf8_is_still_reviewed(monkeypatch, tmp_path):
+    """A Latin-1 byte in a comment used to turn the whole prompt's code into
+    an error message about decoding."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    src = tmp_path / "legacy.py"
+    src.write_bytes(b"def f(x):\n    # caf\xe9\n    return eval(x)\n")
+    node = {"id": "f", "name": "f", "kind": "function", "file": str(src), "start_line": 1, "end_line": 3,
+            "status": "modified", "diff_hunks": [{"start": 3, "removed": [], "added": ["    return eval(x)"]}]}
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities({"nodes": [node], "edges": []}, "fake-model", cache_path=None)
+
+    [prompt] = _prompts(fake_litellm)
+    assert "return eval(x)" in prompt
+    assert "caf�" in prompt
+    assert token_usage["assessed_nodes"] == ["f"]
 
 
 def test_replacing_module_code_with_a_comment_is_not_trivial(monkeypatch, tmp_path):

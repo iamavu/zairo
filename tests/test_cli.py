@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from typer.testing import CliRunner
 
 from zairo.cli import app
@@ -327,18 +328,61 @@ def _scan_usage(failed_nodes: dict) -> dict:
     }
 
 
-def test_fail_on_fails_an_incomplete_scan(git_repo: Path, tmp_path: Path):
+@pytest.mark.parametrize("gate", [[], ["--fail-on", "high"]])
+def test_an_incomplete_scan_exits_with_status_3(git_repo: Path, tmp_path: Path, gate):
     """Every node failing (e.g. a missing API key) finds nothing -- that's
-    no evidence of safety, so --fail-on must not pass it."""
+    no evidence of safety, --fail-on or not."""
     usage = _scan_usage({"n1": "AuthenticationError: invalid API key"})
     with patch("zairo.scan.scan_graph_for_vulnerabilities", return_value=({}, usage)):
+        result = runner.invoke(
+            app,
+            [str(git_repo), "--from", "HEAD~1", "--to", "HEAD", *gate, "--output", str(tmp_path / "out")],
+        )
+
+    assert result.exit_code == 3
+    output = " ".join(result.output.split())
+    assert "Incomplete: 1 changed symbol(s) couldn't be assessed" in output
+    assert "Success!" not in output
+    report = json.loads((tmp_path / "out" / "report.json").read_text(encoding="utf-8"))
+    assert report["complete"] is False
+
+
+def test_a_failed_gate_outranks_an_incomplete_scan(git_repo: Path, tmp_path: Path):
+    """Both are failures; a finding the change introduced is the definite one."""
+    vulnerabilities = {"n2": [_finding("high", True)]}
+    with patch("zairo.scan.scan_graph_for_vulnerabilities", return_value=(vulnerabilities, _scan_usage({"n1": "boom"}))):
         result = runner.invoke(
             app,
             [str(git_repo), "--from", "HEAD~1", "--to", "HEAD", "--fail-on", "high", "--output", str(tmp_path / "out")],
         )
 
-    assert result.exit_code != 0
-    assert "scan is incomplete" in result.output
+    assert result.exit_code == 1
+    output = " ".join(result.output.split())
+    assert "Gate failed" in output and "Incomplete:" in output
+
+
+def test_changed_files_nothing_reviewed_are_listed(git_repo: Path, tmp_path: Path):
+    (git_repo / "settings.yaml").write_text("debug: true\n")
+
+    result = runner.invoke(app, [str(git_repo), "--graph-only", "--output", str(tmp_path / "out")])
+
+    assert result.exit_code == 0, result.output  # nothing failed: not parsing YAML is an outcome, not an error
+    assert "Not reviewed: 1 changed file(s) zairo doesn't parse: settings.yaml" in " ".join(result.output.split())
+    report = json.loads((tmp_path / "out" / "report.json").read_text(encoding="utf-8"))
+    assert report["changed_files"] == [{"path": "settings.yaml", "outcome": "not_parsed"}]
+    assert report["complete"] is True
+
+
+def test_a_failed_part_of_the_analysis_makes_the_run_incomplete(git_repo: Path, tmp_path: Path):
+    with patch("zairo.analyzer._find_deleted_nodes", side_effect=RuntimeError("unsupported syntax")):
+        result = runner.invoke(
+            app, [str(git_repo), "--from", "HEAD~1", "--to", "HEAD", "--graph-only", "--output", str(tmp_path / "out")],
+        )
+
+    assert result.exit_code == 3
+    output = " ".join(result.output.split())
+    assert "Error: Couldn't parse the files as they were before the change (unsupported syntax)" in output
+    assert "Incomplete: 1 part(s) of the analysis failed" in output
 
 
 def test_fail_on_passes_a_complete_clean_scan(git_repo: Path, tmp_path: Path):
@@ -400,7 +444,7 @@ def test_multi_repo_fail_on_counts_only_introduced_findings(make_git_repo, tmp_p
     assert "--fail-on left out 1 finding(s)" in output
 
 
-def test_multi_repo_fail_on_fails_when_any_repo_scan_is_incomplete(make_git_repo, tmp_path: Path):
+def test_multi_repo_run_is_incomplete_when_any_repo_scan_is(make_git_repo, tmp_path: Path):
     repo_a = make_git_repo("repo_a")
     repo_b = make_git_repo("repo_b")
     usages = iter([_scan_usage({}), _scan_usage({"n1": "boom"})])
@@ -411,8 +455,8 @@ def test_multi_repo_fail_on_fails_when_any_repo_scan_is_incomplete(make_git_repo
             [str(repo_a), str(repo_b), "--fail-on", "high", "--output", str(tmp_path / "out")],
         )
 
-    assert result.exit_code != 0
-    assert "scan is incomplete" in result.output
+    assert result.exit_code == 3
+    assert "Incomplete: 1 changed symbol(s) couldn't be assessed" in " ".join(result.output.split())
 
 
 def test_report_html_marks_what_the_scan_assessed(git_repo: Path, tmp_path: Path):

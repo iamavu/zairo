@@ -46,7 +46,7 @@ def test_reports_name_symbols_and_connections(tmp_path: Path):
 
     with open(json_path) as f:
         written = json.load(f)
-    assert set(written) == {"symbols", "connections", "scan_complete"}
+    assert set(written) == {"complete", "problems", "changed_files", "symbols", "connections"}
     assert written["connections"] == graph_data["edges"]
     with open(sarif_path) as f:
         assert json.load(f)["runs"][0]["results"][0]["properties"]["symbol"] == "vulnerable_exec"
@@ -106,7 +106,7 @@ def test_incomplete_scan_is_recorded_in_report_json_and_sarif(tmp_path: Path):
 
     with open(json_path) as f:
         written = json.load(f)
-    assert written["scan_complete"] is False
+    assert written["complete"] is False
     assert written["symbols"][0]["scan_error"] == "boom"
     with open(sarif_path) as f:
         assert json.load(f)["runs"][0]["invocations"][0]["executionSuccessful"] is False
@@ -118,16 +118,41 @@ def test_complete_scan_is_recorded_in_report_json(tmp_path: Path):
 
     with open(json_path) as f:
         written = json.load(f)
-    assert written["scan_complete"] is True
+    assert written["complete"] is True
     assert "scan_error" not in written["symbols"][0]
 
 
-def test_no_scan_status_when_llm_scan_did_not_run(tmp_path: Path):
+def test_coverage_is_in_every_report(tmp_path: Path):
+    """What wasn't reviewed, and what failed, reach report.json and
+    report.sarif -- and an error-level problem makes the run incomplete."""
+    graph_data = _graph_data(str(tmp_path / "x.py"))
+    changed_files = [{"path": "x.py", "outcome": "analyzed"}, {"path": "deploy/app.yaml", "outcome": "not_parsed"}]
+    problems = [{"level": "error", "message": "Couldn't parse the files as they were before the change (boom)"}]
+
+    json_path, html_path, sarif_path = generate_reports(
+        graph_data, str(tmp_path / "out"), {}, repo_root=str(tmp_path), changed_files=changed_files, problems=problems,
+    )
+
+    with open(json_path) as f:
+        written = json.load(f)
+    assert (written["complete"], written["changed_files"], written["problems"]) == (False, changed_files, problems)
+    with open(sarif_path) as f:
+        invocation = json.load(f)["runs"][0]["invocations"][0]
+    assert invocation["executionSuccessful"] is False
+    levels = [(n["level"], n["message"]["text"]) for n in invocation["toolExecutionNotifications"]]
+    assert levels == [
+        ("error", problems[0]["message"]),
+        ("note", "Not reviewed: deploy/app.yaml (zairo doesn't parse this kind of file)."),
+    ]
+    assert "graphData.changed_files" in Path(html_path).read_text(encoding="utf-8")
+
+
+def test_a_graph_only_run_is_complete_unless_the_analysis_failed(tmp_path: Path):
     graph_data = _graph_data(str(tmp_path / "x.py"))
     json_path, _, _ = generate_reports(graph_data, str(tmp_path / "out"), None, repo_root=str(tmp_path))
 
     with open(json_path) as f:
-        assert "scan_complete" not in json.load(f)
+        assert json.load(f)["complete"] is True
 
 
 def test_no_sarif_when_llm_scan_did_not_run(tmp_path: Path):

@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from . import __version__
@@ -7,6 +7,7 @@ from .analyzer import analyze_impact, list_symbols
 from .git_utils import create_worktree, remove_worktree, resolve_commit
 from .llm_scanner import scan_graph_for_vulnerabilities, supports_tools, write_notes
 from .reporter import generate_reports
+from ._util import is_complete
 
 
 @dataclass
@@ -23,6 +24,18 @@ class ScanResult:
     json_path: str
     html_path: str
     sarif_path: Optional[str]
+    # analyze_impact's coverage: what became of each changed file, and the
+    # parts of the analysis that failed.
+    changed_files: List[Dict[str, str]] = field(default_factory=list)
+    problems: List[Dict[str, str]] = field(default_factory=list)
+
+    @property
+    def failed_nodes(self) -> Dict[str, str]:
+        return (self.token_usage or {}).get("failed_nodes", {})
+
+    @property
+    def complete(self) -> bool:
+        return is_complete(self.failed_nodes, self.problems)
 
 
 def run_warm_up(
@@ -114,7 +127,7 @@ def run_scan(
             analysis_root = worktree_path
             log(f"Worktree ready at {worktree_path}")
 
-        graph_data, context = analyze_impact(analysis_root, depth, from_ref, to_ref, language, log=log)
+        graph_data, context, coverage = analyze_impact(analysis_root, depth, from_ref, to_ref, language, log=log)
         num_modified = sum(1 for n in graph_data['nodes'] if n['status'] in ('modified', 'added'))
         num_deleted = sum(1 for n in graph_data['nodes'] if n['status'] == 'deleted')
         on_event(
@@ -123,6 +136,8 @@ def run_scan(
             num_deleted=num_deleted,
             num_nodes=len(graph_data['nodes']),
             num_edges=len(graph_data['edges']),
+            changed_files=coverage['changed_files'],
+            problems=coverage['problems'],
         )
 
         vulnerabilities = None
@@ -164,6 +179,8 @@ def run_scan(
             assessed_nodes=token_usage['assessed_nodes'] if token_usage else None,
             skipped_nodes=token_usage['skipped_nodes'] if token_usage else None,
             lookups=token_usage['lookups'] if token_usage else None,
+            changed_files=coverage['changed_files'],
+            problems=coverage['problems'],
         )
 
         return ScanResult(
@@ -175,6 +192,8 @@ def run_scan(
             json_path=json_path,
             html_path=html_path,
             sarif_path=sarif_path,
+            changed_files=coverage['changed_files'],
+            problems=coverage['problems'],
         )
     finally:
         if worktree_path:

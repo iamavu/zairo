@@ -5,7 +5,7 @@ from zairo.analyzer import analyze_impact
 
 
 def test_finds_modified_function_and_expands_subgraph(git_repo: Path):
-    graph, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
 
     nodes_by_id = {n["id"]: n for n in graph["nodes"]}
     vulnerable = next(
@@ -26,7 +26,7 @@ def test_modified_node_carries_its_own_diff_hunks(git_repo: Path):
     """git_repo's second commit replaces a()/b()/c() with vulnerable_exec in
     one hunk: vulnerable_exec gets that hunk cut to its own lines, with the
     code it replaced -- what the scanner shows the model as the change."""
-    graph, _ = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _, _ = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
 
     vulnerable = next(n for n in graph["nodes"] if n.get("name") == "vulnerable_exec")
     [hunk] = vulnerable["diff_hunks"]
@@ -39,7 +39,7 @@ def test_depth_zero_yields_only_seed_and_deleted_nodes(git_repo: Path):
     """At depth 0, no neighbor traversal happens -- every node present must
     be a seed (modified/added) or a deletion, never something pulled in by
     a hop that didn't run."""
-    graph, _ = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _, _ = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
     statuses = {n["status"] for n in graph["nodes"]}
     assert statuses <= {"modified", "added", "deleted"}
 
@@ -49,7 +49,7 @@ def test_finds_functions_deleted_between_base_and_target(git_repo: Path):
     content -- Trailmark's to-side graph can never represent that on its
     own (it only parses the tree as it currently is), so this is purely on
     zairo's own from_ref-revision diffing to detect."""
-    graph, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
 
     by_name = {n["name"]: n for n in graph["nodes"] if n["status"] == "deleted"}
     assert set(by_name.keys()) == {"a", "b", "c"}
@@ -79,7 +79,7 @@ def test_call_edges_list_every_call_site(git_repo: Path):
     _commit_file(git_repo, "app.py", "def helper(x):\n    return x\n\ndef caller(y):\n    a = helper(y)\n    return helper(a)\n", "add app")
     _commit_file(git_repo, "app.py", "def helper(x):\n    return x + 1\n\ndef caller(y):\n    a = helper(y)\n    return helper(a)\n", "change helper")
 
-    graph, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
 
     ids = {n["name"]: n["id"] for n in graph["nodes"]}
     [edge] = [e for e in graph["edges"] if e["source"] == ids["caller"] and e["target"] == ids["helper"]]
@@ -94,7 +94,7 @@ def test_a_call_the_change_removed_is_not_an_edge(git_repo: Path):
     _commit_file(git_repo, "app.py", "def check(x):\n    return x\n\ndef handle(y):\n    return check(y)\n", "add app")
     _commit_file(git_repo, "app.py", "def check(x):\n    return x\n\ndef handle(y):\n    return y\n", "drop the check")
 
-    graph, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
 
     ids = {n["name"]: n["id"] for n in graph["nodes"]}
     assert "check" in ids  # in the graph, via the module that contains it
@@ -108,7 +108,7 @@ def test_modules_are_named_by_their_file_path(git_repo: Path):
     _commit_file(git_repo, "pkg/settings.local.py", "DEBUG = False\n", "add settings")
     _commit_file(git_repo, "pkg/settings.local.py", "DEBUG = True\n", "debug on")
 
-    graph, _ = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _, _ = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
 
     [module] = [n for n in graph["nodes"] if n["kind"] == "module"]
     assert module["name"] == "pkg/settings.local.py"
@@ -120,7 +120,7 @@ def test_deleted_modules_are_named_by_their_file_path(git_repo: Path):
     subprocess.run(["git", "rm", "-q", "old.helpers.py"], cwd=git_repo, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-q", "-m", "drop helpers"], cwd=git_repo, check=True, capture_output=True)
 
-    graph, _ = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _, _ = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
 
     assert {n["name"] for n in graph["nodes"] if n["status"] == "deleted"} == {"old.helpers.py", "f"}
 
@@ -135,7 +135,7 @@ def test_test_code_stays_out_of_the_graph(git_repo: Path):
     subprocess.run(["git", "add", "app.py"], cwd=git_repo, check=True, capture_output=True)
     _commit_file(git_repo, "tests/test_app.py", "from app import get_invoice\n\n\ndef test_it():\n    assert get_invoice(1, 3)\n", "change both")
 
-    graph, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD~1", to_ref="HEAD")
 
     names = {n["name"] for n in graph["nodes"] if n["kind"] != "proxy"}
     assert {"app.py", "get_invoice"} <= names
@@ -152,7 +152,7 @@ def test_a_repo_inside_a_tests_directory_is_not_all_test_code(tmp_path: Path):
     _commit_file(repo, "app.py", "def f():\n    return 1\n", "add app")
     _commit_file(repo, "app.py", "def f():\n    return 2\n", "change app")
 
-    graph, _ = analyze_impact(str(repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _, _ = analyze_impact(str(repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
 
     assert "f" in {n["name"] for n in graph["nodes"]}
 
@@ -166,7 +166,7 @@ def test_external_calls_are_never_changed_and_never_expanded_through(git_repo: P
     _commit_file(git_repo, "a.py", "import os\n\ndef run(cmd):\n    return os.system('echo ' + cmd)\n", "add a")
     _commit_file(git_repo, "a.py", "import os\n\ndef run(cmd):\n    return os.system(cmd)\n", "change a")
 
-    graph, _ = analyze_impact(str(git_repo), depth=2, from_ref="HEAD~1", to_ref="HEAD")
+    graph, _, _ = analyze_impact(str(git_repo), depth=2, from_ref="HEAD~1", to_ref="HEAD")
 
     by_name = {n["name"]: n for n in graph["nodes"]}
     assert "unrelated" not in by_name
@@ -182,7 +182,7 @@ def test_context_is_the_whole_graph_whatever_the_depth(git_repo: Path):
     _commit_file(git_repo, "app.py", "def helper(x):\n    return x\n\ndef caller(y):\n    return helper(y)\n", "add app")
     _commit_file(git_repo, "app.py", "def helper(x):\n    return x + 1\n\ndef caller(y):\n    return helper(y)\n", "change helper")
 
-    graph, context = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+    graph, context, _ = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
 
     assert "caller" not in {n["name"] for n in graph["nodes"]}
     ids = {n["name"]: n["id"] for n in context["nodes"]}
@@ -201,7 +201,7 @@ def test_entry_points_are_marked_but_not_from_a_neighbors_decorator(git_repo: Pa
         "add app",
     )
 
-    _, context = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+    _, context, _ = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
 
     by_name = {n["name"]: n for n in context["nodes"]}
     assert by_name["upload"]["entrypoint"] == {"kind": "api", "trust": "untrusted_external", "description": "Python HTTP route decorator"}
@@ -211,5 +211,83 @@ def test_entry_points_are_marked_but_not_from_a_neighbors_decorator(git_repo: Pa
 def test_no_deleted_nodes_when_nothing_was_deleted(git_repo: Path):
     """Diffing a ref against itself: nothing changed, so nothing should be
     reported as deleted either."""
-    graph, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD", to_ref="HEAD")
+    graph, _, _ = analyze_impact(str(git_repo), depth=1, from_ref="HEAD", to_ref="HEAD")
     assert not any(n["status"] == "deleted" for n in graph["nodes"])
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+
+def test_every_changed_file_gets_an_outcome(git_repo: Path):
+    """A clean result can't hide a file nobody looked at: each changed file
+    says what became of it -- including one zairo can't parse at all."""
+    (git_repo / "settings.yaml").write_text("debug: false\n")
+    (git_repo / "old.py").write_text("def gone():\n    return 1\n")
+    (git_repo / "tests").mkdir()
+    (git_repo / "tests" / "test_app.py").write_text("def test_x():\n    assert True\n")
+    _git(git_repo, "add", "-A")
+    _git(git_repo, "commit", "-q", "-m", "base")
+    (git_repo / "settings.yaml").write_text("debug: true\n")
+    (git_repo / "old.py").unlink()
+    (git_repo / "tests" / "test_app.py").write_text("def test_x():\n    assert 1\n")
+    (git_repo / "test.py").write_text("import os\ndef vulnerable_exec(user_input):\n    return os.system(user_input + '')\n")
+    _git(git_repo, "add", "-A")
+    _git(git_repo, "commit", "-q", "-m", "change")
+
+    _, _, coverage = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+
+    assert coverage["changed_files"] == [
+        {"path": "old.py", "outcome": "deleted"},
+        {"path": "settings.yaml", "outcome": "not_parsed"},
+        {"path": "test.py", "outcome": "analyzed"},
+        {"path": "tests/test_app.py", "outcome": "test"},
+    ]
+    assert coverage["problems"] == []
+
+
+def test_a_renamed_file_changes_no_symbols(git_repo: Path):
+    _git(git_repo, "mv", "test.py", "renamed.py")
+    _git(git_repo, "commit", "-q", "-m", "rename")
+
+    _, _, coverage = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+
+    assert {"path": "renamed.py", "outcome": "no_symbols_changed"} in coverage["changed_files"]
+
+
+def test_untracked_files_are_in_the_ledger(git_repo: Path):
+    (git_repo / "new.py").write_text("def h(y):\n    return eval(y)\n")
+    (git_repo / "notes.txt").write_text("todo\n")
+
+    _, _, coverage = analyze_impact(str(git_repo), depth=0)
+
+    assert coverage["changed_files"] == [
+        {"path": "new.py", "outcome": "analyzed"},
+        {"path": "notes.txt", "outcome": "not_parsed"},
+    ]
+
+
+def test_failing_to_find_entry_points_is_a_warning(git_repo: Path, monkeypatch):
+    def fail(*args):
+        raise RuntimeError("bad query")
+    monkeypatch.setattr("zairo.analyzer.detect_entrypoints", fail)
+
+    _, _, coverage = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+
+    [problem] = coverage["problems"]
+    assert problem["level"] == "warning"
+    assert "Couldn't find the repo's entry points (bad query)" in problem["message"]
+
+
+def test_failing_to_look_for_deleted_symbols_is_an_error(git_repo: Path, monkeypatch):
+    """What the change deleted went unreviewed: the run is incomplete."""
+    def fail(*args):
+        raise RuntimeError("unsupported syntax")
+    monkeypatch.setattr("zairo.analyzer._find_deleted_nodes", fail)
+
+    graph, _, coverage = analyze_impact(str(git_repo), depth=0, from_ref="HEAD~1", to_ref="HEAD")
+
+    [problem] = coverage["problems"]
+    assert problem["level"] == "error"
+    assert "(unsupported syntax)" in problem["message"]
+    assert "vulnerable_exec" in {n["name"] for n in graph["nodes"]}  # the rest of the analysis still ran

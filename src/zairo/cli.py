@@ -16,6 +16,10 @@ from ._util import max_severity, normalize_severity, severity_rank
 app = typer.Typer(add_completion=False)
 console = Console()
 
+# Exit statuses. 2 is taken: click exits with it on a usage error.
+EXIT_FAILED = 1  # a --fail-on gate failed, or zairo couldn't run
+EXIT_INCOMPLETE = 3  # it ran, but some of the change went unreviewed
+
 
 class Severity(str, enum.Enum):
     low = "low"
@@ -183,13 +187,55 @@ def _print_scan_errors(token_usage: dict, indent: str = "") -> None:
         return
     total_failed = sum(errors.values())
     console.print(
-        f"{indent}[bold red]Warning:[/bold red] {total_failed} of {token_usage['nodes_scanned']} symbol(s) couldn't be assessed "
-        f"— results may be incomplete:"
+        f"{indent}[bold red]Warning:[/bold red] {total_failed} changed symbol(s) couldn't be assessed "
+        f"— results are incomplete:"
     )
     for message, count in sorted(errors.items(), key=lambda kv: -kv[1])[:3]:
         console.print(f"{indent}  [red]× ({count}x)[/red] {escape(message)}")
     if len(errors) > 3:
         console.print(f"{indent}  [dim]... {len(errors) - 3} more distinct error(s); rerun with --verbose for full detail[/dim]")
+
+
+# How the console says which changed files nothing reviewed.
+_NOT_REVIEWED_SAYING = {
+    "not_parsed": "changed file(s) zairo doesn't parse",
+    "no_symbols_changed": "changed file(s) where the change touched no symbol",
+}
+_LISTED_FILES = 5
+
+
+def _print_coverage(changed_files: List[dict], problems: List[dict], indent: str = "") -> None:
+    """What the run didn't look at, and what went wrong on the way --
+    whatever the verbosity: no findings says nothing about a file nobody
+    reviewed."""
+    for outcome, saying in _NOT_REVIEWED_SAYING.items():
+        paths = [f["path"] for f in changed_files if f["outcome"] == outcome]
+        if paths:
+            listed = ", ".join(escape(p) for p in paths[:_LISTED_FILES])
+            more = f", and {len(paths) - _LISTED_FILES} more" if len(paths) > _LISTED_FILES else ""
+            console.print(f"{indent}[yellow]Not reviewed:[/yellow] {len(paths)} {saying}: {listed}{more}")
+    tests = sum(1 for f in changed_files if f["outcome"] == "test")
+    if tests:
+        console.print(f"{indent}[dim]Left out {tests} changed test file(s).[/dim]")
+    for problem in problems:
+        label = "[bold red]Error:[/bold red]" if problem["level"] == "error" else "[bold yellow]Warning:[/bold yellow]"
+        console.print(f"{indent}{label} {escape(problem['message'])}")
+
+
+def _print_incomplete(failed_symbols: int, failed_steps: int, indent: str = "") -> None:
+    reasons = []
+    if failed_symbols:
+        reasons.append(f"{failed_symbols} changed symbol(s) couldn't be assessed")
+    if failed_steps:
+        reasons.append(f"{failed_steps} part(s) of the analysis failed")
+    console.print(
+        f"{indent}[bold red]Incomplete:[/bold red] {' and '.join(reasons)}, so no findings there "
+        f"isn't a clean result (exit status {EXIT_INCOMPLETE})."
+    )
+
+
+def _failed_steps(problems: List[dict]) -> int:
+    return sum(1 for p in problems if p["level"] == "error")
 
 
 def _print_notes_usage(token_usage: dict, notes_path: Optional[str], indent: str = "") -> None:
@@ -214,6 +260,7 @@ def _single_repo_on_event(event: str, progress: _Progress, **kw) -> None:
     if event == "graph_built":
         console.print(f"[bold blue]Found {kw['num_modified']} changed symbol(s), {kw['num_deleted']} deleted symbol(s).[/bold blue]")
         console.print(f"[bold blue]Graph: {kw['num_nodes']} symbol(s), {kw['num_edges']} connection(s).[/bold blue]")
+        _print_coverage(kw['changed_files'], kw['problems'])
     elif event == "llm_scan_started":
         console.print(f"[bold yellow]Running LLM scanner using {escape(kw['model'])} (concurrency={kw['concurrency']})...[/bold yellow]")
     elif event == "dig_warning":
@@ -308,9 +355,11 @@ def _run_single_repo(
     repo_path: str, output_dir: str, depth: int, from_ref: Optional[str], to_ref: Optional[str],
     language: str, llm: bool, model: str, concurrency: int, cache: bool, max_tokens: int,
     tokens: bool, fail_on: Optional[Severity], verbose: bool, debug: bool, batch_size: int, dig: bool,
-) -> bool:
+) -> int:
     """Runs the one-repo path: live per-stage progress, reports written
-    directly to output_dir. Returns whether a --fail-on gate failed."""
+    directly to output_dir. Returns the exit status: EXIT_FAILED if a
+    --fail-on gate failed, else EXIT_INCOMPLETE if the run was incomplete,
+    else 0."""
     log, debug_log, close_debug_log = _make_loggers(output_dir, verbose, debug, indent="  · ")
 
     if from_ref and to_ref:
@@ -332,33 +381,31 @@ def _run_single_repo(
     except Exception as e:
         progress.stop()
         console.print(f"[bold red]Error:[/bold red] {escape(str(e))}")
-        raise typer.Exit(1)
+        raise typer.Exit(EXIT_FAILED)
     finally:
         progress.stop()
         close_debug_log()
 
-    should_fail = False
+    status = 0
     if llm:
         if fail_on is not None:
             worst = _severity_gate_failure(result.vulnerabilities, fail_on)
             if worst is not None:
-                should_fail = True
+                status = EXIT_FAILED
                 console.print(
                     f"[bold red]Gate failed:[/bold red] this change introduces a '{worst}' severity finding "
                     f"(threshold: {fail_on.value})."
                 )
             _print_not_gated(result.vulnerabilities, fail_on)
-            num_failed = len(result.token_usage['failed_nodes'])
-            if num_failed:
-                should_fail = True
-                console.print(
-                    f"[bold red]Gate failed:[/bold red] the scan is incomplete -- {num_failed} symbol(s) "
-                    f"couldn't be assessed, and --fail-on only passes a complete scan."
-                )
         if tokens:
             _print_token_usage(result.token_usage)
 
-    console.print("[bold green]Success![/bold green] Reports generated:")
+    if result.complete:
+        console.print("[bold green]Success![/bold green] Reports generated:")
+    else:
+        _print_incomplete(len(result.failed_nodes), _failed_steps(result.problems))
+        status = status or EXIT_INCOMPLETE
+        console.print("Reports generated:")
     console.print(f"  - {escape(result.json_path)}")
     console.print(f"  - {escape(result.html_path)}")
     if result.sarif_path:
@@ -366,7 +413,7 @@ def _run_single_repo(
     if debug:
         console.print(f"  - {escape(os.path.join(output_dir, 'debug.log'))}")
 
-    return should_fail
+    return status
 
 
 def _run_multi_repo(
@@ -374,10 +421,11 @@ def _run_multi_repo(
     language: str, llm: bool, model: str, concurrency: int, repo_concurrency: int, cache: bool,
     max_tokens: int, tokens: bool, fail_on: Optional[Severity], continue_on_error: bool, verbose: bool,
     debug: bool, batch_size: int, dig: bool,
-) -> bool:
+) -> int:
     """Runs the multi-repo path: per-repo subdirectories plus an aggregate
-    rollup.json/.html/.sarif. Returns whether the run should fail
-    (a repo errored, or a --fail-on gate failed across all repos)."""
+    rollup.json/.html/.sarif. Returns the exit status: EXIT_FAILED if a repo
+    errored or a --fail-on gate failed across all repos, else
+    EXIT_INCOMPLETE if any repo's run was incomplete, else 0."""
     used_slugs: set = set()
     slugs = [unique_slug(p, used_slugs) for p in paths]  # computed upfront, sequentially --
     # unique_slug mutates a shared set, so doing this per-repo inside a
@@ -414,6 +462,7 @@ def _run_multi_repo(
             def on_event(event: str, **kw) -> None:
                 if event == "graph_built":
                     console.print(f"    {kw['num_modified']} changed symbol(s), {kw['num_deleted']} deleted symbol(s); graph: {kw['num_nodes']} symbol(s), {kw['num_edges']} connection(s)")
+                    _print_coverage(kw['changed_files'], kw['problems'], indent="    ")
                 elif event == "llm_scan_started":
                     console.print(f"    running LLM scan ({escape(kw['model'])})...")
                 elif event == "dig_warning":
@@ -472,6 +521,7 @@ def _run_multi_repo(
                         num_vulns = sum(len(findings) for findings in (sr.vulnerabilities or {}).values())
                         summary += f", found {num_vulns} vulnerability(s) in {len(sr.vulnerabilities or {})} symbol(s)"
                     console.print(f"[bold cyan][{completed}/{len(paths)}][/bold cyan] {escape(entry['repo'])} — {summary}")
+                    _print_coverage(sr.changed_files, sr.problems, indent="    ")
                     if llm:
                         _print_scan_errors(sr.token_usage, indent="    ")
                         _print_notes_usage(sr.token_usage, os.path.join(output_dir, entry['slug'], ".notes_cache.json"), indent="    ")
@@ -504,7 +554,7 @@ def _run_multi_repo(
     if debug:
         console.print("[dim]Debug logs: <output>/<repo-slug>/debug.log, one per repo.[/dim]")
 
-    should_fail = bool(errored_results)
+    status = EXIT_FAILED if errored_results else 0
     if llm and fail_on is not None:
         combined_vulns = {}
         for r in ok_results:
@@ -512,21 +562,20 @@ def _run_multi_repo(
                 combined_vulns[f"{r['slug']}:{node_id}"] = findings
         worst = _severity_gate_failure(combined_vulns, fail_on)
         if worst is not None:
-            should_fail = True
+            status = EXIT_FAILED
             console.print(
                 f"[bold red]Gate failed:[/bold red] the changes introduce a '{worst}' severity finding "
                 f"across all repos (threshold: {fail_on.value})."
             )
         _print_not_gated(combined_vulns, fail_on)
-        num_failed = sum(len(r["result"].token_usage['failed_nodes']) for r in ok_results)
-        if num_failed:
-            should_fail = True
-            console.print(
-                f"[bold red]Gate failed:[/bold red] the scan is incomplete -- {num_failed} symbol(s) "
-                f"across all repos couldn't be assessed, and --fail-on only passes a complete scan."
-            )
+    incomplete = [r["result"] for r in ok_results if not r["result"].complete]
+    if incomplete:
+        _print_incomplete(
+            sum(len(sr.failed_nodes) for sr in incomplete), sum(_failed_steps(sr.problems) for sr in incomplete),
+        )
+        status = status or EXIT_INCOMPLETE
 
-    return should_fail
+    return status
 
 
 def _run_warm_up(
@@ -592,7 +641,7 @@ def analyze(
     dig: bool = typer.Option(False, "--dig", help="Experimental. Let the model look up what it needs before it answers -- warm-up notes, source, callers and callees, a text search of the repo -- up to 8 lookups per changed symbol, instead of seeing only the context zairo picks. Slower and costlier (every lookup is another request), and answers vary more between runs; cached per commit when scanning --from/--to. Needs a model that can call tools."),
     max_tokens: int = typer.Option(4096, "--max-tokens", help="Max output tokens per LLM scan request. Reasoning models count internal thinking against this budget too — too low can cause empty responses"),
     tokens: bool = typer.Option(False, "--tokens", help="Show total LLM tokens used across real API calls (cache hits don't count)"),
-    fail_on: Severity = typer.Option(None, "--fail-on", help="Exit with a non-zero status if the change introduces a finding at or above this severity (one marked introduced_by_change: true), or if any symbol couldn't be assessed -- for gating CI/PR checks. Findings that were already there are reported, not gated on. Errors if combined with --graph-only."),
+    fail_on: Severity = typer.Option(None, "--fail-on", help="Exit with status 1 if the change introduces a finding at or above this severity (one marked introduced_by_change: true) -- for gating CI/PR checks. Findings that were already there are reported, not gated on. However it's set, an incomplete run exits with status 3. Errors if combined with --graph-only."),
     continue_on_error: bool = typer.Option(True, "--continue-on-error/--stop-on-error", help="Multi-repo mode: keep scanning remaining repos if one fails (default), instead of aborting the run"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Print detailed diagnostic output (git commands, worktree setup, symbol matching, per-symbol LLM scan progress)"),
     debug: bool = typer.Option(False, "-vv", "--debug", help="Maximum verbosity: everything --verbose prints, plus the exact prompt sent to the LLM and its raw response for every symbol -- written to <output>/debug.log (too much to print to the console). Implies --verbose."),
@@ -622,23 +671,24 @@ def analyze(
         raise typer.Exit(1)
 
     if warm_up:
-        should_fail = _run_warm_up(
+        failed = _run_warm_up(
             paths, output_dir, language, model, concurrency, max_tokens, verbose, debug,
         )
+        status = EXIT_FAILED if failed else 0
     elif len(paths) == 1:
-        should_fail = _run_single_repo(
+        status = _run_single_repo(
             paths[0], output_dir, depth, from_ref, to_ref, language, llm, model, concurrency,
             cache, max_tokens, tokens, fail_on, verbose, debug, batch_size, dig,
         )
     else:
-        should_fail = _run_multi_repo(
+        status = _run_multi_repo(
             paths, output_dir, depth, from_ref, to_ref, language, llm, model, concurrency,
             repo_concurrency, cache, max_tokens, tokens, fail_on, continue_on_error, verbose, debug,
             batch_size, dig,
         )
 
-    if should_fail:
-        raise typer.Exit(1)
+    if status:
+        raise typer.Exit(status)
 
 
 def main():

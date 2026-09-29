@@ -131,18 +131,24 @@ def test_incomplete_repo_scan_is_flagged_in_rollup(tmp_path: Path):
     plain "ok" in the rollup."""
     incomplete = _ok_result(vulnerabilities={})
     incomplete.token_usage = {"failed_nodes": {"n1": "boom"}}
+    failed_step = _ok_result(vulnerabilities=None)
+    failed_step.problems = [{"level": "error", "message": "Couldn't parse the files as they were before the change"}]
+    unparsed = _ok_result(vulnerabilities={})
+    unparsed.changed_files = [{"path": "app.yaml", "outcome": "not_parsed"}]
     results = [
         {"repo": "/a", "slug": "a", "status": "ok", "result": incomplete},
-        {"repo": "/b", "slug": "b", "status": "ok", "result": _ok_result(vulnerabilities={})},
+        {"repo": "/b", "slug": "b", "status": "ok", "result": unparsed},
         {"repo": "/c", "slug": "c", "status": "ok", "result": _ok_result(vulnerabilities=None)},
+        {"repo": "/d", "slug": "d", "status": "ok", "result": failed_step},
     ]
 
     reports = write_rollup_reports(results, str(tmp_path))
 
     with open(reports["json"]) as f:
         by_slug = {r["slug"]: r for r in json.load(f)["repos"]}
-    assert (by_slug["a"]["scan_complete"], by_slug["a"]["num_failed_symbols"]) == (False, 1)
-    assert by_slug["b"]["scan_complete"] is True
-    assert by_slug["c"]["scan_complete"] is None  # --graph-only: no scan to be incomplete
+    assert (by_slug["a"]["complete"], by_slug["a"]["num_failed_symbols"]) == (False, 1)
+    assert (by_slug["b"]["complete"], by_slug["b"]["not_reviewed_files"]) == (True, ["app.yaml"])
+    assert by_slug["c"]["complete"] is True
+    assert by_slug["d"]["complete"] is False
     html = Path(reports["html"]).read_text()
-    assert html.count(">incomplete</span>") == 1
+    assert html.count(">incomplete</span>") == 2

@@ -63,7 +63,7 @@ zairo backend frontend infra --from main --fail-on high -o zairo_multi_out
 **Output & gating**
 
 - `--output`, `-o` *(`zairo_out`)*: where the reports go. Multi-repo mode: each repo gets its own `<output>/<repo-slug>/`, plus a combined `rollup.*` here too.
-- `--fail-on` *(none)*: exit non-zero if the change introduces a finding at or above this severity (`low`/`medium`/`high`/`critical`), meaning one marked `introduced_by_change: true`, or if the scan is incomplete (any symbol the model couldn't assess). Findings that were already there are still reported, just not gated on. Errors if combined with `--graph-only` (nothing to gate on). Multi-repo mode: checked across all repos combined. See [CI / PR gating](#ci--pr-gating).
+- `--fail-on` *(none)*: exit with status 1 if the change introduces a finding at or above this severity (`low`/`medium`/`high`/`critical`), meaning one marked `introduced_by_change: true`. Findings that were already there are still reported, just not gated on. An incomplete run exits with status 3 whether or not this is set. Errors if combined with `--graph-only` (nothing to gate on). Multi-repo mode: checked across all repos combined. See [CI / PR gating](#ci--pr-gating).
 - `--verbose`, `-v` *(off)*: print what's happening step by step (git commands, worktree setup, per-symbol scan progress).
 - `--debug`, `-vv` *(off)*: everything `--verbose` prints, plus the exact prompt sent to the LLM and its raw response for every symbol -- written to `<output>/debug.log` (per-repo in multi-repo mode), since it's too much to print to the console.
 
@@ -77,15 +77,20 @@ Run `zairo --help` any time for this same list from the CLI.
 
 ## Output files
 
-- **`report.json`** *(always)*: the raw impact graph as data: `symbols` (functions, classes, modules, with any attached findings) and the `connections` between them. Each changed symbol carries its `diff_hunks`: the lines the change removed and added there, which is also what the model is shown alongside the code. Each connection has a `source` and `target` symbol id, a `kind` (`calls`, `contains`, `inherits`, ...) and `lines`: where in its source's file it occurs (for a call, every call site), when Trailmark knows. The model sees a long caller around those call sites rather than from the top. After a vulnerability scan, `scan_complete` says whether every symbol got assessed, and each one that didn't carries a `scan_error` saying why. A changed symbol left out on purpose (a comment-only change, source that can't be read, ...) carries a `scan_skipped` reason instead. With `--dig`, each scanned symbol carries the `lookups` the model made before it answered. A symbol Trailmark recognizes as an entry point (an HTTP route, a CLI command, a task handler, ...) carries an `entrypoint`: its `kind`, `trust` and `description`. Modules are named by their file path (`src/config/settings.local.ts`); their `id` is Trailmark's dotted form of it, which escapes dots in file names (`src.config.settings\.local`). Each finding has a `title`, `description`, `impact`, `severity` and `cwe`, plus:
+- **`report.json`** *(always)*: the raw impact graph as data: `symbols` (functions, classes, modules, with any attached findings) and the `connections` between them. Each changed symbol carries its `diff_hunks`: the lines the change removed and added there, which is also what the model is shown alongside the code. Each connection has a `source` and `target` symbol id, a `kind` (`calls`, `contains`, `inherits`, ...) and `lines`: where in its source's file it occurs (for a call, every call site), when Trailmark knows. The model sees a long caller around those call sites rather than from the top. With `--dig`, each scanned symbol carries the `lookups` the model made before it answered. A symbol Trailmark recognizes as an entry point (an HTTP route, a CLI command, a task handler, ...) carries an `entrypoint`: its `kind`, `trust` and `description`. Modules are named by their file path (`src/config/settings.local.ts`); their `id` is Trailmark's dotted form of it, which escapes dots in file names (`src.config.settings\.local`). Each finding has a `title`, `description`, `impact`, `severity` and `cwe`, plus:
   - `line`: the line it's about. The model is shown numbered code, and a line it cites is kept only if it was one of those shown; otherwise it's `null`.
   - `introduced_by_change`: `true` if this change introduced it or made it reachable (for example by removing a check), `false` if it was already there.
   - `trigger`: who can trigger it, and how.
   - `confidence`: `high`/`medium`/`low`, how sure the model is that it's real. This is separate from `severity`, which is how bad it would be.
-- **`report.html`** *(always)*: a self-contained, interactive dependency-graph viewer (Cytoscape.js). Click a symbol to see its findings.
-- **`report.sarif`** *(unless `--graph-only` is used)*: findings in [SARIF 2.1.0](https://sarifweb.azurewebsites.net/), for GitHub code scanning or any other SARIF consumer. Always written, even for a clean scan (an empty-but-valid log), so a scanning UI can mark previously reported alerts resolved. Findings are grouped into rules by CWE when the model tagged one, so recurring issues of the same kind collapse into one rule instead of a new one per wording variant. Each result points at the line its finding cites (or where the function starts, if it cited none), and carries `symbol` (the function or class it's in), `introducedByChange` and `confidence` as properties. An incomplete scan is marked `executionSuccessful: false`, with an error notification per symbol that couldn't be assessed.
 
-Multi-repo mode produces the same three files per repo, plus `rollup.json` / `rollup.html` / `rollup.sarif`: per-repo status (including `incomplete` scans) and severity counts, a dashboard table linking into each repo's reports, and every repo's SARIF results merged into one multi-run log.
+  Next to the symbols and connections:
+  - `changed_files`: every file the change touched, each with an `outcome`: `analyzed` (the symbols it changed are in the graph, each with its own result), `deleted`, `test` (test code, left out on purpose), `no_symbols_changed` (parsed, but the change touched none of its symbols, as in a rename) or `not_parsed` (zairo doesn't parse this kind of file, such as YAML or a Dockerfile). Nothing in a file with either of the last two was reviewed, and every report says so.
+  - `problems`: parts of the analysis that failed, each with a `level` and a `message`. A `warning` costs context (say, entry points couldn't be found); an `error` means some of the change went unreviewed (say, the files as they were before the change couldn't be parsed, so nothing it deleted was looked at).
+  - `complete`: `false` if any symbol the model was asked about couldn't be assessed, or a problem is an `error`. Each symbol that couldn't be assessed carries a `scan_error` saying why, whether the model failed to answer or its source couldn't be read. A changed symbol left out on purpose (a comment-only change, ...) carries a `scan_skipped` reason instead.
+- **`report.html`** *(always)*: a self-contained, interactive dependency-graph viewer (Cytoscape.js). Click a symbol to see its findings.
+- **`report.sarif`** *(unless `--graph-only` is used)*: findings in [SARIF 2.1.0](https://sarifweb.azurewebsites.net/), for GitHub code scanning or any other SARIF consumer. Always written, even for a clean scan (an empty-but-valid log), so a scanning UI can mark previously reported alerts resolved. Findings are grouped into rules by CWE when the model tagged one, so recurring issues of the same kind collapse into one rule instead of a new one per wording variant. Each result points at the line its finding cites (or where the function starts, if it cited none), and carries `symbol` (the function or class it's in), `introducedByChange` and `confidence` as properties. An incomplete run is marked `executionSuccessful: false`, with an error notification per symbol that couldn't be assessed and per `error` problem. A `warning` problem is a warning notification, and each changed file nothing reviewed (`not_parsed`, `no_symbols_changed`) is a note.
+
+Multi-repo mode produces the same three files per repo, plus `rollup.json` / `rollup.html` / `rollup.sarif`: per-repo status (including `incomplete` runs), changed files not reviewed, and severity counts, a dashboard table linking into each repo's reports, and every repo's SARIF results merged into one multi-run log.
 
 ### What the model sees
 
@@ -152,10 +157,20 @@ A function/class/module removed entirely (not just edited) still shows up in `re
 
 ## CI / PR gating
 
-`--fail-on <low|medium|high|critical>` exits non-zero if the change
+`--fail-on <low|medium|high|critical>` exits with status 1 if the change
 introduces a finding at or above that severity (across all repos combined,
-in multi-repo mode), so a CI step can block a merge on it. A few things
-worth knowing:
+in multi-repo mode), so a CI step can block a merge on it. The exit
+statuses:
+
+| Status | Meaning |
+|---|---|
+| 0 | Complete, and no `--fail-on` gate failed. |
+| 1 | A `--fail-on` gate failed, or zairo couldn't run (a bad ref, a repo that errored in multi-repo mode). |
+| 2 | A usage error: an unknown option, say. |
+| 3 | Incomplete: some of the change went unreviewed, so no findings isn't a clean result. |
+
+A failed gate outranks an incomplete run: both are printed, and the status
+is 1. A few things worth knowing:
 
 - It only counts findings marked `introduced_by_change: true`. A problem
   that was already there before the change is in the reports, but it
@@ -163,11 +178,15 @@ worth knowing:
   would teach people to ignore the gate. Nor does a finding where the
   model didn't say either way. When findings at or above the threshold are
   left out, zairo says how many.
-- It also fails whenever the scan is incomplete: a node the model couldn't
-  assess (a provider error, a missing API key, a response that wasn't a
-  scan result) is code nobody reviewed, so it can't count as a pass. On
+- An incomplete run fails too, with or without `--fail-on`: a symbol the
+  model couldn't assess (a provider error, a missing API key, a response
+  that wasn't a scan result, source that couldn't be read) is code nobody
+  reviewed, and so is whatever a failed part of the analysis missed. On
   PRs from forks, GitHub withholds secrets such as the model's API key, so
-  expect the gate to fail there rather than silently pass.
+  expect status 3 there rather than a silent pass.
+- Changed files zairo doesn't parse (YAML, Dockerfiles, SQL migrations,
+  ...) don't make a run incomplete: they're listed as not reviewed, in the
+  console and in every report, for a human to look at.
 - `--from`/`--to` have to name commits that exist in the checkout; an
   unknown ref is an error rather than an empty diff. CI checkouts are
   often shallow, so fetch full history (`fetch-depth: 0` in

@@ -62,15 +62,10 @@ def _decorator_is_anothers(unit, prev_end: int, lines: List[str]) -> bool:
     return bool(decorators) and not any(prev_end < ln <= end for ln in decorators)
 
 
-def _entrypoints(graph, root: str, log: Callable[[str], None]) -> Dict[str, Dict[str, Any]]:
+def _entrypoints(graph, root: str) -> Dict[str, Dict[str, Any]]:
     """Trailmark's entry points -- HTTP routes, CLI commands, task handlers,
-    ... -- as {node id: {"kind", "trust", "description"}}. Best effort: an
-    error here just means no entry points."""
-    try:
-        tags = detect_entrypoints(graph, root)
-    except Exception as e:
-        log(f"Skipping entry-point detection: {e}")
-        return {}
+    ... -- as {node id: {"kind", "trust", "description"}}."""
+    tags = detect_entrypoints(graph, root)
     definitions: Dict[str, list] = {}
     for unit in graph.nodes.values():
         if unit.kind.value in ('function', 'method', 'class'):
@@ -94,6 +89,11 @@ def _entrypoints(graph, root: str, log: Callable[[str], None]) -> Dict[str, Dict
             continue
         found[node_id] = {"kind": tag.kind.value, "trust": tag.trust_level.value, "description": tag.description}
     return found
+
+
+def _rel(path: str, root: str) -> str:
+    """`path` relative to `root`, with forward slashes, as git names files."""
+    return os.path.relpath(path, root).replace(os.sep, '/')
 
 
 def _node_name(unit, root: str) -> str:
@@ -152,8 +152,7 @@ def _find_deleted_nodes(
     from_ref: str,
     to_node_ids: Set[str],
     language: str,
-    log: Callable[[str], None],
-) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]], Set[str]]:
     """Detects functions/classes/modules that existed in `from_ref` but have
     no corresponding id in the to-side graph at all -- deleted outright, not
     just edited. Trailmark's to-side graph can never represent these on its
@@ -167,12 +166,11 @@ def _find_deleted_nodes(
     isolation elsewhere produces a different id than the same file gets
     when the real repo is parsed, and nothing would match to_node_ids.
 
-    Returns (deleted_node_metadata, deleted_edges) in the same shapes
-    analyze_impact already builds for regular nodes/edges. Never raises --
-    a from_ref revision can contain content the installed Trailmark can't parse
-    (syntax it doesn't support, a binary file, ...), which has nothing to
-    do with whether the current analysis should succeed; any failure here
-    just means deletions aren't detected for this run, logged not fatal.
+    Returns (deleted_node_metadata, deleted_edges, parsed_files): the first
+    two in the same shapes analyze_impact already builds for regular
+    nodes/edges, and the repo-relative paths of the changed files Trailmark
+    found symbols in at from_ref. Raises if the from_ref side can't be
+    parsed -- the caller records that deletions went unreviewed.
 
     Fetches every changed file's from_ref content concurrently -- each
     `git show` is independent and I/O-bound, so a diff touching thousands
@@ -188,66 +186,65 @@ def _find_deleted_nodes(
             return None  # didn't exist at from_ref (a newly added file) -- nothing to compare
         return rel_path, result.stdout
 
-    try:
-        with tempfile.TemporaryDirectory(prefix="zairo-deleted-") as tmp_dir:
-            found_any = False
-            if changed_files:
-                # File writes happen back on this thread as results come in
-                # (pool.map preserves submission order) -- only the git
-                # subprocess calls themselves run concurrently, so there's
-                # no need to lock around tmp_dir.
-                with ThreadPoolExecutor(max_workers=min(_MAX_GIT_SHOW_WORKERS, len(changed_files))) as pool:
-                    for outcome in pool.map(fetch, changed_files):
-                        if outcome is None:
-                            continue
-                        rel_path, content = outcome
-                        dest = os.path.join(tmp_dir, rel_path)
-                        os.makedirs(os.path.dirname(dest), exist_ok=True)
-                        with open(dest, 'w', encoding='utf-8', errors='surrogateescape') as f:
-                            f.write(content)
-                        found_any = True
+    with tempfile.TemporaryDirectory(prefix="zairo-deleted-") as tmp_dir:
+        found_any = False
+        if changed_files:
+            # File writes happen back on this thread as results come in
+            # (pool.map preserves submission order) -- only the git
+            # subprocess calls themselves run concurrently, so there's
+            # no need to lock around tmp_dir.
+            with ThreadPoolExecutor(max_workers=min(_MAX_GIT_SHOW_WORKERS, len(changed_files))) as pool:
+                for outcome in pool.map(fetch, changed_files):
+                    if outcome is None:
+                        continue
+                    rel_path, content = outcome
+                    dest = os.path.join(tmp_dir, rel_path)
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    with open(dest, 'w', encoding='utf-8', errors='surrogateescape') as f:
+                        f.write(content)
+                    found_any = True
 
-            if not found_any:
-                return {}, []
+        if not found_any:
+            return {}, [], set()
 
-            base_graph = parse_directory(tmp_dir, language=language)
+        base_graph = parse_directory(tmp_dir, language=language)
+        parsed_files = {
+            _rel(unit.location.file_path, tmp_dir) for unit in base_graph.nodes.values() if unit.kind.value != 'proxy'
+        }
 
-            deleted_metadata = {}
-            for node_id, unit in base_graph.nodes.items():
-                if node_id in to_node_ids or unit.kind.value == 'proxy':
-                    continue
-                location = unit.location
-                # location.file_path points into tmp_dir, which is gone the
-                # moment this `with` block exits -- rewrite it to where that
-                # file would be under the real repo, consistent with every
-                # other node's 'file' convention (even though the deleted
-                # code obviously can't be read from there anymore).
-                rel = os.path.relpath(location.file_path, tmp_dir)
-                deleted_metadata[node_id] = {
-                    "id": node_id,
-                    "name": _node_name(unit, tmp_dir),
-                    "kind": unit.kind.value,
-                    "file": os.path.join(repo_path, rel),
-                    "start_line": location.start_line,
-                    "end_line": location.end_line,
-                    "complexity": unit.cyclomatic_complexity,
-                    "status": "deleted",
-                }
+        deleted_metadata = {}
+        for node_id, unit in base_graph.nodes.items():
+            if node_id in to_node_ids or unit.kind.value == 'proxy':
+                continue
+            location = unit.location
+            # location.file_path points into tmp_dir, which is gone the
+            # moment this `with` block exits -- rewrite it to where that
+            # file would be under the real repo, consistent with every
+            # other node's 'file' convention (even though the deleted
+            # code obviously can't be read from there anymore).
+            rel = os.path.relpath(location.file_path, tmp_dir)
+            deleted_metadata[node_id] = {
+                "id": node_id,
+                "name": _node_name(unit, tmp_dir),
+                "kind": unit.kind.value,
+                "file": os.path.join(repo_path, rel),
+                "start_line": location.start_line,
+                "end_line": location.end_line,
+                "complexity": unit.cyclomatic_complexity,
+                "status": "deleted",
+            }
 
-            # Only edges touching a deleted node: an edge between two nodes
-            # that both survive is the to-side graph's to report -- a
-            # from_ref one would show a call the change removed as still
-            # there. No lines either: they'd point into from_ref's copy of
-            # the file, not the one on disk.
-            deleted_edges = [
-                _edge_dict(e, with_line=False)
-                for e in base_graph.edges
-                if e.source_id in deleted_metadata or e.target_id in deleted_metadata
-            ]
-            return deleted_metadata, deleted_edges
-    except Exception as e:
-        log(f"Skipping deleted-node detection: could not parse {from_ref} ({e})")
-        return {}, []
+        # Only edges touching a deleted node: an edge between two nodes
+        # that both survive is the to-side graph's to report -- a
+        # from_ref one would show a call the change removed as still
+        # there. No lines either: they'd point into from_ref's copy of
+        # the file, not the one on disk.
+        deleted_edges = [
+            _edge_dict(e, with_line=False)
+            for e in base_graph.edges
+            if e.source_id in deleted_metadata or e.target_id in deleted_metadata
+        ]
+        return deleted_metadata, deleted_edges, parsed_files
 
 
 def analyze_impact(
@@ -257,12 +254,31 @@ def analyze_impact(
     to_ref: str = None,
     language: str = "auto",
     log: Optional[Callable[[str], None]] = None,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, List[Dict[str, str]]]]:
     """
-    Returns (graph_data, context), both {"nodes": [...], "edges": [...]}:
-    graph_data is the report's graph -- the changed nodes plus whatever lies
-    within `depth` hops of them -- and context is the whole graph (test code
-    aside), for the scanner to read a changed node's surroundings from.
+    Returns (graph_data, context, coverage). graph_data and context are both
+    {"nodes": [...], "edges": [...]}: graph_data is the report's graph --
+    the changed nodes plus whatever lies within `depth` hops of them -- and
+    context is the whole graph (test code aside), for the scanner to read a
+    changed node's surroundings from.
+
+    coverage says what became of the change as a whole, so that a clean
+    result can't hide what nobody looked at:
+      changed_files: one {"path", "outcome"} per changed file, path
+                     repo-relative, outcome one of:
+                       analyzed: the symbols it changed are in the graph,
+                         each with its own result;
+                       deleted: gone after the change -- any symbols it had
+                         are in the graph as deleted;
+                       test: test code, left out on purpose;
+                       no_symbols_changed: parsed, but the change touched
+                         none of its symbols (a rename, say);
+                       not_parsed: zairo doesn't parse this kind of file.
+                     The last two mean nothing in it was reviewed (see
+                     _util.NOT_REVIEWED);
+      problems:      [{"level": "error" | "warning", "message"}] for parts
+                     of the analysis that failed. An error means some of the
+                     change went unreviewed, so the run is incomplete.
 
     `repo_path` must already be checked out at the state to be indexed: the
     caller is responsible for pointing it at a worktree checked out to
@@ -272,11 +288,16 @@ def analyze_impact(
     log = log or (lambda msg: None)
 
     analysis_root = os.path.abspath(repo_path)
+    problems: List[Dict[str, str]] = []
 
     diff_hunks = get_diff_hunks(analysis_root, from_ref, to_ref, log=log)
     log(f"git diff found {len(diff_hunks)} modified file(s):")
     for f, hunks in diff_hunks.items():
         log(f"  {f}: {len(hunks)} hunk(s) at line(s) {[hunk_lines(h)[0] for h in hunks]}")
+    # Every changed file, hunks or not: `git diff --name-only` also lists
+    # deleted and binary files, and only diff_hunks has untracked ones.
+    changed_paths = set(get_changed_file_paths(analysis_root, from_ref, to_ref))
+    changed_paths.update(_rel(f, analysis_root) for f in diff_hunks)
     # Test code stays out of the graph entirely (see _util.is_test_file):
     # a change to it isn't a change to the attack surface.
     changed_tests = [f for f in diff_hunks if _in_test_file(f, analysis_root)]
@@ -305,8 +326,15 @@ def analyze_impact(
         _edge_dict(e) for e in graph.edges
         if e.source_id not in test_nodes and e.target_id not in test_nodes
     ]
-    entrypoints = _entrypoints(graph, analysis_root, log)
-    log(f"Found {len(entrypoints)} entry point(s)")
+    try:
+        entrypoints = _entrypoints(graph, analysis_root)
+        log(f"Found {len(entrypoints)} entry point(s)")
+    except Exception as e:
+        entrypoints = {}
+        log(f"Entry-point detection failed: {e}")
+        problems.append({"level": "warning", "message": (
+            f"Couldn't find the repo's entry points ({e}), so the model wasn't told what code they reach."
+        )})
 
     # 1. Identify seed nodes (modified/added)
     seed_nodes = set()
@@ -369,10 +397,18 @@ def analyze_impact(
     # itself the primary change of interest, not something reached by
     # traversing from one.
     effective_from_ref = from_ref or "HEAD"
-    changed_file_paths = [p for p in get_changed_file_paths(analysis_root, from_ref, to_ref) if not is_test_file(p)]
-    deleted_metadata, deleted_edges = _find_deleted_nodes(
-        analysis_root, changed_file_paths, effective_from_ref, set(graph.nodes), language, log,
-    )
+    try:
+        deleted_metadata, deleted_edges, from_parsed = _find_deleted_nodes(
+            analysis_root, sorted(p for p in changed_paths if not is_test_file(p)), effective_from_ref,
+            set(graph.nodes), language,
+        )
+    except Exception as e:
+        deleted_metadata, deleted_edges, from_parsed = {}, [], set()
+        log(f"Deleted-symbol detection failed: {e}")
+        problems.append({"level": "error", "message": (
+            f"Couldn't parse the files as they were before the change ({e}), "
+            f"so nothing the change deleted was looked at."
+        )})
     if deleted_metadata:
         log(f"Found {len(deleted_metadata)} deleted node(s) (present in {effective_from_ref}, absent from the current tree)")
         subgraph_nodes.update(deleted_metadata.keys())
@@ -421,4 +457,23 @@ def analyze_impact(
     # direct callers and callees, and the other definitions in its file --
     # whatever --depth the report's graph was built with.
     context = {"nodes": list(node_metadata.values()), "edges": all_edges}
-    return graph_data, context
+
+    to_parsed = {
+        _rel(unit.location.file_path, analysis_root)
+        for unit in graph.nodes.values() if unit.kind.value != 'proxy'
+    }
+    with_symbols = {_rel(node_metadata[n_id]['file'], analysis_root) for n_id in seed_nodes}
+    changed_files = []
+    for path in sorted(changed_paths):
+        if is_test_file(path):
+            outcome = "test"
+        elif not os.path.exists(os.path.join(analysis_root, path)):
+            outcome = "deleted"
+        elif path in with_symbols:
+            outcome = "analyzed"
+        elif path in to_parsed or path in from_parsed:
+            outcome = "no_symbols_changed"
+        else:
+            outcome = "not_parsed"
+        changed_files.append({"path": path, "outcome": outcome})
+    return graph_data, context, {"changed_files": changed_files, "problems": problems}

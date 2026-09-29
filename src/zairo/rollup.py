@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from jinja2 import Template
 
-from ._util import SEVERITY_LEVELS, max_severity, normalize_severity
+from ._util import NOT_REVIEWED, SEVERITY_LEVELS, max_severity, normalize_severity
 from .sarif import SARIF_SCHEMA_URI, build_sarif
 
 ROLLUP_HTML_TEMPLATE = """
@@ -111,7 +111,7 @@ ROLLUP_HTML_TEMPLATE = """
         <table>
             <thead>
                 <tr>
-                    <th>Repo</th><th>Status</th><th>Changed symbols</th><th>Findings</th>
+                    <th>Repo</th><th>Status</th><th>Changed symbols</th><th>Files not reviewed</th><th>Findings</th>
                     <th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Reports</th>
                 </tr>
             </thead>
@@ -121,15 +121,16 @@ ROLLUP_HTML_TEMPLATE = """
                     <td>{{ r.repo }}</td>
                 {% if r.status == 'error' %}
                     <td><span class="badge status-error">error</span></td>
-                    <td colspan="6" class="error-text">{{ r.error }}</td>
+                    <td colspan="7" class="error-text">{{ r.error }}</td>
                     <td></td>
                 {% else %}
-                  {% if r.scan_complete is sameas false %}
-                    <td><span class="badge status-incomplete" title="{{ r.num_failed_symbols }} symbol(s) could not be assessed">incomplete</span></td>
+                  {% if not r.complete %}
+                    <td><span class="badge status-incomplete" title="{{ r.num_failed_symbols }} symbol(s) could not be assessed{% for p in r.problems if p.level == 'error' %}; {{ p.message }}{% endfor %}">incomplete</span></td>
                   {% else %}
                     <td><span class="badge status-ok">ok</span></td>
                   {% endif %}
                     <td>{{ r.num_changed_symbols }}</td>
+                    <td class="count {{ 'nonzero' if r.not_reviewed_files else '' }}" title="{{ r.not_reviewed_files|join(', ') }}">{{ r.not_reviewed_files|length }}</td>
                     <td>{{ r.num_findings }}</td>
                     <td class="count sev-critical {{ 'nonzero' if r.severity_counts.critical else '' }}">{{ r.severity_counts.critical }}</td>
                     <td class="count sev-high {{ 'nonzero' if r.severity_counts.high else '' }}">{{ r.severity_counts.high }}</td>
@@ -196,12 +197,11 @@ def build_rollup_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
                     totals[sev] += 1
                     num_findings += 1
 
-        # None when no LLM scan ran (--graph-only): there's nothing to be
-        # complete or incomplete about.
-        failed_nodes = (scan_result.token_usage or {}).get("failed_nodes", {})
         entry.update({
-            "scan_complete": None if scan_result.vulnerabilities is None else not failed_nodes,
-            "num_failed_symbols": len(failed_nodes),
+            "complete": scan_result.complete,
+            "num_failed_symbols": len(scan_result.failed_nodes),
+            "problems": scan_result.problems,
+            "not_reviewed_files": [f["path"] for f in scan_result.changed_files if f["outcome"] in NOT_REVIEWED],
             "num_changed_symbols": sum(1 for n in scan_result.graph_data["nodes"] if n["status"] != "unchanged"),
             "num_findings": num_findings,
             "severity_counts": severity_counts,
@@ -233,7 +233,8 @@ def _build_rollup_sarif(results: List[Dict[str, Any]], tool_version: str) -> Opt
         repo_sarif = build_sarif(
             scan_result.graph_data, scan_result.vulnerabilities,
             repo_root=scan_result.analysis_root, tool_version=tool_version,
-            failed_nodes=(scan_result.token_usage or {}).get("failed_nodes"),
+            failed_nodes=scan_result.failed_nodes, changed_files=scan_result.changed_files,
+            problems=scan_result.problems,
         )
         run = repo_sarif["runs"][0]
         notifications = [n for inv in run["invocations"] for n in inv.get("toolExecutionNotifications", [])]

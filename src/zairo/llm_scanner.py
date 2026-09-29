@@ -76,20 +76,35 @@ _DEFAULT_MAX_OUTPUT_TOKENS = 4096
 
 @lru_cache(maxsize=4096)
 def get_source_code(file_path: str, start_line: Optional[int], end_line: Optional[int]) -> str:
-    if not file_path or not os.path.exists(file_path):
+    """Lines start_line..end_line of the file (all of it without both), or
+    "" if it can't be read -- see read_error. A byte that isn't UTF-8 (a
+    Latin-1 string in a comment, say) reads as U+FFFD: the code around it
+    is still worth reviewing."""
+    if not file_path:
         return ""
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
             lines = f.readlines()
+    except OSError:
+        return ""
 
-        if start_line is None or end_line is None:
-            return "".join(lines)
+    if start_line is None or end_line is None:
+        return "".join(lines)
 
-        start_idx = max(0, start_line - 1)
-        end_idx = min(len(lines), end_line)
-        return "".join(lines[start_idx:end_idx])
-    except Exception as e:
-        return f"// Error reading file: {e}"
+    start_idx = max(0, start_line - 1)
+    end_idx = min(len(lines), end_line)
+    return "".join(lines[start_idx:end_idx])
+
+
+def read_error(file_path: Optional[str]) -> Optional[str]:
+    """Why file_path can't be read, or None if it can."""
+    if not file_path:
+        return "it has no file"
+    try:
+        with open(file_path, 'rb'):
+            return None
+    except OSError as e:
+        return f"couldn't read {os.path.basename(file_path)}: {e.strerror or e}"
 
 
 def _is_trivial_change(hunks: List[Dict[str, Any]]) -> bool:
@@ -987,6 +1002,7 @@ def scan_graph_for_vulnerabilities(
     vulnerabilities = {}
     assessed_nodes = []
     skipped_nodes = {}
+    unreadable: Dict[str, str] = {}  # {node id: why its code couldn't be read}
     bait_lines: Dict[str, Dict[int, str]] = {}  # {node id: {added line: its text}} -- see aimed_at_reviewer
     context = context or graph_data
     nodes = {n['id']: n for n in context['nodes']}
@@ -1101,7 +1117,14 @@ def scan_graph_for_vulnerabilities(
             mod_code, shown_lines = _numbered_blocks(mod_node['file'], [(start, end)])
 
         if not mod_code.strip():
-            skip(mod_node, "source not found")
+            # A changed symbol whose code can't be read is one nobody
+            # reviewed: failed, not skipped.
+            error = read_error(mod_node['file'])
+            if error:
+                unreadable[mod_node['id']] = error
+                log(f"  can't scan {_display_name(mod_node['name'])}: {error}")
+            else:
+                skip(mod_node, "no code left in it after the change")
             continue
 
         # A module/file-level node's window is a tiny slice of the whole
@@ -1325,9 +1348,10 @@ def scan_graph_for_vulnerabilities(
         # failed on every node (e.g. a missing API key) is never
         # indistinguishable from a clean "0 vulnerabilities found" scan.
         'errors': {},
-        # {node id: error message} for every node that got no usable answer
-        # -- what makes a scan incomplete. The reports mark these nodes, and
-        # --fail-on refuses to pass a scan that has any.
+        # {node id: error message} for every node that got no usable answer,
+        # or whose code couldn't be read to ask about -- what makes a scan
+        # incomplete. The reports mark these nodes, and zairo exits with
+        # status 3 while there are any.
         'failed_nodes': {},
         'assessed_nodes': assessed_nodes,  # cache hits so far; successful calls added below
         'skipped_nodes': skipped_nodes,  # {node id: why it wasn't sent to the model}
@@ -1338,6 +1362,9 @@ def scan_graph_for_vulnerabilities(
         'lookups': lookups_by_node,
         'lookups_made': 0,
     }
+    for node_id, error_message in unreadable.items():
+        token_usage['failed_nodes'][node_id] = error_message
+        token_usage['errors'][error_message] = token_usage['errors'].get(error_message, 0) + 1
 
     if jobs:
         _ensure_litellm()  # deferred until there's actually a request to make

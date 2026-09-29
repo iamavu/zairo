@@ -24,6 +24,23 @@ def is_test_file(rel_path: str) -> bool:
     return stem.startswith(_TEST_STEM_PREFIXES) or stem.endswith(_TEST_STEM_SUFFIXES)
 
 
+# The outcomes of a changed file (see analyze_impact) that mean nothing in
+# it was reviewed, and why -- what the reports list as not reviewed.
+NOT_REVIEWED = {
+    "not_parsed": "zairo doesn't parse this kind of file",
+    "no_symbols_changed": "the change touched none of its symbols",
+}
+
+
+def is_complete(failed_nodes: Optional[Dict[str, str]], problems: Optional[List[Dict[str, str]]]) -> bool:
+    """Whether every part of a change got looked at: the model assessed
+    every changed symbol it was asked about (no failed_nodes), and no part
+    of the analysis failed (no error-level problem). Files zairo doesn't
+    parse don't count against it -- each is listed with that outcome --
+    or every change to a README would make a run incomplete."""
+    return not failed_nodes and not any(p["level"] == "error" for p in problems or [])
+
+
 def display_name(name: Any, limit: int = 60) -> str:
     """Collapses a node name to one short line for log display. Some graph
     nodes (e.g. Trailmark misparsing a chained expression like
