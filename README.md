@@ -122,7 +122,7 @@ A normal scan gives the model one fixed prompt (see [What the model sees](#what-
 - `callers(symbol)` / `callees(symbol)`: from the call graph.
 - `search(text)`: lines in the repo's files that contain the text (test code aside), the first 30.
 
-It gets up to 8 lookups per changed symbol and then answers in the same format as a normal scan, so the reports, SARIF and `--fail-on` work the same way. Each symbol in `report.json` carries its `lookups` (`{"tool", "input"}`, plus `from_line` for a paged `code`), and `report.html` lists them, so you can see what an answer rests on.
+It gets up to 8 lookups per changed symbol, each result saying how many it has left, and then answers in the same format as a normal scan, so the reports, SARIF and `--fail-on` work the same way. Each symbol in `report.json` carries its `lookups` (`{"tool", "input"}`, plus `from_line` for a paged `code`), and `report.html` lists them, so you can see what an answer rests on.
 
 - **Cost:** every lookup is another request, and each request resends the conversation so far. A symbol that uses 3–4 lookups costs roughly 3–6 times a normal scan. `--tokens` shows the total.
 - **Repeatability:** answers vary more from run to run. With `--from` and `--to`, each answer is cached against the commit scanned, so a rerun on the same commit gives the same answer. Scans of uncommitted changes aren't cached, since a lookup can read any file in the working tree.

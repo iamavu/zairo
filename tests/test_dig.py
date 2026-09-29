@@ -112,12 +112,13 @@ def test_an_ambiguous_name_lists_the_candidates_and_file_name_picks_one(tmp_path
 
     ambiguous, _ = lookups.run("code", {"symbol": "check"})
     picked, _ = lookups.run("code", {"symbol": "views.py:check"})
+    prefixed, _ = lookups.run("code", {"symbol": "file:views.py:check"})  # how models have written it
     by_id, _ = lookups.run("code", {"symbol": "views:check"})
     unknown, _ = lookups.run("code", {"symbol": "nope"})
 
     assert "2 symbols match 'check'. Ask again with one of their ids:" in ambiguous
     assert "- app:check: check (function, app.py:1-2)" in ambiguous and "- views:check: check (function, views.py:1-2)" in ambiguous
-    assert "def check(request):" in picked and "def check(request):" in by_id
+    assert all("def check(request):" in result for result in (picked, prefixed, by_id))
     assert "No function or class named 'nope' in the code graph." in unknown
 
 
@@ -176,6 +177,8 @@ def test_dig_looks_things_up_then_answers(monkeypatch, tmp_path):
     results = [m for m in second.kwargs["messages"] if isinstance(m, dict) and m["role"] == "tool"]
     assert [m["tool_call_id"] for m in results] == ["call_0", "call_1"]
     assert "Checks the invoice's tenant" in results[0]["content"] and "TENANT_CHECKS = True" in results[1]["content"]
+    assert results[0]["content"].endswith(f"({MAX_LOOKUPS - 1} of {MAX_LOOKUPS} lookups left.)")
+    assert results[1]["content"].endswith(f"({MAX_LOOKUPS - 2} of {MAX_LOOKUPS} lookups left.)")
     assert vulnerabilities["app:get_invoice"][0]["title"] == "Tenant check removed"
     assert vulnerabilities["app:get_invoice"][0]["line"] == 5
     assert token_usage["lookups"]["app:get_invoice"] == [{"tool": "note", "input": "check"}, {"tool": "search", "input": "TENANT_CHECKS"}]

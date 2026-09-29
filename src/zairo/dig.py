@@ -27,7 +27,7 @@ _SEARCH_MAX_FILE_BYTES = 1_000_000
 _LISTED = 30  # callers, callees, or symbols matching an ambiguous name
 _GUTTER = 5
 
-_SYMBOL = {"type": "string", "description": "The function's or class's name as the prompt shows it, file:name to pick one of several with that name, or its id."}
+_SYMBOL = {"type": "string", "description": "The function's or class's name as the prompt shows it (a module's is its file path); its file path and name, as in pkg/auth/session.go:Refresh, to pick one of several with that name; or its id."}
 
 TOOLS = [
     {"type": "function", "function": {
@@ -60,7 +60,7 @@ TOOLS = [
     }},
 ]
 
-INSTRUCTIONS = f"""Before you answer, you can look things up with the tools you have -- at most {MAX_LOOKUPS} lookups for this review. Use them to settle what the code shown can't: whether a check happens before the changed code is reached, what a function it calls really does with its input, where a value or setting comes from. Try a function's note before its code. Don't look up what you don't need, and answer as soon as you can."""
+INSTRUCTIONS = f"""Before you answer, you can look things up with the tools you have -- at most {MAX_LOOKUPS} lookups for this review, and each result says how many you have left. Use them to settle what the code shown can't: whether a check happens before the changed code is reached, what a function it calls really does with its input, where a value or setting comes from. Try a function's note before its code. Don't look up what you don't need, and answer as soon as you can."""
 
 GROUNDING = """Base every finding on code you've actually seen, shown above or looked up; don't guess at code you haven't seen -- look it up, or leave it out. Report findings in the modified code: a flaw in code you looked up counts only if this change makes it newly reachable, and then belongs on the modified line that reaches it. A finding's 'line' is always a line of the modified code in the user message."""
 
@@ -122,8 +122,10 @@ class Lookups:
         return f"{inline(n['name'])} ({n.get('kind')}, {inline(self._rel(n['file']))}:{n.get('start_line')}-{n.get('end_line')})"
 
     def _resolve(self, symbol: Any) -> Tuple[Optional[Dict[str, Any]], str]:
-        """The one symbol `symbol` names -- or None, and what to do instead."""
-        symbol = str(symbol).strip()
+        """The one symbol `symbol` names -- or None, and what to do instead.
+        A leading "file:" is dropped: models have written the file-and-name
+        form as "file:<path>:<name>"."""
+        symbol = str(symbol).strip().removeprefix("file:")
         if symbol in self._live_ids:
             return self._by_id[symbol], ""
 
@@ -288,7 +290,10 @@ def dig(
             if len(run.lookups) < MAX_LOOKUPS:
                 result, lookup = lookups.run(name, call.function.arguments)
                 run.lookups.append(lookup)
-                if len(run.lookups) == MAX_LOOKUPS:
+                left = MAX_LOOKUPS - len(run.lookups)
+                if left:
+                    result += f"\n\n({left} of {MAX_LOOKUPS} lookups left.)"
+                else:
                     result += f"\n\nThat was the last of your {MAX_LOOKUPS} lookups: answer next, with the JSON object only."
             else:
                 result = f"Not run: all {MAX_LOOKUPS} lookups are used. Answer now, with the JSON object only."
