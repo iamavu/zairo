@@ -1185,3 +1185,68 @@ def test_scan_notes_the_functions_further_up_its_paths_from_entry_points(monkeyp
     assert "Callers of its callers:\n" + _block(prompt, f"- b (calls c): {note}") in prompt
     assert "Further up its paths from entry points:\n" + _block(prompt, f"- route (entry point): {note}\n- a: {note}") in prompt
     assert token_usage["notes_used"] == 3  # b, a and route; c is shown in full
+
+
+_PROSE_THEN_ANSWER = """Based on my analysis, here's what I found:
+
+```go
+func isHealthCheckRequest(paths, userAgents map[string]struct{}, req *http.Request) bool {
+    if _, ok := paths[req.URL.EscapedPath()]; ok {
+        return true
+    }
+    return false
+}
+```
+
+```json
+{"vulnerabilities": [{"title": "User-Agent bypasses authentication", "severity": "low", "line": 1}]}
+```
+"""
+
+
+def test_an_answer_after_prose_and_code_is_found_past_the_codes_braces(monkeypatch):
+    """Go's `struct{}` is a valid, empty JSON object -- it used to be taken
+    for the answer, and the finding after it thrown away."""
+    _mock_litellm_response(monkeypatch, _PROSE_THEN_ANSWER)
+
+    vulnerabilities, token_usage = llm_scanner.scan_graph_for_vulnerabilities(
+        {"nodes": [_node("n1", "Options")], "edges": []}, "fake-model", cache_path=None,
+    )
+
+    assert token_usage["failed_nodes"] == {}
+    assert vulnerabilities["n1"][0]["title"] == "User-Agent bypasses authentication"
+
+
+def test_an_unfenced_answer_after_code_is_found_too():
+    content = "It calls `check(user) { ... }` first.\nfunc f() { return }\n{\"vulnerabilities\": []}"
+
+    assert llm_scanner._extract_json(content, llm_scanner._is_findings) == {"vulnerabilities": []}
+
+
+def test_a_well_formed_non_answer_is_returned_for_the_caller_to_reject():
+    """Braces inside its strings aren't broken JSON of their own."""
+    content = '{"message": "unable {to} assess"}'
+
+    assert llm_scanner._extract_json(content, llm_scanner._is_findings) == {"message": "unable {to} assess"}
+
+
+def test_code_with_no_answer_in_it_is_an_error():
+    content = "func f(m map[string]struct{}) bool {\n    return true\n}"
+
+    try:
+        llm_scanner._extract_json(content, llm_scanner._is_findings)
+    except ValueError as e:
+        assert "could not find valid JSON" in str(e)
+    else:
+        raise AssertionError("no error")
+
+
+def test_a_batch_answer_after_prose_is_found(monkeypatch):
+    _mock_litellm_response(monkeypatch, 'Here you go: `x = {}`\n' + json.dumps({"n1": [], "n2": [{"title": "X", "severity": "high"}]}))
+
+    vulnerabilities, token_usage = llm_scanner.scan_graph_for_vulnerabilities(
+        {"nodes": [_node("n1", "fn_one"), _node("n2", "fn_two")], "edges": []}, "fake-model", cache_path=None, batch_size=2,
+    )
+
+    assert token_usage["failed_nodes"] == {}
+    assert list(vulnerabilities) == ["n2"]

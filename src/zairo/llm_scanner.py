@@ -665,7 +665,11 @@ _JSON_DECODER = json.JSONDecoder(strict=False)  # strict=False: tolerate raw
 # some models emit instead of a proper \n escape.
 
 
-def _extract_json(content: str) -> dict:
+# A fenced block anywhere in a response: ```json ... ```, or bare ```.
+_FENCED_BLOCK_RE = re.compile(r'```[a-zA-Z]*[ \t]*\n(.*?)```', re.S)
+
+
+def _extract_json(content: str, wanted: Optional[Callable[[dict], bool]] = None) -> dict:
     """Parses the model's response, tolerating fence variants, stray prose,
     trailing content after the JSON (some smaller/less-aligned models keep
     generating after a complete answer — duplicate output, trailing
@@ -678,39 +682,60 @@ def _extract_json(content: str) -> dict:
     value and stops there instead of requiring the whole string to be one
     value. Any other JSON value (a bare string, number, ...) isn't an
     answer and is rejected like unparseable text.
+
+    The answer can come after prose and code, above all once a --dig
+    conversation has looked things up -- and code has braces of its own:
+    Go's `struct{}` is a valid, empty JSON object. So it tries the whole
+    response, then each fenced block, then from every "{" that isn't inside
+    an object already read, and returns the first object `wanted` accepts.
+    Failing that, the first object read, for the caller to reject as the
+    wrong shape -- unless some "{" started JSON that's broken (a response
+    cut off at max_tokens, say), which is then the error.
     """
     fixed = _fix_invalid_escapes(content)
     stripped = _FENCE_RE.sub('', fixed).strip()
+    # (text, where to start reading, whether it's all of a candidate)
+    candidates = [(stripped, 0, True)] + [(m.group(1).strip(), 0, True) for m in _FENCED_BLOCK_RE.finditer(fixed)]
+    candidates += [(fixed, i, False) for i, c in enumerate(fixed) if c == '{']
 
-    candidates = [stripped]
-    first_brace = fixed.find('{')
-    if first_brace != -1:
-        candidates.append(fixed[first_brace:].strip())
-
-    last_err = None
-    last_candidate = None
-    for candidate in candidates:
-        if not candidate:
+    first_obj = None
+    first_err = None
+    read_to = 0  # the end of the last object read from a "{"
+    for text, start, whole in candidates:
+        if (whole and not text) or (not whole and start < read_to):
             continue
         try:
-            obj, _ = _JSON_DECODER.raw_decode(candidate)
+            obj, end = _JSON_DECODER.raw_decode(text, start)
         except json.JSONDecodeError as e:
-            last_err, last_candidate = e, candidate
+            if first_err is None and not whole:
+                first_err = e
             continue
-        if isinstance(obj, list):
+        if not whole:
+            read_to = end
+        if isinstance(obj, list) and whole:
             obj = {"vulnerabilities": obj}
-        if isinstance(obj, dict):
+        if not isinstance(obj, dict):
+            continue
+        if wanted is None or wanted(obj):
             return obj
+        if first_obj is None:
+            first_obj = obj
+    if first_obj is not None and first_err is None:
+        return first_obj
 
     # Show the text around the actual failure point, not just the start of
     # the response — a generic head-of-string preview doesn't help diagnose
     # a structural error (e.g. a missing comma) that occurs deep in the doc.
-    if last_err is not None:
-        pos = last_err.pos
-        window = last_candidate[max(0, pos - 80):pos + 80]
-        raise ValueError(f"could not find valid JSON ({last_err}); near failure point: {window!r}")
+    if first_err is not None:
+        pos = first_err.pos
+        window = fixed[max(0, pos - 80):pos + 80]
+        raise ValueError(f"could not find valid JSON ({first_err}); near failure point: {window!r}")
 
     raise ValueError(f"could not find a JSON object in model response: {content[:200]!r}")
+
+
+def _is_findings(obj: dict) -> bool:
+    return isinstance(obj.get("vulnerabilities"), list)
 
 
 def _cited_line(raw: Any, shown_lines: set) -> Optional[int]:
@@ -1160,7 +1185,7 @@ def scan_graph_for_vulnerabilities(
 
             try:
                 findings = _validated_findings(
-                    _extract_json(content).get("vulnerabilities"),
+                    _extract_json(content, _is_findings).get("vulnerabilities"),
                     "model response has no 'vulnerabilities' list of findings, so it isn't a scan result",
                     shown_lines,
                 )
@@ -1210,7 +1235,7 @@ def scan_graph_for_vulnerabilities(
             )
         try:
             findings = _validated_findings(
-                _extract_json(content).get("vulnerabilities"),
+                _extract_json(content, _is_findings).get("vulnerabilities"),
                 "model response has no 'vulnerabilities' list of findings, so it isn't a scan result",
                 shown_lines,
             )
@@ -1256,7 +1281,7 @@ def scan_graph_for_vulnerabilities(
                 return [(j[0]['id'], j[1], None, usage, error_message) for j in group]
 
             try:
-                parsed = _extract_json(content)
+                parsed = _extract_json(content, lambda obj: any(_batch_id(j[0]) in obj for j in group))
             except ValueError as e:
                 safe_log(f"  error scanning {batch_label}: {e}")
                 return [(j[0]['id'], j[1], None, usage, _summarize_error(e)) for j in group]
@@ -1402,8 +1427,14 @@ def _note_objects(content: str) -> Tuple[Dict[str, Any], Optional[str]]:
     """The notes in a --warm-up response, by label -- and why, if it isn't
     one whole JSON object. Each "F<n>": {...} is also read on its own, so a
     response cut off partway still gives every note before the cut."""
+    def is_notes(obj: dict) -> bool:
+        return any(re.fullmatch(r"F\d+", str(key)) for key in obj)
+
     try:
-        return _extract_json(content), None
+        parsed = _extract_json(content, is_notes)
+        if is_notes(parsed):
+            return parsed, None
+        error = "model response has no notes keyed F1, F2, ..."
     except ValueError as e:
         error = _summarize_error(e)
     fixed = _fix_invalid_escapes(content)
