@@ -286,6 +286,23 @@ def test_head_relative_from_resolves_in_the_repo_not_the_to_worktree(git_repo: P
     assert "vulnerable_exec" in modified
 
 
+@pytest.mark.parametrize("refs", [["--from", "HEAD~1", "--to", "HEAD"], []])
+def test_report_paths_are_repo_relative_and_say_which_commits(git_repo: Path, tmp_path: Path, refs):
+    """With --to, the code is read from a temporary worktree that's gone
+    by the time anyone opens the report: its paths can't point there."""
+    (git_repo / "test.py").write_text("import os\ndef vulnerable_exec(user_input):\n    return os.system(user_input + '')\n")
+    commit = lambda ref: subprocess.run(["git", "rev-parse", ref], cwd=git_repo, capture_output=True, text=True).stdout.strip()
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(app, [str(git_repo), *refs, "--graph-only", "--output", str(output_dir)])
+
+    assert result.exit_code == 0, result.output
+    report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
+    assert {n["file"] for n in report["symbols"] if n["file"]} == {"test.py"}
+    expected = {"from": commit("HEAD~1"), "to": commit("HEAD")} if refs else {"from": commit("HEAD"), "to": None}
+    assert report["commits"] == expected
+
+
 def test_unknown_from_ref_is_an_error(git_repo: Path, tmp_path: Path):
     """Not an empty diff that passes as "nothing changed"."""
     result = runner.invoke(

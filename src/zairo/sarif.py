@@ -1,4 +1,3 @@
-import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -71,27 +70,21 @@ def _slugify(text: str) -> str:
     return slug or "finding"
 
 
-def _relative_uri(file_path: Optional[str], repo_root: str) -> Optional[str]:
-    """SARIF wants a repo-relative, forward-slash URI. Returns None if the
-    node has no known file, or the file falls outside repo_root (e.g. an
-    absolute stdlib path leaking through) -- such a result is still emitted,
-    just without a location SARIF viewers can jump to."""
-    if not file_path:
+def _uri(file_path: Optional[str]) -> Optional[str]:
+    """A node's file as a SARIF URI: repo-relative with forward slashes, as
+    run_scan leaves it. None if the node has no known file, or it lies
+    outside the repo -- such a result is still emitted, just without a
+    location SARIF viewers can jump to."""
+    if not file_path or file_path.startswith(("../", "/")) or file_path == "..":
         return None
-    try:
-        rel = os.path.relpath(file_path, repo_root)
-    except ValueError:
-        return None  # Windows: on a different drive, so outside repo_root too
-    if rel.startswith(".."):
-        return None
-    return rel.replace(os.sep, "/")
+    return file_path
 
 
-def _location(node: Dict[str, Any], repo_root: str, line: Optional[int] = None) -> Optional[Dict[str, Any]]:
+def _location(node: Dict[str, Any], line: Optional[int] = None) -> Optional[Dict[str, Any]]:
     """A fresh SARIF location for a node every call -- never share one
     between results, since the rollup rewrites each URI in place. Points at
     `line` when given (the line a finding cited), else the node's start."""
-    uri = _relative_uri(node.get("file"), repo_root)
+    uri = _uri(node.get("file"))
     if not uri:
         return None
     return {
@@ -137,7 +130,6 @@ def _rule_for(finding: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
 def build_sarif(
     graph_data: Dict[str, Any],
     vulnerabilities: Dict[str, List[Dict[str, Any]]],
-    repo_root: str,
     tool_version: str = "0.0.0",
     failed_nodes: Optional[Dict[str, str]] = None,
     changed_files: Optional[List[Dict[str, str]]] = None,
@@ -199,7 +191,7 @@ def build_sarif(
             # The scanner only keeps a line the model was actually shown;
             # anything else falls back to where the node starts.
             line = finding.get("line")
-            location = _location(node, repo_root, line if isinstance(line, int) and not isinstance(line, bool) else None)
+            location = _location(node, line if isinstance(line, int) and not isinstance(line, bool) else None)
             if location:
                 result["locations"] = [location]
             results.append(result)
@@ -219,7 +211,7 @@ def build_sarif(
             "level": "error",
             "message": {"text": f"Could not assess {node.get('name', node_id)}: {error}"},
         }
-        location = _location(node, repo_root)
+        location = _location(node)
         if location:
             notification["locations"] = [location]
         notifications.append(notification)

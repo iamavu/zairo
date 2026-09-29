@@ -226,13 +226,8 @@ def _build_rollup_sarif(results: List[Dict[str, Any]], tool_version: str) -> Opt
         if r["status"] != "ok" or r["result"].vulnerabilities is None:
             continue
         scan_result = r["result"]
-        # analysis_root, not the repo path itself: when diffing two commits,
-        # node file paths point into the scan's temporary worktree, and
-        # relative to the repo they'd all resolve outside it (or, on
-        # Windows, onto another drive entirely).
         repo_sarif = build_sarif(
-            scan_result.graph_data, scan_result.vulnerabilities,
-            repo_root=scan_result.analysis_root, tool_version=tool_version,
+            scan_result.graph_data, scan_result.vulnerabilities, tool_version=tool_version,
             failed_nodes=scan_result.failed_nodes, changed_files=scan_result.changed_files,
             problems=scan_result.problems,
         )

@@ -50,6 +50,15 @@ def resolve_commit(repo_path: str, ref: str) -> str:
     raise RuntimeError(message)
 
 
+def head_commit(repo_path: str) -> Optional[str]:
+    """The commit HEAD points at, or None in a repo with no commits yet."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+        cwd=repo_path, capture_output=True, text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
 def create_worktree(repo_path: str, ref: str) -> str:
     """
     Checks out `ref` into a new temporary git worktree and returns its path.

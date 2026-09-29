@@ -342,15 +342,10 @@
         const notReviewed = (graphData.changed_files || []).filter(f => Object.hasOwn(NOT_REVIEWED, f.outcome));
         const oneLine = value => String(value).replace(/\s+/g, ' ').trim();
         const shortName = n => oneLine(n.name).split(':').pop();
-        function relativeFile(n) {
-            const file = n.file.replace(/\\/g, '/');
-            const root = reportMeta.repo_root.replace(/\\/g, '/').replace(/\/$/, '');
-            return root && file.startsWith(root + '/') ? file.slice(root.length + 1) : file;
-        }
         const findings = nodes.flatMap(n => n.vulnerabilities.map((v, index) => ({node: n, finding: v, findingIndex: index, key: `${n.index}:${index}`})))
-            .sort((a, b) => SEVERITY_RANK[severity(b.finding)] - SEVERITY_RANK[severity(a.finding)] || relativeFile(a.node).localeCompare(relativeFile(b.node)) || a.node.name.localeCompare(b.node.name));
-        const sortedNodes = [...nodes].sort((a, b) => relativeFile(a).localeCompare(relativeFile(b)) || (a.start_line || 0) - (b.start_line || 0) || a.name.localeCompare(b.name));
-        nodes.forEach(n => { n.searchText = [n.name, n.id, relativeFile(n)].join(' ').toLowerCase(); });
+            .sort((a, b) => SEVERITY_RANK[severity(b.finding)] - SEVERITY_RANK[severity(a.finding)] || a.node.file.localeCompare(b.node.file) || a.node.name.localeCompare(b.node.name));
+        const sortedNodes = [...nodes].sort((a, b) => a.file.localeCompare(b.file) || (a.start_line || 0) - (b.start_line || 0) || a.name.localeCompare(b.name));
+        nodes.forEach(n => { n.searchText = [n.name, n.id, n.file].join(' ').toLowerCase(); });
         $('toggle-unchanged').checked = nodes.length <= 80;
         const formatNumber = n => n.toLocaleString();
         const plural = (n, singular, multiple = singular + 's') => `${formatNumber(n)} ${n === 1 ? singular : multiple}`;
@@ -426,7 +421,7 @@
             $('results').innerHTML = results.slice(0, resultLimit).map((r, index) => {
                 const d = r.node;
                 const current = r.key === selectedKey;
-                const path = relativeFile(d) || 'External reference';
+                const path = d.file || 'External reference';
                 if (r.finding) {
                     const v = r.finding;
                     return `<button class="result-item" data-result-index="${index}" aria-current="${current}" aria-controls="inspector"><span class="result-topline">${severityBadge(severity(v))}${originBadge(v)}</span><span class="result-title">${escapeHtml(v.title)}</span><span class="result-symbol">${escapeHtml(shortName(d))}</span><span class="result-path" title="${escapeHtml(d.file)}">${escapeHtml(path)}${findingLine(v, d) ? ':' + escapeHtml(findingLine(v, d)) : ''}</span></button>`;
@@ -487,7 +482,7 @@
                 findingHtml += `<section class="detail-section"><div class="detail-section-heading"><h3>Looked up before answering</h3><span class="count">${d.lookups.length}</span></div>${d.lookups.length ? `<ul class="lookup-list">${d.lookups.map(l => `<li>${escapeHtml(lookupText(l))}</li>`).join('')}</ul>` : '<p class="muted">Nothing: the model answered from the code it was shown.</p>'}</section>`;
             }
             const ins = incoming.get(id), outs = outgoing.get(id);
-            $('node-details').innerHTML = `<div class="badge-row"><span class="badge">${escapeHtml(d.kind)}</span><span class="badge status-${d.status}">${escapeHtml(d.status)}</span></div><h2 class="detail-title" id="detail-title" tabindex="-1">${escapeHtml(d.name)}</h2>${d.file ? `<div class="location"><div><div class="file-path">${escapeHtml(relativeFile(d))}</div><div class="line-range">${d.status === 'deleted' ? 'Former location · ' : ''}${d.start_line ? 'Line ' + escapeHtml(d.start_line) + (d.end_line && d.end_line !== d.start_line ? '–' + escapeHtml(d.end_line) : '') : 'Line unavailable'}</div></div><button class="icon-button" data-action="copy-location" aria-label="Copy file location" title="Copy file location">${icon('copy')}</button></div>` : '<p class="muted">External reference</p>'}<button class="button focus-action" data-action="focus-connections" aria-pressed="${Boolean(focusId)}" ${!cy ? 'disabled' : ''}>${icon('graph')}${focusId ? 'Show full graph' : 'Focus connections'}</button>${findingHtml}${ins.length || outs.length ? `<section class="detail-section"><div class="detail-section-heading"><h3>Connections</h3><span class="count">${ins.length + outs.length}</span></div>${connectionRows(ins, 'in')}${connectionRows(outs, 'out')}</section>` : '<p class="detail-note">No direct connections.</p>'}`;
+            $('node-details').innerHTML = `<div class="badge-row"><span class="badge">${escapeHtml(d.kind)}</span><span class="badge status-${d.status}">${escapeHtml(d.status)}</span></div><h2 class="detail-title" id="detail-title" tabindex="-1">${escapeHtml(d.name)}</h2>${d.file ? `<div class="location"><div><div class="file-path">${escapeHtml(d.file)}</div><div class="line-range">${d.status === 'deleted' ? 'Former location · ' : ''}${d.start_line ? 'Line ' + escapeHtml(d.start_line) + (d.end_line && d.end_line !== d.start_line ? '–' + escapeHtml(d.end_line) : '') : 'Line unavailable'}</div></div><button class="icon-button" data-action="copy-location" aria-label="Copy file location" title="Copy file location">${icon('copy')}</button></div>` : '<p class="muted">External reference</p>'}<button class="button focus-action" data-action="focus-connections" aria-pressed="${Boolean(focusId)}" ${!cy ? 'disabled' : ''}>${icon('graph')}${focusId ? 'Show full graph' : 'Focus connections'}</button>${findingHtml}${ins.length || outs.length ? `<section class="detail-section"><div class="detail-section-heading"><h3>Connections</h3><span class="count">${ins.length + outs.length}</span></div>${connectionRows(ins, 'in')}${connectionRows(outs, 'out')}</section>` : '<p class="detail-note">No direct connections.</p>'}`;
             $('node-details').scrollTop = 0; $('detail-title').focus({preventScroll: true});
             renderResults(); updateDetailNavigation();
             if (cy) {
@@ -511,7 +506,7 @@
         }
         async function copyLocation() {
             const d = nodeById.get(selectedId); if (!d) return;
-            const text = relativeFile(d) + (d.start_line ? ':' + d.start_line : '');
+            const text = d.file + (d.start_line ? ':' + d.start_line : '');
             try { await navigator.clipboard.writeText(text); notify('File location copied'); }
             catch {
                 const input = document.createElement('textarea'); input.value = text; input.setAttribute('aria-label', 'File location');
@@ -1132,7 +1127,7 @@
             }
             const elements = nodes.map(n => {
                 const worst = n.vulnerabilities.reduce((best, v) => !best || SEVERITY_RANK[severity(v)] > SEVERITY_RANK[best] ? severity(v) : best, null);
-                const data = {id: n.id, kind: n.kind, status: n.status, name: shortName(n), containerLabel: n.kind === 'module' && n.file ? relativeFile(n).split('/').pop() : shortName(n), label: `${statusMark[n.status]} ${shortName(n)}`, color: STATUS_COLOR[n.status], fill: tint(STATUS_COLOR[n.status]), shape: 'round-rectangle', borderColor: worst ? SEVERITY_COLOR[worst] : STATUS_COLOR[n.status], borderWidth: worst ? 3 : 1, deleted: n.status === 'deleted'};
+                const data = {id: n.id, kind: n.kind, status: n.status, name: shortName(n), containerLabel: n.kind === 'module' && n.file ? n.file.split('/').pop() : shortName(n), label: `${statusMark[n.status]} ${shortName(n)}`, color: STATUS_COLOR[n.status], fill: tint(STATUS_COLOR[n.status]), shape: 'round-rectangle', borderColor: worst ? SEVERITY_COLOR[worst] : STATUS_COLOR[n.status], borderWidth: worst ? 3 : 1, deleted: n.status === 'deleted'};
                 if (parentOf.has(n.id)) data.parent = parentOf.get(n.id);
                 return {data};
             });

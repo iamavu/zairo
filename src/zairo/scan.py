@@ -4,7 +4,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from . import __version__
 from .analyzer import analyze_impact, list_symbols
-from .git_utils import create_worktree, remove_worktree, resolve_commit
+from .git_utils import create_worktree, head_commit, remove_worktree, resolve_commit
 from .llm_scanner import scan_graph_for_vulnerabilities, supports_tools, write_notes
 from .reporter import generate_reports
 from ._util import is_complete
@@ -13,12 +13,7 @@ from ._util import is_complete
 @dataclass
 class ScanResult:
     repo_path: str
-    # Where graph_data's node['file'] paths are rooted: the temporary
-    # worktree when diffing two commits (already removed by the time a
-    # caller sees this -- it's only for making those paths relative), the
-    # repo itself otherwise.
-    analysis_root: str
-    graph_data: Dict[str, Any]
+    graph_data: Dict[str, Any]  # its node['file'] paths are repo-relative
     vulnerabilities: Optional[Dict[str, List[Dict[str, Any]]]]
     token_usage: Optional[Dict[str, int]]
     json_path: str
@@ -167,14 +162,18 @@ def run_scan(
                 dig=dig,
             )
 
-        # SARIF locations must be relative to wherever node['file'] paths were
-        # actually resolved from -- that's analysis_root (the worktree when
-        # diffing two commits), not abs_repo, which can be a wholly separate
-        # directory in that mode. Since a worktree mirrors abs_repo's tree
-        # structure, the resulting relative paths are the same either way.
+        # The code's been read: from here on, a node's file is repo-relative,
+        # as git names it. The reports outlive a --to worktree, which is
+        # gone by the time anyone opens them, and an absolute path into it,
+        # or into this machine, means nothing anywhere else.
+        for node in graph_data['nodes']:
+            if node.get('file'):
+                node['file'] = os.path.relpath(node['file'], analysis_root).replace(os.sep, '/')
+
         json_path, html_path, sarif_path = generate_reports(
-            graph_data, output_dir, vulnerabilities, repo_root=analysis_root, tool_version=__version__,
+            graph_data, output_dir, vulnerabilities, tool_version=__version__,
             repo_name=os.path.basename(abs_repo),
+            commits={"from": from_ref or head_commit(abs_repo), "to": to_ref},
             failed_nodes=token_usage['failed_nodes'] if token_usage else None,
             assessed_nodes=token_usage['assessed_nodes'] if token_usage else None,
             skipped_nodes=token_usage['skipped_nodes'] if token_usage else None,
@@ -185,7 +184,6 @@ def run_scan(
 
         return ScanResult(
             repo_path=repo_path,
-            analysis_root=analysis_root,
             graph_data=graph_data,
             vulnerabilities=vulnerabilities,
             token_usage=token_usage,

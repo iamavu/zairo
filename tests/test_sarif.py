@@ -1,3 +1,5 @@
+import pytest
+
 from zairo.sarif import build_sarif
 
 
@@ -12,14 +14,14 @@ def _graph(file_path):
 
 
 def test_maps_severity_to_sarif_level():
-    graph_data = _graph("/repo/src/app.py")
+    graph_data = _graph("src/app.py")
     vulnerabilities = {
         "n1": [
             {"title": "Command Injection", "description": "d", "severity": "critical"},
             {"title": "Weak Random", "description": "d", "severity": "low"},
         ],
     }
-    sarif = build_sarif(graph_data, vulnerabilities, repo_root="/repo")
+    sarif = build_sarif(graph_data, vulnerabilities)
     results = sarif["runs"][0]["results"]
 
     levels = {r["ruleId"]: r["level"] for r in results}
@@ -36,7 +38,7 @@ def test_a_rule_takes_the_worst_severity_among_its_findings():
         {"title": "SQLi in login", "severity": "critical", "cwe": "CWE-89"},
         {"title": "Weak Random", "severity": "medium"},
     ]}
-    sarif = build_sarif(_graph("/repo/src/app.py"), vulnerabilities, repo_root="/repo")
+    sarif = build_sarif(_graph("src/app.py"), vulnerabilities)
 
     rules = {r["id"]: r for r in sarif["runs"][0]["tool"]["driver"]["rules"]}
     assert (rules["cwe-89"]["defaultConfiguration"], rules["cwe-89"]["properties"]["security-severity"]) == ({"level": "error"}, "9.5")
@@ -45,9 +47,9 @@ def test_a_rule_takes_the_worst_severity_among_its_findings():
 
 
 def test_location_is_repo_relative_posix_path():
-    graph_data = _graph("/repo/src/app.py")
+    graph_data = _graph("src/app.py")
     vulnerabilities = {"n1": [{"title": "X", "description": "d", "severity": "high"}]}
-    sarif = build_sarif(graph_data, vulnerabilities, repo_root="/repo")
+    sarif = build_sarif(graph_data, vulnerabilities)
 
     location = sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
     assert location["artifactLocation"]["uri"] == "src/app.py"
@@ -55,9 +57,9 @@ def test_location_is_repo_relative_posix_path():
 
 
 def test_missing_file_omits_location_but_keeps_result():
-    graph_data = _graph("/repo/src/app.py")
+    graph_data = _graph("src/app.py")
     vulnerabilities = {"n2": [{"title": "X", "description": "d", "severity": "medium"}]}
-    sarif = build_sarif(graph_data, vulnerabilities, repo_root="/repo")
+    sarif = build_sarif(graph_data, vulnerabilities)
 
     result = sarif["runs"][0]["results"][0]
     assert "locations" not in result
@@ -68,7 +70,7 @@ def test_result_points_at_the_line_its_finding_cites():
         "title": "X", "description": "d", "severity": "high", "line": 7, "introduced_by_change": True,
         "trigger": "any logged-in user", "impact": "i", "confidence": "medium",
     }]}
-    sarif = build_sarif(_graph("/repo/src/app.py"), vulnerabilities, repo_root="/repo")
+    sarif = build_sarif(_graph("src/app.py"), vulnerabilities)
 
     result = sarif["runs"][0]["results"][0]
     assert result["locations"][0]["physicalLocation"]["region"]["startLine"] == 7
@@ -79,14 +81,14 @@ def test_result_points_at_the_line_its_finding_cites():
 
 def test_result_without_a_cited_line_points_at_the_node():
     vulnerabilities = {"n1": [{"title": "X", "severity": "high", "line": None}, {"title": "Y", "severity": "high", "line": True}]}
-    sarif = build_sarif(_graph("/repo/src/app.py"), vulnerabilities, repo_root="/repo")
+    sarif = build_sarif(_graph("src/app.py"), vulnerabilities)
 
     lines = [r["locations"][0]["physicalLocation"]["region"]["startLine"] for r in sarif["runs"][0]["results"]]
     assert lines == [4, 4]  # the node's start_line
 
 
 def test_complete_scan_records_a_successful_invocation():
-    sarif = build_sarif(_graph("/repo/src/app.py"), {}, repo_root="/repo")
+    sarif = build_sarif(_graph("src/app.py"), {})
     assert sarif["runs"][0]["invocations"] == [{"executionSuccessful": True}]
 
 
@@ -94,7 +96,7 @@ def test_failed_nodes_mark_the_run_unsuccessful_with_a_notification_each():
     """Zero results from a scan that couldn't assess some code must not
     look like a clean scan to a SARIF consumer."""
     sarif = build_sarif(
-        _graph("/repo/src/app.py"), {}, repo_root="/repo",
+        _graph("src/app.py"), {},
         failed_nodes={"n1": "AuthenticationError: invalid API key"},
     )
 
@@ -108,17 +110,10 @@ def test_failed_nodes_mark_the_run_unsuccessful_with_a_notification_each():
     assert location["artifactLocation"]["uri"] == "src/app.py"
 
 
-def test_file_on_another_drive_omits_location_instead_of_crashing(monkeypatch):
-    """On Windows, os.path.relpath raises ValueError when the file and the
-    repo root are on different drives (e.g. a C:\\ temp worktree vs a D:\\
-    repo) -- that's just another case of "outside repo_root", not a crash."""
-    def relpath_across_drives(path, start=None):
-        raise ValueError("path is on mount 'C:', start on mount 'D:'")
-    monkeypatch.setattr("zairo.sarif.os.path.relpath", relpath_across_drives)
-
-    graph_data = _graph("/repo/src/app.py")
+@pytest.mark.parametrize("file_path", ["../elsewhere/app.py", "/usr/lib/python3/os.py"])
+def test_a_file_outside_the_repo_omits_the_location(file_path):
     vulnerabilities = {"n1": [{"title": "X", "description": "d", "severity": "high"}]}
-    sarif = build_sarif(graph_data, vulnerabilities, repo_root="/repo")
+    sarif = build_sarif(_graph(file_path), vulnerabilities)
 
     result = sarif["runs"][0]["results"][0]
     assert "locations" not in result
@@ -128,16 +123,16 @@ def test_defaults_missing_severity_to_critical_error():
     """Fail-safe default (see _util.DEFAULT_SEVERITY): an ungradeable
     finding must surface as loudly as a real critical one, not blend into
     "warning" where a --fail-on high/critical gate could miss it."""
-    graph_data = _graph("/repo/src/app.py")
+    graph_data = _graph("src/app.py")
     vulnerabilities = {"n1": [{"title": "X", "description": "d"}]}
-    sarif = build_sarif(graph_data, vulnerabilities, repo_root="/repo")
+    sarif = build_sarif(graph_data, vulnerabilities)
 
     assert sarif["runs"][0]["results"][0]["level"] == "error"
 
 
 def test_empty_vulnerabilities_produce_valid_empty_log():
-    graph_data = _graph("/repo/src/app.py")
-    sarif = build_sarif(graph_data, {}, repo_root="/repo")
+    graph_data = _graph("src/app.py")
+    sarif = build_sarif(graph_data, {})
 
     assert sarif["version"] == "2.1.0"
     assert sarif["runs"][0]["results"] == []
@@ -147,14 +142,14 @@ def test_empty_vulnerabilities_produce_valid_empty_log():
 def test_same_cwe_different_titles_share_one_rule():
     """Two findings the model phrased differently but tagged with the same
     CWE should collapse into a single SARIF rule, not one each."""
-    graph_data = _graph("/repo/src/app.py")
+    graph_data = _graph("src/app.py")
     vulnerabilities = {
         "n1": [
             {"title": "Command Injection", "description": "d1", "severity": "critical", "cwe": "CWE-78"},
             {"title": "Shell Injection via os.system", "description": "d2", "severity": "high", "cwe": "cwe:78"},
         ],
     }
-    sarif = build_sarif(graph_data, vulnerabilities, repo_root="/repo")
+    sarif = build_sarif(graph_data, vulnerabilities)
 
     rules = sarif["runs"][0]["tool"]["driver"]["rules"]
     results = sarif["runs"][0]["results"]
@@ -166,9 +161,9 @@ def test_same_cwe_different_titles_share_one_rule():
 
 
 def test_unknown_cwe_falls_back_to_bare_id_as_name():
-    graph_data = _graph("/repo/src/app.py")
+    graph_data = _graph("src/app.py")
     vulnerabilities = {"n1": [{"title": "Odd Thing", "description": "d", "severity": "medium", "cwe": "CWE-9999"}]}
-    sarif = build_sarif(graph_data, vulnerabilities, repo_root="/repo")
+    sarif = build_sarif(graph_data, vulnerabilities)
 
     rule = sarif["runs"][0]["tool"]["driver"]["rules"][0]
     assert rule["id"] == "cwe-9999"
@@ -176,9 +171,9 @@ def test_unknown_cwe_falls_back_to_bare_id_as_name():
 
 
 def test_missing_cwe_falls_back_to_title_slug():
-    graph_data = _graph("/repo/src/app.py")
+    graph_data = _graph("src/app.py")
     vulnerabilities = {"n1": [{"title": "Some Novel Issue", "description": "d", "severity": "medium"}]}
-    sarif = build_sarif(graph_data, vulnerabilities, repo_root="/repo")
+    sarif = build_sarif(graph_data, vulnerabilities)
 
     result = sarif["runs"][0]["results"][0]
     assert result["ruleId"] == "some-novel-issue"

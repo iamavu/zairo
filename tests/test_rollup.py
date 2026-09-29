@@ -20,7 +20,6 @@ def test_unique_slug_sanitizes_unsafe_characters():
 def _ok_result(vulnerabilities=None):
     return ScanResult(
         repo_path="/repo",
-        analysis_root="/repo",
         graph_data={"nodes": [{"id": "n1", "status": "modified"}, {"id": "n2", "status": "unchanged"}], "edges": []},
         vulnerabilities=vulnerabilities,
         token_usage=None,
@@ -89,23 +88,17 @@ def test_write_rollup_reports_sarif_merges_one_run_per_repo(tmp_path: Path):
     assert len(sarif["runs"]) == 2
 
 
-def test_write_rollup_reports_sarif_locations_resolve_from_the_worktree(tmp_path: Path):
-    """When diffing two commits, node files live under the scan's temporary
-    worktree, not the repo -- rollup.sarif has to make them relative to the
-    worktree, or every finding loses its location (or, on Windows with the
-    temp dir on another drive, relpath raises and the rollup crashes). The
-    same goes for the notifications of nodes the scan couldn't assess."""
+def test_rollup_sarif_locations_are_rooted_under_each_repo(tmp_path: Path):
+    """Repos share relative paths (every one has its own src/app.py), so
+    rollup.sarif puts each under its repo's slug -- findings, and the
+    notifications of nodes the scan couldn't assess."""
     repo = tmp_path / "repo"
-    worktree = tmp_path / "zairo-worktree-abc"
     scan_result = ScanResult(
         repo_path=str(repo),
-        analysis_root=str(worktree),
         graph_data={
             "nodes": [
-                {"id": "n1", "name": "f", "status": "modified",
-                 "file": str(worktree / "src" / "app.py"), "start_line": 3},
-                {"id": "n2", "name": "g", "status": "modified",
-                 "file": str(worktree / "src" / "util.py"), "start_line": 7},
+                {"id": "n1", "name": "f", "status": "modified", "file": "src/app.py", "start_line": 3},
+                {"id": "n2", "name": "g", "status": "modified", "file": "src/util.py", "start_line": 7},
             ],
             "edges": [],
         },
