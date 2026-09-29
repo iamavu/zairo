@@ -38,6 +38,7 @@ def generate_reports(
     failed_nodes: dict = None,
     assessed_nodes: list = None,
     skipped_nodes: dict = None,
+    lookups: dict = None,
 ):
     """Returns (json_path, html_path, sarif_path). sarif_path is None unless
     an LLM scan actually ran (vulnerabilities is not None, including when it
@@ -58,10 +59,15 @@ def generate_reports(
     `skipped_nodes` ({node id: reason}) are changed nodes the scan left out
     on purpose (a comment-only change, source that can't be read, ...). Each gets a
     'scan_skipped' reason, which report.html shows -- a bare "not scanned"
-    on changed code reads like a failure."""
+    on changed code reads like a failure.
+
+    `lookups` ({node id: [{"tool", "input"[, "from_line"]}]}) are what a
+    --dig scan looked up before answering for each node, which report.html
+    lists -- what the answer rests on."""
     os.makedirs(output_dir, exist_ok=True)
     failed_nodes = failed_nodes or {}
     skipped_nodes = skipped_nodes or {}
+    lookups = lookups or {}
 
     # Attach vulnerabilities, scan failures and skip reasons to graph_data
     for node in graph_data['nodes']:
@@ -71,6 +77,8 @@ def generate_reports(
             node['scan_error'] = failed_nodes[node['id']]
         if node['id'] in skipped_nodes:
             node['scan_skipped'] = skipped_nodes[node['id']]
+        if node['id'] in lookups:
+            node['lookups'] = lookups[node['id']]
 
     json_path = os.path.join(output_dir, "report.json")
     html_path = os.path.join(output_dir, "report.html")

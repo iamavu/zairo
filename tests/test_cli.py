@@ -249,7 +249,7 @@ def test_multi_repo_tokens_sums_usage_across_repos(make_git_repo, tmp_path: Path
     fake_usage = {
         "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
         "requests": 1, "requests_without_usage": 0, "nodes_scanned": 1, "errors": {}, "failed_nodes": {},
-        "assessed_nodes": [], "skipped_nodes": {}, "notes_available": 0, "notes_used": 0,
+        "assessed_nodes": [], "skipped_nodes": {}, "notes_available": 0, "notes_used": 0, "lookups": {}, "lookups_made": 0,
     }
 
     with patch("zairo.scan.scan_graph_for_vulnerabilities", return_value=({}, fake_usage)):
@@ -323,7 +323,7 @@ def _scan_usage(failed_nodes: dict) -> dict:
         "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "requests": 1,
         "requests_without_usage": 1, "nodes_scanned": len(failed_nodes) or 1,
         "errors": errors, "failed_nodes": failed_nodes, "assessed_nodes": [], "skipped_nodes": {},
-        "notes_available": 0, "notes_used": 0,
+        "notes_available": 0, "notes_used": 0, "lookups": {}, "lookups_made": 0,
     }
 
 

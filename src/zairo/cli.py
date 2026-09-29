@@ -30,12 +30,32 @@ def _require_llm_for_fail_on(fail_on: Optional[Severity], llm: bool) -> None:
         raise typer.Exit(1)
 
 
+def _check_dig(dig: bool, llm: bool, batch_size: int) -> None:
+    if dig and not llm:
+        console.print("[bold red]Error:[/bold red] --dig is a way of scanning, so it can't take --graph-only.")
+        raise typer.Exit(1)
+    if dig and batch_size > 1:
+        console.print("[bold red]Error:[/bold red] --dig reviews one symbol per conversation, so it can't take --batch-size above 1.")
+        raise typer.Exit(1)
+
+
+def _print_lookups(token_usage: dict, indent: str = "") -> None:
+    """--dig: how much the model looked up, for the symbols it was asked
+    about this run (a cache hit asked it nothing)."""
+    if token_usage['nodes_scanned']:
+        console.print(
+            f"{indent}[dim]--dig: the model made {token_usage['lookups_made']:,} lookup(s) "
+            f"for {token_usage['nodes_scanned']:,} symbol(s).[/dim]"
+        )
+
+
 def _check_warm_up(
     warm_up: bool, graph_only: bool, from_ref: Optional[str], to_ref: Optional[str], fail_on: Optional[Severity],
+    dig: bool,
 ) -> None:
     # --warm-up is its own mode: it writes notes and stops, so options that
     # only mean something for a scan would be silently ignored.
-    scan_options = [flag for flag, given in (("--from", from_ref), ("--to", to_ref), ("--fail-on", fail_on), ("--graph-only", graph_only)) if given]
+    scan_options = [flag for flag, given in (("--from", from_ref), ("--to", to_ref), ("--fail-on", fail_on), ("--graph-only", graph_only), ("--dig", dig)) if given]
     if warm_up and scan_options:
         console.print(
             f"[bold red]Error:[/bold red] --warm-up only writes notes, so it can't take {', '.join(scan_options)}. "
@@ -166,6 +186,8 @@ def _single_repo_on_event(event: str, progress: _Progress, **kw) -> None:
         console.print(f"[bold blue]Graph: {kw['num_nodes']} symbol(s), {kw['num_edges']} connection(s).[/bold blue]")
     elif event == "llm_scan_started":
         console.print(f"[bold yellow]Running LLM scanner using {escape(kw['model'])} (concurrency={kw['concurrency']})...[/bold yellow]")
+    elif event == "dig_warning":
+        console.print(f"[bold yellow]Warning:[/bold yellow] {escape(kw['message'])}")
     elif event == "llm_scan_progress":
         progress.update("Scanning", kw['done'], kw['total'])
     elif event == "llm_scan_done":
@@ -179,6 +201,8 @@ def _single_repo_on_event(event: str, progress: _Progress, **kw) -> None:
             )
         _print_scan_errors(kw['token_usage'])
         _print_notes_usage(kw['token_usage'], kw['notes_path'])
+        if kw['dig']:
+            _print_lookups(kw['token_usage'])
 
 
 def _print_token_usage(token_usage: dict) -> None:
@@ -253,7 +277,7 @@ def _sum_token_usage(token_usages: List[dict]) -> dict:
 def _run_single_repo(
     repo_path: str, output_dir: str, depth: int, from_ref: Optional[str], to_ref: Optional[str],
     language: str, llm: bool, model: str, concurrency: int, cache: bool, max_tokens: int,
-    tokens: bool, fail_on: Optional[Severity], verbose: bool, debug: bool, batch_size: int,
+    tokens: bool, fail_on: Optional[Severity], verbose: bool, debug: bool, batch_size: int, dig: bool,
 ) -> bool:
     """Runs the one-repo path: live per-stage progress, reports written
     directly to output_dir. Returns whether a --fail-on gate failed."""
@@ -273,7 +297,7 @@ def _run_single_repo(
         result = run_scan(
             repo_path, output_dir, depth, from_ref, to_ref, language, llm, model, concurrency,
             cache_path, max_tokens, log=log, debug_log=debug_log, batch_size=batch_size, notes_path=notes_path,
-            on_event=lambda event, **kw: _single_repo_on_event(event, progress, **kw),
+            on_event=lambda event, **kw: _single_repo_on_event(event, progress, **kw), dig=dig,
         )
     except Exception as e:
         progress.stop()
@@ -318,7 +342,7 @@ def _run_multi_repo(
     paths: List[str], output_dir: str, depth: int, from_ref: Optional[str], to_ref: Optional[str],
     language: str, llm: bool, model: str, concurrency: int, repo_concurrency: int, cache: bool,
     max_tokens: int, tokens: bool, fail_on: Optional[Severity], continue_on_error: bool, verbose: bool,
-    debug: bool, batch_size: int,
+    debug: bool, batch_size: int, dig: bool,
 ) -> bool:
     """Runs the multi-repo path: per-repo subdirectories plus an aggregate
     rollup.json/.html/.sarif. Returns whether the run should fail
@@ -341,7 +365,7 @@ def _run_multi_repo(
             scan_result = run_scan(
                 repo_path, repo_output_dir, depth, from_ref, to_ref, language, llm, model, concurrency,
                 cache_path, max_tokens, log=log, on_event=on_event, debug_log=debug_log,
-                batch_size=batch_size, notes_path=notes_path,
+                batch_size=batch_size, notes_path=notes_path, dig=dig,
             )
             return {"repo": repo_path, "slug": slug, "status": "ok", "result": scan_result}
         except Exception as e:
@@ -361,6 +385,8 @@ def _run_multi_repo(
                     console.print(f"    {kw['num_modified']} changed symbol(s), {kw['num_deleted']} deleted symbol(s); graph: {kw['num_nodes']} symbol(s), {kw['num_edges']} connection(s)")
                 elif event == "llm_scan_started":
                     console.print(f"    running LLM scan ({escape(kw['model'])})...")
+                elif event == "dig_warning":
+                    console.print(f"    [bold yellow]warning:[/bold yellow] {escape(kw['message'])}")
                 elif event == "llm_scan_progress":
                     progress.update("scanning", kw['done'], kw['total'])
                 elif event == "llm_scan_done":
@@ -371,6 +397,8 @@ def _run_multi_repo(
                         console.print(f"    found {kw['num_vulnerabilities']} vulnerability(s) in {kw['num_vulnerable_nodes']} symbol(s)")
                     _print_scan_errors(kw['token_usage'], indent="    ")
                     _print_notes_usage(kw['token_usage'], kw['notes_path'], indent="    ")
+                    if kw['dig']:
+                        _print_lookups(kw['token_usage'], indent="    ")
 
             entry = scan_one(repo_path, slug, on_event)
             progress.stop()  # a failed scan never gets to "llm_scan_done"
@@ -416,6 +444,8 @@ def _run_multi_repo(
                     if llm:
                         _print_scan_errors(sr.token_usage, indent="    ")
                         _print_notes_usage(sr.token_usage, os.path.join(output_dir, entry['slug'], ".notes_cache.json"), indent="    ")
+                        if dig:
+                            _print_lookups(sr.token_usage, indent="    ")
                 else:
                     console.print(f"[bold cyan][{completed}/{len(paths)}][/bold cyan] {escape(entry['repo'])} — [bold red]error:[/bold red] {escape(entry['error'])}")
 
@@ -527,6 +557,7 @@ def analyze(
     repo_concurrency: int = typer.Option(1, "--repo-concurrency", help="Multi-repo mode: how many repos to scan in parallel"),
     cache: bool = typer.Option(True, "--cache/--no-cache", help="Cache LLM findings by content hash to skip re-scanning unchanged symbols across runs"),
     warm_up: bool = typer.Option(False, "--warm-up", help="Instead of scanning, write a short note on what each function in the repo does (skipping ones already noted), into <output>/.notes_cache.json -- no reports. Later scans with the same --output read these notes as hints about code they don't show in full. The first run on a large repo makes many LLM requests."),
+    dig: bool = typer.Option(False, "--dig", help="Experimental. Let the model look up what it needs before it answers -- warm-up notes, source, callers and callees, a text search of the repo -- up to 8 lookups per changed symbol, instead of seeing only the context zairo picks. Slower and costlier (every lookup is another request), and answers vary more between runs; cached per commit when scanning --from/--to. Needs a model that can call tools."),
     max_tokens: int = typer.Option(4096, "--max-tokens", help="Max output tokens per LLM scan request. Reasoning models count internal thinking against this budget too — too low can cause empty responses"),
     tokens: bool = typer.Option(False, "--tokens", help="Show total LLM tokens used across real API calls (cache hits don't count)"),
     fail_on: Severity = typer.Option(None, "--fail-on", help="Exit with a non-zero status if any finding at or above this severity is found -- for gating CI/PR checks. Errors if combined with --graph-only."),
@@ -541,9 +572,10 @@ def analyze(
     Pass --warm-up instead to only write notes on the repo's functions for later scans to read."""
     llm = not graph_only
     verbose = verbose or debug
-    _check_warm_up(warm_up, graph_only, from_ref, to_ref, fail_on)
+    _check_warm_up(warm_up, graph_only, from_ref, to_ref, fail_on, dig)
     _require_from_for_to(from_ref, to_ref)
     _require_llm_for_fail_on(fail_on, llm)
+    _check_dig(dig, llm, batch_size)
 
     paths = list(repo_paths or [])
     if repos_file:
@@ -564,13 +596,13 @@ def analyze(
     elif len(paths) == 1:
         should_fail = _run_single_repo(
             paths[0], output_dir, depth, from_ref, to_ref, language, llm, model, concurrency,
-            cache, max_tokens, tokens, fail_on, verbose, debug, batch_size,
+            cache, max_tokens, tokens, fail_on, verbose, debug, batch_size, dig,
         )
     else:
         should_fail = _run_multi_repo(
             paths, output_dir, depth, from_ref, to_ref, language, llm, model, concurrency,
             repo_concurrency, cache, max_tokens, tokens, fail_on, continue_on_error, verbose, debug,
-            batch_size,
+            batch_size, dig,
         )
 
     if should_fail:

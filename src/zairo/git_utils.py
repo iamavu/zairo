@@ -211,6 +211,16 @@ def get_changed_file_paths(
     return [path for path in result.stdout.split("\0") if path]
 
 
+def list_files(repo_path: str) -> List[str]:
+    """Repo-relative paths of the files in the working tree that git would
+    commit: tracked ones, and untracked ones that aren't ignored."""
+    cmd = ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"]
+    result = subprocess.run(cmd, cwd=repo_path, capture_output=True, **_GIT_PATH_TEXT)
+    if result.returncode != 0:
+        raise RuntimeError(f"git ls-files failed: {_git_error(result)}")
+    return sorted({path for path in result.stdout.split("\0") if path})
+
+
 def hunk_lines(hunk: Dict[str, Any]) -> List[int]:
     """The to-side line numbers a hunk touches: its added lines -- or, for a
     pure deletion, the line the removed ones used to follow (at least 1),

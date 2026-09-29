@@ -27,6 +27,9 @@ zairo . --from main --to HEAD --fail-on high
 
 # Write notes on the repo's functions for later scans to read (no scan, no reports)
 zairo . --warm-up
+
+# Let the model look up the code it needs before it answers (experimental)
+zairo . --from main --to HEAD --dig
 ```
 
 Give it more than one repo, as extra arguments or one per line in a `--repos-file` (or both, merged into one list), and it switches to **multi-repo mode** on its own: every repo gets its own report, plus one combined summary.
@@ -55,6 +58,8 @@ zairo backend frontend infra --from main --fail-on high -o zairo_multi_out
 - `--cache` / `--no-cache` *(cache on)*: skip re-scanning code that's unchanged since the last run (cached by content hash in `<output>/.llm_cache.json`).
 - `--tokens` *(off)*: print how many tokens the scan actually used (cache hits don't count, since they made no call).
 - `--warm-up` *(off)*: instead of scanning, write a short note on what each function in the repo does, skipping ones already noted. No diff, no scan, no reports, so it can't be combined with `--from`, `--to`, `--fail-on` or `--graph-only`. Later scans with the same `--output` read the notes as hints about code they don't show in full. See [Warm-up notes](#warm-up-notes).
+- `--dig` *(off, experimental)*: let the model look up what it needs before it answers (warm-up notes, source, callers and callees, a text search of the repo), up to 8 lookups per changed symbol. Slower and costlier, and answers vary more between runs. Can't be combined with `--graph-only`, `--warm-up` or `--batch-size` above 1. See [Digging](#digging---dig).
+
 **Output & gating**
 
 - `--output`, `-o` *(`zairo_out`)*: where the reports go. Multi-repo mode: each repo gets its own `<output>/<repo-slug>/`, plus a combined `rollup.*` here too.
@@ -72,7 +77,7 @@ Run `zairo --help` any time for this same list from the CLI.
 
 ## Output files
 
-- **`report.json`** *(always)*: the raw impact graph as data: `symbols` (functions, classes, modules, with any attached findings) and the `connections` between them. Each changed symbol carries its `diff_hunks`: the lines the change removed and added there, which is also what the model is shown alongside the code. Each connection has a `source` and `target` symbol id, a `kind` (`calls`, `contains`, `inherits`, ...) and `lines`: where in its source's file it occurs (for a call, every call site), when Trailmark knows. The model sees a long caller around those call sites rather than from the top. After a vulnerability scan, `scan_complete` says whether every symbol got assessed, and each one that didn't carries a `scan_error` saying why. A changed symbol left out on purpose (a comment-only change, source that can't be read, ...) carries a `scan_skipped` reason instead. A symbol Trailmark recognizes as an entry point (an HTTP route, a CLI command, a task handler, ...) carries an `entrypoint`: its `kind`, `trust` and `description`. Modules are named by their file path (`src/config/settings.local.ts`); their `id` is Trailmark's dotted form of it, which escapes dots in file names (`src.config.settings\.local`). Each finding has a `title`, `description`, `impact`, `severity` and `cwe`, plus:
+- **`report.json`** *(always)*: the raw impact graph as data: `symbols` (functions, classes, modules, with any attached findings) and the `connections` between them. Each changed symbol carries its `diff_hunks`: the lines the change removed and added there, which is also what the model is shown alongside the code. Each connection has a `source` and `target` symbol id, a `kind` (`calls`, `contains`, `inherits`, ...) and `lines`: where in its source's file it occurs (for a call, every call site), when Trailmark knows. The model sees a long caller around those call sites rather than from the top. After a vulnerability scan, `scan_complete` says whether every symbol got assessed, and each one that didn't carries a `scan_error` saying why. A changed symbol left out on purpose (a comment-only change, source that can't be read, ...) carries a `scan_skipped` reason instead. With `--dig`, each scanned symbol carries the `lookups` the model made before it answered. A symbol Trailmark recognizes as an entry point (an HTTP route, a CLI command, a task handler, ...) carries an `entrypoint`: its `kind`, `trust` and `description`. Modules are named by their file path (`src/config/settings.local.ts`); their `id` is Trailmark's dotted form of it, which escapes dots in file names (`src.config.settings\.local`). Each finding has a `title`, `description`, `impact`, `severity` and `cwe`, plus:
   - `line`: the line it's about. The model is shown numbered code, and a line it cites is kept only if it was one of those shown; otherwise it's `null`.
   - `introduced_by_change`: `true` if this change introduced it or made it reachable (for example by removing a check), `false` if it was already there.
   - `trigger`: who can trigger it, and how.
@@ -107,6 +112,24 @@ Each note says what the function does, where its data comes from, the checks it 
 - In CI, keep `.notes_cache.json` between runs (e.g. with `actions/cache`), or every run starts from scratch.
 - The model is told notes are machine-written hints about code it hasn't seen, not a place to report findings. The changed code itself is always shown in full.
 - Run the warm-up on code you trust, such as your default branch, not on a PR's code: a note is written from the code it describes, and stays in the cache (see [Prompt injection](#prompt-injection)).
+
+### Digging (`--dig`)
+
+A normal scan gives the model one fixed prompt (see [What the model sees](#what-the-model-sees)) and one chance to answer. When the question is somewhere that prompt doesn't reach, say whether the route three calls up checks the user's tenant, the model can only guess or leave it out. With `--dig`, it starts from the same prompt, but it can look things up first:
+
+- `note(symbol)`: the function's warm-up note, if `--warm-up` wrote one. Cheap, so the model is told to try it first.
+- `code(symbol, from_line)`: the source, numbered, 200 lines at a time.
+- `callers(symbol)` / `callees(symbol)`: from the call graph.
+- `search(text)`: lines in the repo's files that contain the text (test code aside), the first 30.
+
+It gets up to 8 lookups per changed symbol and then answers in the same format as a normal scan, so the reports, SARIF and `--fail-on` work the same way. Each symbol in `report.json` carries its `lookups` (`{"tool", "input"}`, plus `from_line` for a paged `code`), and `report.html` lists them, so you can see what an answer rests on.
+
+- **Cost:** every lookup is another request, and each request resends the conversation so far. A symbol that uses 3–4 lookups costs roughly 3–6 times a normal scan. `--tokens` shows the total.
+- **Repeatability:** answers vary more from run to run. With `--from` and `--to`, each answer is cached against the commit scanned, so a rerun on the same commit gives the same answer. Scans of uncommitted changes aren't cached, since a lookup can read any file in the working tree.
+- **Models:** it needs one that can call tools. zairo warns when LiteLLM doesn't list your `--model` as able to, then tries anyway.
+- **Prompt injection:** the model reads more of the repo, and what a lookup returns is marked as repo text just like the prompt (see below). The tools only read, and only inside the repo.
+
+It's experimental: whether it finds more real problems than a normal scan, rather than just costing more, hasn't been measured yet.
 
 ### Prompt injection
 

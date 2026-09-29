@@ -174,6 +174,8 @@
         .finding-impact { margin-top: 13px; padding-top: 12px; border-top: 1px solid var(--border-soft); }
         .finding-impact .section-eyebrow { margin-bottom: 6px; display: block; }
         .detail-note { padding: 16px 0; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border-soft); margin-top: 24px; }
+        .lookup-list { margin: 0; padding: 0; list-style: none; }
+        .lookup-list li { padding: 3px 0; font: 11px/1.6 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
         .connection-group + .connection-group { margin-top: 20px; }
         .connection-label { color: var(--quiet); font-size: 10px; display: flex; justify-content: space-between; margin-bottom: 6px; }
         .connection { width: 100%; text-align: left; display: flex; gap: 9px; align-items: center; padding: 10px 0; border: 0; border-bottom: 1px solid var(--border-soft); background: transparent; }
@@ -460,6 +462,11 @@
                 // Always say why a symbol wasn't scanned: a bare "Not scanned" reads like a failure.
                 const note = !reportMeta.scan_performed ? 'Security scan not run.' : d.scan_error ? `Could not assess: ${escapeHtml(oneLine(d.scan_error))}` : d.status === 'deleted' ? 'Deleted symbols are not scanned.' : scannedIds.has(d.id) ? 'No findings reported.' : d.scan_skipped ? `Not scanned: ${escapeHtml(oneLine(d.scan_skipped))}.` : d.status === 'unchanged' ? 'Not scanned: unchanged, shown for context.' : 'Not scanned.';
                 findingHtml = `<p class="detail-note">${note}</p>`;
+            }
+            // --dig: what the model looked up before it answered.
+            if (Array.isArray(d.lookups)) {
+                const lookupText = l => `${l.tool}(${l.tool === 'search' ? JSON.stringify(String(l.input ?? '')) : String(l.input ?? '')}${l.from_line ? ', from line ' + l.from_line : ''})`;
+                findingHtml += `<section class="detail-section"><div class="detail-section-heading"><h3>Looked up before answering</h3><span class="count">${d.lookups.length}</span></div>${d.lookups.length ? `<ul class="lookup-list">${d.lookups.map(l => `<li>${escapeHtml(lookupText(l))}</li>`).join('')}</ul>` : '<p class="muted">Nothing: the model answered from the code it was shown.</p>'}</section>`;
             }
             const ins = incoming.get(id), outs = outgoing.get(id);
             $('node-details').innerHTML = `<div class="badge-row"><span class="badge">${escapeHtml(d.kind)}</span><span class="badge status-${d.status}">${escapeHtml(d.status)}</span></div><h2 class="detail-title" id="detail-title" tabindex="-1">${escapeHtml(d.name)}</h2>${d.file ? `<div class="location"><div><div class="file-path">${escapeHtml(relativeFile(d))}</div><div class="line-range">${d.status === 'deleted' ? 'Former location · ' : ''}${d.start_line ? 'Line ' + escapeHtml(d.start_line) + (d.end_line && d.end_line !== d.start_line ? '–' + escapeHtml(d.end_line) : '') : 'Line unavailable'}</div></div><button class="icon-button" data-action="copy-location" aria-label="Copy file location" title="Copy file location">${icon('copy')}</button></div>` : '<p class="muted">External reference</p>'}<button class="button focus-action" data-action="focus-connections" aria-pressed="${Boolean(focusId)}" ${!cy ? 'disabled' : ''}>${icon('graph')}${focusId ? 'Show full graph' : 'Focus connections'}</button>${findingHtml}${ins.length || outs.length ? `<section class="detail-section"><div class="detail-section-heading"><h3>Connections</h3><span class="count">${ins.length + outs.length}</span></div>${connectionRows(ins, 'in')}${connectionRows(outs, 'out')}</section>` : '<p class="detail-note">No direct connections.</p>'}`;

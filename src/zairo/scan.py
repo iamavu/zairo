@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, List, Optional
 from . import __version__
 from .analyzer import analyze_impact, list_symbols
 from .git_utils import create_worktree, remove_worktree, resolve_commit
-from .llm_scanner import scan_graph_for_vulnerabilities, write_notes
+from .llm_scanner import scan_graph_for_vulnerabilities, supports_tools, write_notes
 from .reporter import generate_reports
 
 
@@ -63,6 +63,7 @@ def run_scan(
     debug_log: Optional[Callable[[str], None]] = None,
     batch_size: int = 1,
     notes_path: Optional[str] = None,
+    dig: bool = False,
 ) -> ScanResult:
     """Runs the full single-repo pipeline: diff -> impact graph -> optional
     LLM scan -> reports on disk. Shared by the single-repo and multi-repo
@@ -86,6 +87,10 @@ def run_scan(
 
     `notes_path` is where run_warm_up() keeps its notes; the scan reads
     them from there when the file exists.
+
+    `dig` lets the model look things up before it answers (see dig.py).
+    When LiteLLM doesn't list the model as able to call tools, a
+    "dig_warning" event says so before the scan tries anyway.
     """
     log = log or (lambda msg: None)
     on_event = on_event or (lambda event, **kwargs: None)
@@ -124,11 +129,18 @@ def run_scan(
         token_usage = None
         if llm:
             on_event("llm_scan_started", model=model, concurrency=concurrency)
+            if dig and num_modified and not supports_tools(model):
+                on_event("dig_warning", message=(
+                    f"LiteLLM doesn't list {model} as able to call tools, which --dig needs; "
+                    f"trying anyway, but expect the scan to fail if it can't."
+                ))
             vulnerabilities, token_usage = scan_graph_for_vulnerabilities(
                 graph_data, model, log=log, concurrency=concurrency, cache_path=cache_path,
                 max_tokens=max_tokens, debug_log=debug_log, batch_size=batch_size, context=context,
                 notes_path=notes_path,
                 on_progress=lambda done, total: on_event("llm_scan_progress", done=done, total=total),
+                # A --dig answer is cached per commit: a working tree has none.
+                dig=dig, repo_root=analysis_root, dig_revision=to_ref if (from_ref and to_ref) else None,
             )
             num_vulnerabilities = sum(len(findings) for findings in vulnerabilities.values())
             on_event(
@@ -137,6 +149,7 @@ def run_scan(
                 num_vulnerabilities=num_vulnerabilities,
                 token_usage=token_usage,
                 notes_path=notes_path,
+                dig=dig,
             )
 
         # SARIF locations must be relative to wherever node['file'] paths were
@@ -150,6 +163,7 @@ def run_scan(
             failed_nodes=token_usage['failed_nodes'] if token_usage else None,
             assessed_nodes=token_usage['assessed_nodes'] if token_usage else None,
             skipped_nodes=token_usage['skipped_nodes'] if token_usage else None,
+            lookups=token_usage['lookups'] if token_usage else None,
         )
 
         return ScanResult(

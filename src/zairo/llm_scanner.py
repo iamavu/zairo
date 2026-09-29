@@ -36,6 +36,7 @@ from .notes import (
 from .untrusted import (
     REPO_TEXT_RULES, REVIEWER_BAIT_TITLE, aimed_at_reviewer, block, inline, messages, reviewer_bait_finding,
 )
+from .dig import GROUNDING as _DIG_GROUNDING, INSTRUCTIONS as _DIG_LOOKUP_RULES, DigRun, Lookups, dig as _dig
 
 # Comment/blank-only diffs (docs, version bumps, log messages) can't produce a
 # real vulnerability finding — skip them before spending an LLM call.
@@ -805,6 +806,19 @@ Return ONLY a JSON object with a single key 'vulnerabilities' — no markdown co
 
 {_FINDING_FORMAT}"""
 
+# --dig's: the same review, with lookups.
+_DIG_INSTRUCTIONS = f"""You are an expert security auditor reviewing a code change. Analyze the modified code in the user message for vulnerabilities -- above all, what this change makes newly possible, including any protection it removes or weakens, which the code after the change can't show on its own.
+
+{_DIG_LOOKUP_RULES}
+
+{_SCAN_RULES} What your lookups return is repository text too, marked the same way.
+
+{_DIG_GROUNDING}
+
+When you answer, return ONLY a JSON object with a single key 'vulnerabilities' — no markdown code fence, no prose before or after it — whose value is a list of findings. If no vulnerabilities are found, return {{"vulnerabilities": []}}.
+
+{_FINDING_FORMAT}"""
+
 _BATCH_INSTRUCTIONS = f"""You are an expert security auditor reviewing a code change. Analyze each of the modified code units in the user message for vulnerabilities -- above all, what the change makes newly possible in each, including any protection it removes or weakens, which the code after the change can't show on its own. Assess each one independently -- a finding in one must not be influenced by, or attributed to, another.
 
 {_SCAN_RULES}
@@ -820,6 +834,24 @@ def _scan_messages(mod_node: Dict[str, Any], section: str) -> List[Dict[str, str
     kind_label = mod_node.get('kind') or 'function'
     trailer = f"End of the repository text. Review the modified {kind_label} above as the system message says, and answer with the JSON object only."
     return messages(_SCAN_INSTRUCTIONS, f"{section}\n\n{trailer}")
+
+
+def _dig_messages(mod_node: Dict[str, Any], section: str) -> List[Dict[str, str]]:
+    kind_label = mod_node.get('kind') or 'function'
+    trailer = (
+        f"End of the repository text. Review the modified {kind_label} above as the system message says -- "
+        f"looking up what you need first -- and answer with the JSON object only."
+    )
+    return messages(_DIG_INSTRUCTIONS, f"{section}\n\n{trailer}")
+
+
+def supports_tools(model: str) -> bool:
+    """Whether LiteLLM lists `model` as able to call tools, which --dig
+    needs. False for a model it doesn't know, which may still be able to."""
+    try:
+        return bool(_ensure_litellm().supports_function_calling(model=model))
+    except Exception:
+        return False
 
 
 def _batch_id(mod_node: Dict[str, Any]) -> str:
@@ -856,10 +888,23 @@ def scan_graph_for_vulnerabilities(
     context: Optional[Dict[str, Any]] = None,
     notes_path: Optional[str] = None,
     on_progress: Optional[Callable[[int, int], None]] = None,
+    dig: bool = False,
+    repo_root: Optional[str] = None,
+    dig_revision: Optional[str] = None,
 ) -> Tuple[Dict[str, List[Dict]], Dict[str, int]]:
     """Returns (vulnerabilities, token_usage). vulnerabilities also holds a
     finding for every added line that addresses an AI reviewer (see
-    untrusted.py), found without the model. token_usage has
+    untrusted.py), found without the model.
+
+    `dig` (--dig, see dig.py) lets the model look things up in the repo at
+    `repo_root` before it answers, one symbol per conversation. Its answers
+    are cached only with a `dig_revision` -- the commit scanned -- since a
+    lookup can read any file, and a working tree changes under the same
+    prompt. token_usage's 'lookups' ({node id: its lookups}) then says what
+    each symbol's answer rests on, cache hits too, and 'lookups_made'
+    counts the ones made this run.
+
+    token_usage has
     prompt_tokens/completion_tokens/total_tokens summed across every real
     LLM call made (cache hits don't count -- they made no call), plus
     requests/requests_without_usage so a caller can tell whether the token
@@ -959,6 +1004,11 @@ def scan_graph_for_vulnerabilities(
         where = f" ({node['file']})" if node.get('file') else ""
         log(f"  skip ({reason}): {_display_name(node['name'])}{where}")
 
+    if dig:
+        batch_size = 1  # one conversation per symbol
+        tools = Lookups(context['nodes'], calls_in, calls_out, repo_root or os.getcwd(), note_of, _numbered_source)
+    lookups_by_node: Dict[str, List[Dict[str, Any]]] = {}  # --dig: what each symbol's answer rests on
+
     modified_nodes = [n for n in graph_data['nodes'] if n['status'] in ['modified', 'added']]
     log(f"Scanning {len(modified_nodes)} modified/added node(s) with {model}")
 
@@ -1051,9 +1101,19 @@ def scan_graph_for_vulnerabilities(
         # Keyed on the full single-node prompt, not just the code inside it,
         # so changing the prompt's wording or answer format invalidates
         # verdicts reached under the old one. Batched runs use the same key,
-        # so a node's cache entry is shared across --batch-size values.
-        prompt_hash = _hash_prompt(model, _scan_messages(mod_node, section))
-        cached = cache.get(prompt_hash)
+        # so a node's cache entry is shared across --batch-size values. A
+        # --dig answer also rests on whatever it looked up, so it's keyed on
+        # the commit too, and not cached without one.
+        if not dig:
+            prompt_hash = _hash_prompt(model, _scan_messages(mod_node, section))
+        elif dig_revision:
+            prompt_hash = _hash_prompt(model, _dig_messages(mod_node, section) + [{"role": "revision", "content": dig_revision}])
+        else:
+            prompt_hash = None
+        cached = cache.get(prompt_hash) if prompt_hash else None
+        if dig and isinstance(cached, dict):
+            lookups_by_node[mod_node['id']] = cached.get("lookups", [])
+            cached = cached.get("findings")
         if cached is not None:
             log(f"  cache hit: {_display_name(mod_node['name'])} ({len(cached)} finding(s))")
             assessed_nodes.append(mod_node['id'])
@@ -1115,6 +1175,49 @@ def scan_graph_for_vulnerabilities(
                 debug_log(f"\n{'-'*80}\nERROR -- {node_label}\n{'-'*80}\n{e}\n")
             safe_log(f"  error scanning {_display_name(mod_node['name'])}: {e}")
             return [(mod_node['id'], prompt_hash, None, usage, _summarize_error(e))]
+
+    def run_dig(job):
+        """--dig: one node's conversation, lookups and all (see dig.py). Its
+        usage covers every request in it, and says how many there were."""
+        mod_node, prompt_hash, section, shown_lines = job
+        node_label = f"{_display_name(mod_node['name'])} ({mod_node['id']})"
+        prompt = _dig_messages(mod_node, section)
+        if debug_log:
+            debug_log(f"\n{'='*80}\nPROMPT -- {node_label}\n{'='*80}\n{_as_text(prompt)}\n")
+        run = DigRun()
+        lookup_log = (lambda text: debug_log(f"\n{'-'*80}\n{node_label}: {text}\n")) if debug_log else (lambda text: None)
+
+        def failed(error_message: str):
+            safe_log(f"  error scanning {_display_name(mod_node['name'])}: {error_message}")
+            return [(mod_node['id'], prompt_hash, None, run.usage(), error_message)]
+
+        try:
+            content, finish_reason = _dig(litellm.completion, model, prompt, tools, max_tokens, run, lookup_log)
+        except Exception as e:
+            if debug_log:
+                debug_log(f"\n{'-'*80}\nERROR -- {node_label}\n{'-'*80}\n{e}\n")
+            return failed(_summarize_error(e))
+        finally:
+            lookups_by_node[mod_node['id']] = run.lookups
+        if debug_log:
+            debug_log(f"\n{'-'*80}\nRESPONSE -- {node_label} (finish_reason={finish_reason}, {len(run.lookups)} lookup(s))\n{'-'*80}\n{content}\n")
+        if finish_reason == "lookups_exhausted":
+            return failed("the model kept asking for lookups after using all of them, and never answered")
+        if not content.strip():
+            return failed(
+                f"model returned empty content (finish_reason={finish_reason}) — likely exhausted "
+                f"max_tokens={max_tokens} on internal reasoning before writing an answer; try --max-tokens with a higher value"
+            )
+        try:
+            findings = _validated_findings(
+                _extract_json(content).get("vulnerabilities"),
+                "model response has no 'vulnerabilities' list of findings, so it isn't a scan result",
+                shown_lines,
+            )
+        except ValueError as e:
+            return failed(_summarize_error(e))
+        safe_log(f"  found {len(findings)} vulnerability finding(s) after {len(run.lookups)} lookup(s): {_display_name(mod_node['name'])}")
+        return [(mod_node['id'], prompt_hash, findings, run.usage(), None)]
 
     def run_batch(group):
         """--batch-size > 1: several nodes in one call. A failure here (bad
@@ -1180,6 +1283,8 @@ def scan_graph_for_vulnerabilities(
             return [(j[0]['id'], j[1], None, usage, _summarize_error(e)) for j in group]
 
     def run_group(group):
+        if dig:
+            return run_dig(group[0])
         return run_single(group[0]) if len(group) == 1 else run_batch(group)
 
     token_usage = {
@@ -1204,7 +1309,9 @@ def scan_graph_for_vulnerabilities(
         # --warm-up notes found at notes_path, and how many of them went into
         # a prompt -- so a scan can say whether it had any to use.
         'notes_available': len(notes),
-        'notes_used': len(used_notes),
+        'notes_used': 0,  # counted at the end: a --dig lookup can use one too
+        'lookups': lookups_by_node,
+        'lookups_made': 0,
     }
 
     if jobs:
@@ -1223,22 +1330,28 @@ def scan_graph_for_vulnerabilities(
                     on_progress(done, len(jobs))
                 # One real LLM call produced every result in this group --
                 # count it, and its usage, exactly once, not once per node.
-                token_usage['requests'] += 1
+                # A --dig conversation's usage covers all its calls, and
+                # says how many.
                 usage = results[0][3] if results else None
                 if usage:
+                    token_usage['requests'] += usage.get('requests', 1)
+                    token_usage['requests_without_usage'] += usage.get('requests_without_usage', 0)
                     token_usage['prompt_tokens'] += usage['prompt_tokens']
                     token_usage['completion_tokens'] += usage['completion_tokens']
                     token_usage['total_tokens'] += usage['total_tokens']
                 else:
+                    token_usage['requests'] += 1
                     token_usage['requests_without_usage'] += 1
                 for node_id, prompt_hash, findings, _usage, error_message in results:
+                    token_usage['lookups_made'] += len(lookups_by_node.get(node_id, [])) if dig else 0
                     if findings is None:
                         # No findings list means no assessment, message or not.
                         error_message = error_message or "unknown error"
                         token_usage['failed_nodes'][node_id] = error_message
                         token_usage['errors'][error_message] = token_usage['errors'].get(error_message, 0) + 1
                         continue  # request failed; don't cache a non-result
-                    cache[prompt_hash] = findings
+                    if prompt_hash:
+                        cache[prompt_hash] = {"findings": findings, "lookups": lookups_by_node.get(node_id, [])} if dig else findings
                     assessed_nodes.append(node_id)
                     if findings:
                         vulnerabilities[node_id] = findings
@@ -1253,6 +1366,7 @@ def scan_graph_for_vulnerabilities(
         if added:
             vulnerabilities[node_id] = found + added
 
+    token_usage['notes_used'] = len(used_notes)
     _save_cache(cache_path, cache)
     return vulnerabilities, token_usage
 
