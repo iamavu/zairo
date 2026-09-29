@@ -1,7 +1,7 @@
 [project]
 name = "zairo"
 dynamic = ["version"]
-description = "Git-diff-aware security impact analysis: builds a dependency subgraph around changed code and optionally scans it for vulnerabilities with an LLM."
+description = "Security review for code changes: follows a git diff through the call graph and has an LLM check what it affects for vulnerabilities, with HTML, JSON and SARIF reports and a CI gate."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
