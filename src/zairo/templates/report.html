@@ -69,10 +69,13 @@
         .tab:hover { color: var(--text); }
         .count { padding: 1px 6px; border-radius: 4px; font: 10px/17px var(--mono); color: var(--muted); background: var(--raised); }
         .tab[aria-selected="true"] .count { background: var(--accent-wash); color: var(--accent); }
-        .scan-notice { margin: 12px 20px 0; padding: 9px 12px; border: 1px solid var(--border); border-left: 3px solid var(--sev-medium); border-radius: 6px; color: var(--muted); font-size: 11px; line-height: 1.5; }
-        .scan-notice span { display: block; }
-        .scan-notice span + span { margin-top: 6px; }
+        /* Capped, and scrolls on its own past that, so however much it has
+           to say the findings below keep most of the column. */
+        .scan-notice { flex: none; max-height: 30vh; overflow-y: auto; margin: 12px 20px 0; padding: 9px 12px; border: 1px solid var(--border); border-left: 3px solid var(--sev-medium); border-radius: 6px; color: var(--muted); font-size: 11px; line-height: 1.5; scrollbar-width: thin; scrollbar-color: var(--border) transparent; overflow-wrap: anywhere; }
+        .scan-notice > div + div { margin-top: 6px; }
         .scan-notice b { color: var(--text); font-weight: 600; }
+        .scan-notice summary { width: fit-content; margin-top: 2px; color: var(--text); cursor: pointer; }
+        .notice-files { margin: 4px 0 0; padding-left: 14px; font: 10.5px/1.6 var(--mono); }
         .list-toolbar { padding: 13px 20px 11px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
         select { color: var(--muted); background: var(--surface); border: 1px solid transparent; border-radius: 4px; padding: 5px 2px; max-width: 180px; cursor: pointer; font-size: 11px; }
         select:hover { color: var(--text); border-color: var(--border); }
@@ -360,12 +363,19 @@
             notices.push(`<b>Incomplete:</b> ${reasons.join(' and ')}, so no findings there is not a clean result.`);
         }
         problems.forEach(p => notices.push(`<b>${p.level === 'error' ? 'Error' : 'Warning'}:</b> ${escapeHtml(p.message)}`));
+        // A few files are named in the notice; more are listed behind a click,
+        // or a big change's READMEs and lockfiles would fill the column.
+        const NOTICE_FILES_INLINE = 3;
         Object.entries(NOT_REVIEWED).forEach(([outcome, saying]) => {
             const paths = notReviewed.filter(f => f.outcome === outcome).map(f => f.path);
-            if (paths.length) notices.push(`<b>Not reviewed:</b> ${plural(paths.length, 'changed file')} ${saying}: ${escapeHtml(paths.join(', '))}`);
+            if (!paths.length) return;
+            const head = `<b>Not reviewed:</b> ${plural(paths.length, 'changed file')} ${saying}`;
+            notices.push(paths.length <= NOTICE_FILES_INLINE
+                ? `${head}: ${escapeHtml(paths.join(', '))}`
+                : `${head}.<details><summary>Show them</summary><ul class="notice-files">${paths.map(p => `<li>${escapeHtml(p)}</li>`).join('')}</ul></details>`);
         });
         if (notices.length) {
-            $('scan-notice').innerHTML = notices.map(n => `<span>${n}</span>`).join('');
+            $('scan-notice').innerHTML = notices.map(n => `<div>${n}</div>`).join('');
             $('scan-notice').hidden = false;
         }
         for (const option of $('severity-filter').options) {

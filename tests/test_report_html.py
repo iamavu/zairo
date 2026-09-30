@@ -12,7 +12,10 @@ from zairo.reporter import generate_reports
 sync_api = pytest.importorskip("playwright.sync_api")
 
 
-def _report(output_dir: Path) -> str:
+_CHANGED_FILES = [{"path": "app.py", "outcome": "analyzed"}, {"path": "deploy.yaml", "outcome": "not_parsed"}]
+
+
+def _report(output_dir: Path, changed_files=_CHANGED_FILES) -> str:
     graph = {
         "nodes": [
             {"id": "app", "name": "app.py", "kind": "module", "file": "app.py", "start_line": 1, "end_line": 15,
@@ -38,7 +41,7 @@ def _report(output_dir: Path) -> str:
     _, html_path, _ = generate_reports(
         graph, str(output_dir), findings, repo_name="demo", assessed_nodes=["app:save"],
         failed_nodes={"app:upload": "RateLimitError: slow down"},
-        changed_files=[{"path": "app.py", "outcome": "analyzed"}, {"path": "deploy.yaml", "outcome": "not_parsed"}],
+        changed_files=changed_files,
         problems=[{"level": "warning", "message": "Couldn't find the repo's entry points (boom)."}],
         seen={
             "app:save": {"lines": 340, "lines_shown": 60, "related": 23, "code_shown": 8, "noted": 5},
@@ -95,5 +98,40 @@ def test_report_renders_offline(tmp_path: Path):
 
             page.evaluate("selectNode('app')")  # shown all of what's around it
             assert "The model saw" not in page.inner_text("#node-details")
+        finally:
+            browser.close()
+
+
+def test_long_notice_leaves_room_for_findings(tmp_path: Path):
+    """A big change's unreviewed files (READMEs, lockfiles, workflows) are
+    listed behind a click, and the notice never takes over the column the
+    findings are listed in."""
+    unparsed = [{"path": f"docs/guide-{i:02}/README.md", "outcome": "not_parsed"} for i in range(40)]
+    html_path = _report(tmp_path / "out", [{"path": "app.py", "outcome": "analyzed"}] + unparsed)
+
+    with sync_api.sync_playwright() as playwright:
+        browser = _launch(playwright)
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 700})
+            page.goto(Path(html_path).as_uri())
+            page.wait_for_selector("#results .result-item")
+
+            notice = " ".join(page.inner_text("#scan-notice").split())
+            assert "Not reviewed: 40 changed files zairo doesn’t parse." in notice
+            assert "docs/guide-00/README.md" not in notice
+
+            def heights():
+                return page.evaluate(
+                    "[...['scan-notice', 'results'].map(id => document.getElementById(id).clientHeight), innerHeight]"
+                )
+
+            notice_height, results_height, viewport = heights()
+            assert results_height > notice_height
+
+            page.click("#scan-notice summary")
+            assert "docs/guide-39/README.md" in page.inner_text("#scan-notice")
+            notice_height, results_height, viewport = heights()
+            assert notice_height <= viewport * 0.3
+            assert results_height > notice_height
         finally:
             browser.close()
