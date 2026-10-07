@@ -50,6 +50,8 @@ def generate_reports(
     problems: list = None,
     commits: dict = None,
     seen: dict = None,
+    usage: dict = None,
+    usage_by_node: dict = None,
 ):
     """Returns (json_path, html_path, sarif_path). sarif_path is None unless
     an LLM scan actually ran (vulnerabilities is not None, including when it
@@ -86,12 +88,18 @@ def generate_reports(
     lists -- what the answer rests on. `seen` ({node id: {"lines",
     "lines_shown", "related", "code_shown", "noted"}}) is how much of its
     own code and its surroundings the model was shown: a clean answer
-    about a 400-line function it saw 60 lines of is worth less."""
+    about a 400-line function it saw 60 lines of is worth less.
+
+    `usage` is what the model scan used and cost, and how long the run took
+    (see scan.run_usage), report.json's top-level 'usage'; `usage_by_node`
+    ({node id: {"requests", "prompt_tokens", "completion_tokens",
+    "total_tokens", "cost"}}) each symbol's own, its 'usage'."""
     os.makedirs(output_dir, exist_ok=True)
     failed_nodes = failed_nodes or {}
     skipped_nodes = skipped_nodes or {}
     lookups = lookups or {}
     seen = seen or {}
+    usage_by_node = usage_by_node or {}
     changed_files = changed_files or []
     problems = problems or []
 
@@ -107,6 +115,13 @@ def generate_reports(
             node['lookups'] = lookups[node['id']]
         if node['id'] in seen:
             node['seen'] = seen[node['id']]
+        if node['id'] in usage_by_node:
+            spent = usage_by_node[node['id']]
+            node['usage'] = {
+                "requests": spent['requests'], "prompt_tokens": spent['prompt_tokens'],
+                "completion_tokens": spent['completion_tokens'], "total_tokens": spent['total_tokens'],
+                "cost_usd": round(spent['cost'], 6) if spent['cost'] is not None else None,
+            }
 
     json_path = os.path.join(output_dir, "report.json")
     html_path = os.path.join(output_dir, "report.html")
@@ -118,6 +133,7 @@ def generate_reports(
         "complete": is_complete(failed_nodes, problems),
         "problems": problems,
         "changed_files": changed_files,
+        **({"usage": usage} if usage is not None else {}),
         "symbols": graph_data['nodes'],
         "connections": graph_data['edges'],
     }

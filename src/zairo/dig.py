@@ -427,24 +427,29 @@ class DigRun:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cost: float = 0.0  # in US dollars, of the requests with a price
+    requests_without_cost: int = 0
 
-    def usage(self) -> Dict[str, int]:
+    def usage(self) -> Dict[str, Any]:
         return {
             'prompt_tokens': self.prompt_tokens, 'completion_tokens': self.completion_tokens,
             'total_tokens': self.total_tokens, 'requests': self.requests,
             'requests_without_usage': self.requests_without_usage,
+            'cost': self.cost, 'requests_without_cost': self.requests_without_cost,
         }
 
 
 def dig(
     completion: Callable[..., Any], model: str, messages: List[Dict[str, Any]], lookups: Lookups, max_tokens: int,
     run: DigRun, log: Callable[[str], None] = lambda text: None, near: Optional[Dict[str, Any]] = None,
+    cost_of: Callable[[Any], Optional[float]] = lambda response: None,
 ) -> Tuple[str, str]:
     """Runs one symbol's conversation until the model answers. Returns its
     answer and finish reason -- "lookups_exhausted" if it kept asking for
     lookups after it had used them all. Raises what `completion` raises.
     `log` gets each lookup and its result, for --debug; `near` is the
-    symbol under review (see Lookups.run)."""
+    symbol under review (see Lookups.run); `cost_of` prices a response, or
+    says it can't (None)."""
     conversation = list(messages)
     turns_past_budget = 0
     while True:
@@ -457,6 +462,11 @@ def dig(
             run.prompt_tokens += getattr(usage, 'prompt_tokens', 0) or 0
             run.completion_tokens += getattr(usage, 'completion_tokens', 0) or 0
             run.total_tokens += getattr(usage, 'total_tokens', 0) or 0
+        cost = cost_of(response)
+        if cost is None:
+            run.requests_without_cost += 1
+        else:
+            run.cost += cost
         choice = response.choices[0]
         message = choice.message
         calls = getattr(message, 'tool_calls', None) or []

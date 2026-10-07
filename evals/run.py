@@ -79,6 +79,9 @@ def main() -> int:
         f"{scores['runs']} run(s): {scores['incomplete_runs']} incomplete, {scores['unscored_runs']} not scored; "
         f"{scores['tokens']:,} tokens; {scores['seconds']:.0f}s of scanning"
     )
+    unpriced = scores["requests_without_cost"]
+    print(f"Cost: {'at least ' if unpriced else ''}${scores['cost_usd']:.4f}"
+          + (f" ({unpriced} request(s) had no price)" if unpriced else ""))
     if scores["failures"]:
         print("Why symbols failed (runs):")
         for message, count in list(scores["failures"].items())[:5]:

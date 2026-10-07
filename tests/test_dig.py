@@ -405,3 +405,15 @@ def test_dig_end_to_end_records_the_lookups_in_the_report(git_repo: Path, tmp_pa
     [symbol] = [s for s in report["symbols"] if s["name"] == "vulnerable_exec"]
     assert symbol["lookups"] == [{"tool": "callers", "input": "vulnerable_exec"}]
     assert "Looked up before answering" in (output_dir / "report.html").read_text(encoding="utf-8")
+
+
+def test_dig_counts_every_request_in_a_conversation(monkeypatch, tmp_path):
+    asked, answered = _ask(("search", {"text": "TENANT_CHECKS"})), _answer(_FINDING)
+    asked._hidden_params, answered._hidden_params = {"response_cost": 0.001}, {"response_cost": 0.002}
+    _scripted(monkeypatch, [asked, answered])
+
+    _, token_usage = _dig_scan(_repo(tmp_path), cache_path=None)
+
+    assert (round(token_usage["cost"], 6), token_usage["requests_without_cost"]) == (0.003, 0)
+    spent = token_usage["by_node"]["app:get_invoice"]
+    assert (spent["requests"], spent["total_tokens"], round(spent["cost"], 6)) == (2, 110, 0.003)

@@ -248,3 +248,33 @@ def test_deleted_symbols_start_hidden_in_the_graph(tmp_path):
     html = Path(html_path).read_text(encoding="utf-8")
     toggle = re.search(r'<input[^>]*id="toggle-deleted"[^>]*>', html).group(0)
     assert "checked" not in toggle
+
+
+def test_report_json_says_what_the_scan_used_and_cost(tmp_path: Path):
+    from zairo.scan import run_usage
+
+    token_usage = {"model": "m", "requests": 3, "requests_without_usage": 0, "prompt_tokens": 3000,
+                   "completion_tokens": 600, "total_tokens": 3600, "cost": 0.0123456789, "requests_without_cost": 1}
+    usage = run_usage(token_usage, 12.345)
+    json_path, _, _ = generate_reports(
+        _graph_data("x.py"), str(tmp_path / "out"), {}, usage=usage,
+        usage_by_node={"n1": {"requests": 2, "prompt_tokens": 2000, "completion_tokens": 400, "total_tokens": 2400, "cost": None}},
+    )
+
+    report = json.loads(Path(json_path).read_text(encoding="utf-8"))
+    assert report["usage"] == {
+        "model": "m", "requests": 3, "requests_without_usage": 0, "prompt_tokens": 3000, "completion_tokens": 600,
+        "total_tokens": 3600, "cost_usd": 0.012346, "requests_without_cost": 1, "seconds": 12.3,
+    }
+    assert report["symbols"][0]["usage"] == {
+        "requests": 2, "prompt_tokens": 2000, "completion_tokens": 400, "total_tokens": 2400, "cost_usd": None,
+    }
+    unpriced = dict(token_usage, requests_without_cost=3, cost=0.0)
+    assert run_usage(unpriced, 1)["cost_usd"] is None  # not $0: nobody said
+    assert run_usage(dict(token_usage, requests=0, requests_without_cost=0, cost=0.0), 1)["cost_usd"] == 0.0
+
+
+def test_a_graph_only_report_says_nothing_about_usage(tmp_path: Path):
+    json_path, _, _ = generate_reports(_graph_data("x.py"), str(tmp_path / "out"))
+
+    assert "usage" not in json.loads(Path(json_path).read_text(encoding="utf-8"))

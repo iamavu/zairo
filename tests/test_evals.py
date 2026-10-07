@@ -97,8 +97,9 @@ def test_scores():
     cases = [_case("sqli", True), _case("clean", False)]
     runs = [
         # Caught -- twice on the symbol, which is fine, and again under its module, which isn't.
-        Run("sqli", complete=True, findings=[_finding("handler"), _finding("handler"), _finding("app.py", cwe="CWE-20")], tokens=10),
-        Run("sqli", complete=True, findings=[_finding("helper")], tokens=10),  # flagged, but somewhere else
+        Run("sqli", complete=True, findings=[_finding("handler"), _finding("handler"), _finding("app.py", cwe="CWE-20")], tokens=10,
+            cost=0.01),
+        Run("sqli", complete=True, findings=[_finding("helper")], tokens=10, cost=0.02, requests_without_cost=1),  # flagged, but somewhere else
         Run("sqli", complete=True, findings=[_finding("handler", severity="medium")]),
         Run("sqli", complete=False, failed={"handler": "empty response"}),
         Run("clean", complete=True),
@@ -114,6 +115,7 @@ def test_scores():
     assert scores["stable"] == 0
     assert scores["cwe_matched"] == 1
     assert (scores["runs"], scores["incomplete_runs"], scores["unscored_runs"], scores["tokens"]) == (6, 2, 1, 20)
+    assert (scores["cost_usd"], scores["requests_without_cost"]) == (0.03, 1)
     assert scores["failures"] == {"empty response": 2}
     assert (scores["elsewhere"], scores["caught_runs"]) == (1, 1)
     assert scores["cases"]["sqli"] == {
@@ -135,7 +137,7 @@ def test_a_scan_counts_what_would_fail_the_gate(tmp_path: Path):
                 {"title": "Old", "severity": "critical", "introduced_by_change": False},
                 {"title": "Minor", "severity": "low", "introduced_by_change": True},
             ]},
-            complete=False, token_usage={"total_tokens": 1234},
+            complete=False, token_usage={"total_tokens": 1234}, usage={"cost_usd": 0.05, "requests_without_cost": 1},
             failed_nodes={"app": "empty response"}, problems=[{"level": "warning", "message": "no entry points"}],
         )
 
@@ -150,5 +152,6 @@ def test_a_scan_counts_what_would_fail_the_gate(tmp_path: Path):
     ]
     assert (run.failed, run.problems) == ({"app": "empty response"}, [])
     assert (run.tokens, run.verdict(case), run.cwe_matched(case)) == (1234, "caught", True)
+    assert (run.cost, run.requests_without_cost) == (0.05, 1)
     [options] = calls
     assert (options["from_ref"], options["to_ref"], options["cache_path"], options["notes_path"]) == ("HEAD~1", "HEAD", None, None)

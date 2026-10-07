@@ -120,9 +120,10 @@ def _print_notes_event(event: str, kw: dict, progress: _Progress, indent: str = 
         progress.stop()
         # 0 tokens means the provider didn't report usage, not that none was used.
         tokens = f", {kw['total_tokens']:,} tokens" if kw['total_tokens'] else ""
+        cost = _cost_text(kw['cost'], kw['requests'], kw['requests_without_cost'])
         console.print(
             f"{indent}[bold yellow]{kw['written']:,} note(s) written, {kw['failed']:,} failed "
-            f"({kw['requests']:,} request(s){tokens}).[/bold yellow]"
+            f"({kw['requests']:,} request(s){tokens}, cost {cost}).[/bold yellow]"
         )
         for message, count in sorted(kw['errors'].items(), key=lambda kv: -kv[1])[:3]:
             console.print(f"{indent}  [red]× ({count}x)[/red] {escape(message)}")
@@ -283,6 +284,20 @@ def _single_repo_on_event(event: str, progress: _Progress, **kw) -> None:
             _print_lookups(kw['token_usage'])
 
 
+def _dollars(amount: float) -> str:
+    return f"${amount:,.2f}" if amount >= 1 else f"${amount:.4f}"
+
+
+def _cost_text(cost: float, requests: int, unpriced: int) -> str:
+    """What `requests` cost, as far as their providers and LiteLLM's price
+    list say: `unpriced` of them had no price."""
+    if requests and unpriced >= requests:
+        return "unknown, since the model has no price"
+    if unpriced:
+        return f"at least {_dollars(cost)} ({unpriced} request(s) had no price)"
+    return _dollars(cost)
+
+
 def _print_token_usage(token_usage: dict) -> None:
     if token_usage['requests'] == 0:
         console.print("[dim]Token usage: no LLM requests were made (all results came from cache or were skipped).[/dim]")
@@ -297,6 +312,10 @@ def _print_token_usage(token_usage: dict) -> None:
             f"[bold magenta]Tokens used:[/bold magenta] "
             f"{token_usage['prompt_tokens']:,} prompt + {token_usage['completion_tokens']:,} completion "
             f"= {token_usage['total_tokens']:,} total across {counted} request(s)"
+        )
+        console.print(
+            f"[bold magenta]Cost:[/bold magenta] "
+            f"{_cost_text(token_usage['cost'], token_usage['requests'], token_usage['requests_without_cost'])}"
         )
         if token_usage['requests_without_usage']:
             console.print(
@@ -343,7 +362,10 @@ def _sum_token_usage(token_usages: List[dict]) -> dict:
     """Combines every repo's token_usage in a multi-repo run into one totals
     dict with the same shape _print_token_usage expects, so the combined
     number is printed the exact same way a single-repo run's is."""
-    total = {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0, 'requests': 0, 'requests_without_usage': 0}
+    total = {
+        'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0, 'requests': 0, 'requests_without_usage': 0,
+        'cost': 0.0, 'requests_without_cost': 0,
+    }
     for usage in token_usages:
         if not usage:
             continue
@@ -643,7 +665,7 @@ def analyze(
     dig: bool = typer.Option(False, "--dig", help="Experimental. Let the model look up what it needs before it answers -- warm-up notes, source, callers and callees, a text search of the repo -- up to 8 lookups per changed symbol, instead of seeing only the context zairo picks. Slower and costlier (every lookup is another request), and answers vary more between runs; cached per commit when scanning --from/--to. Needs a model that can call tools."),
     max_tokens: int = typer.Option(4096, "--max-tokens", help="Max output tokens per LLM scan request. Reasoning models count internal thinking against this budget too — too low can cause empty responses"),
     timeout: float = typer.Option(DEFAULT_TIMEOUT, "--timeout", min=1, help="Seconds each LLM request gets to answer. One that times out, or hits a rate limit or a provider error, is retried twice with a pause; one that still fails leaves its symbols unassessed and the run incomplete."),
-    tokens: bool = typer.Option(False, "--tokens", help="Show total LLM tokens used across real API calls (cache hits don't count)"),
+    tokens: bool = typer.Option(False, "--tokens", help="Show total LLM tokens used across real API calls (cache hits don't count), and what they cost"),
     fail_on: Severity = typer.Option(None, "--fail-on", help="Exit with status 1 if the change introduces a finding at or above this severity (one marked introduced_by_change: true) -- for gating CI/PR checks. Findings that were already there are reported, not gated on. However it's set, an incomplete run exits with status 3. Errors if combined with --graph-only."),
     continue_on_error: bool = typer.Option(True, "--continue-on-error/--stop-on-error", help="Multi-repo mode: keep scanning remaining repos if one fails (default), instead of aborting the run"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Print detailed diagnostic output (git commands, worktree setup, symbol matching, per-symbol LLM scan progress)"),

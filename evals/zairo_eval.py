@@ -94,6 +94,10 @@ class Run:
     failed: Dict[str, str] = field(default_factory=dict)
     problems: List[str] = field(default_factory=list)
     tokens: int = 0
+    # What its requests cost in US dollars, of those with a price, and how
+    # many had none (see zairo's scan.run_usage).
+    cost: float = 0.0
+    requests_without_cost: int = 0
     seconds: float = 0.0
     error: Optional[str] = None  # the scan itself raised this
 
@@ -165,7 +169,10 @@ def scan_case(case: Case, scan: Callable[..., Any], fail_on: str, root: str, **s
         case=case.id, complete=result.complete, findings=findings,
         failed={names.get(node_id, node_id): error for node_id, error in result.failed_nodes.items()},
         problems=[p["message"] for p in result.problems if p["level"] == "error"],
-        tokens=(result.token_usage or {}).get("total_tokens", 0), seconds=time.monotonic() - started,
+        tokens=(result.token_usage or {}).get("total_tokens", 0),
+        cost=(result.usage or {}).get("cost_usd") or 0.0,
+        requests_without_cost=(result.usage or {}).get("requests_without_cost", 0),
+        seconds=time.monotonic() - started,
     )
 
 
@@ -241,5 +248,7 @@ def summarize(cases: List[Case], runs: List[Run]) -> Dict[str, Any]:
         "unscored_runs": len(runs) - len(scored),
         "failures": dict(sorted(failures.items(), key=lambda kv: -kv[1])),
         "tokens": sum(r.tokens for r in runs),
+        "cost_usd": round(sum(r.cost for r in runs), 6),
+        "requests_without_cost": sum(r.requests_without_cost for r in runs),
         "seconds": sum(r.seconds for r in runs),
     }

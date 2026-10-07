@@ -94,7 +94,7 @@ it (to 16384, say) if that's the reason given.
 
 `--out` writes every run's findings (symbol, title, severity, CWE, line,
 whether the change introduced it and whether it gates), the symbols that
-failed and why, token counts and timings, so two runs, such as two models or
+failed and why, token counts, costs and timings, so two runs, such as two models or
 before and after a prompt change, can be compared case by case.
 
 ## Limits

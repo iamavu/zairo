@@ -12,6 +12,7 @@ ROLLUP_HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="utf-8">
     <title>Zairo Rollup Report</title>
     <style>
         /* Identical to reporter.py's HTML_TEMPLATE :root -- same source of
@@ -112,7 +113,7 @@ ROLLUP_HTML_TEMPLATE = """
             <thead>
                 <tr>
                     <th>Repo</th><th>Status</th><th>Changed symbols</th><th>Files not reviewed</th><th>Findings</th>
-                    <th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Reports</th>
+                    <th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Tokens</th><th>Cost</th><th>Reports</th>
                 </tr>
             </thead>
             <tbody>
@@ -121,7 +122,7 @@ ROLLUP_HTML_TEMPLATE = """
                     <td>{{ r.repo }}</td>
                 {% if r.status == 'error' %}
                     <td><span class="badge status-error">error</span></td>
-                    <td colspan="7" class="error-text">{{ r.error }}</td>
+                    <td colspan="9" class="error-text">{{ r.error }}</td>
                     <td></td>
                 {% else %}
                   {% if not r.complete %}
@@ -136,6 +137,8 @@ ROLLUP_HTML_TEMPLATE = """
                     <td class="count sev-high {{ 'nonzero' if r.severity_counts.high else '' }}">{{ r.severity_counts.high }}</td>
                     <td class="count sev-medium {{ 'nonzero' if r.severity_counts.medium else '' }}">{{ r.severity_counts.medium }}</td>
                     <td class="count sev-low {{ 'nonzero' if r.severity_counts.low else '' }}">{{ r.severity_counts.low }}</td>
+                    <td class="count">{{ "{:,}".format(r.usage.total_tokens) if r.usage else "—" }}</td>
+                    <td class="count" title="{{ r.usage.requests_without_cost ~ ' request(s) had no price' if r.usage and r.usage.requests_without_cost else '' }}">{{ cost(r.usage) }}</td>
                     <td>
                         <a href="{{ r.report_html }}">html</a> ·
                         <a href="{{ r.report_json }}">json</a>
@@ -149,6 +152,7 @@ ROLLUP_HTML_TEMPLATE = """
         <div class="totals">
             Totals across all repos — critical: <b>{{ totals.critical }}</b>, high: <b>{{ totals.high }}</b>,
             medium: <b>{{ totals.medium }}</b>, low: <b>{{ totals.low }}</b>
+            {% if usage %} — tokens: <b>{{ "{:,}".format(usage.total_tokens) }}</b>, cost: <b>{{ cost(usage) }}</b>{% endif %}
         </div>
     </div>
 </body>
@@ -209,10 +213,31 @@ def build_rollup_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
             "report_json": f"{r['slug']}/report.json",
             "report_html": f"{r['slug']}/report.html",
             "report_sarif": f"{r['slug']}/report.sarif" if scan_result.sarif_path else None,
+            "usage": scan_result.usage,
         })
         repos_summary.append(entry)
 
-    return {"repos": repos_summary, "totals": totals}
+    # What the model scans used and cost across every repo that ran one.
+    spent = [entry["usage"] for entry in repos_summary if entry.get("usage")]
+    usage = None
+    if spent:
+        priced = [u["cost_usd"] for u in spent if u["cost_usd"] is not None]
+        usage = {
+            "total_tokens": sum(u["total_tokens"] for u in spent),
+            "cost_usd": round(sum(priced), 6) if priced else None,
+            "requests_without_cost": sum(u["requests_without_cost"] for u in spent),
+        }
+    return {"repos": repos_summary, "totals": totals, "usage": usage}
+
+
+def _cost(usage: Optional[Dict[str, Any]]) -> str:
+    """A repo's or the run's cost as rollup.html shows it."""
+    if not usage:
+        return "—"
+    if usage["cost_usd"] is None:
+        return "unknown"
+    text = f"${usage['cost_usd']:,.2f}" if usage["cost_usd"] >= 1 else f"${usage['cost_usd']:.4f}"
+    return f"≥ {text}" if usage["requests_without_cost"] else text
 
 
 def _build_rollup_sarif(results: List[Dict[str, Any]], tool_version: str) -> Optional[Dict[str, Any]]:
@@ -265,8 +290,8 @@ def write_rollup_reports(
     # not safe HTML -- unlike reporter.py's template, nothing here needs raw
     # markup through, so there's no reason not to escape everything.
     template = Template(ROLLUP_HTML_TEMPLATE, autoescape=True)
-    with open(html_path, 'w') as f:
-        f.write(template.render(**summary))
+    with open(html_path, 'w', encoding='utf-8') as f:
+        f.write(template.render(**summary, cost=_cost))
 
     sarif_path = None
     rollup_sarif = _build_rollup_sarif(results, tool_version)

@@ -1,4 +1,5 @@
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -23,6 +24,9 @@ class ScanResult:
     # parts of the analysis that failed.
     changed_files: List[Dict[str, str]] = field(default_factory=list)
     problems: List[Dict[str, str]] = field(default_factory=list)
+    # What the model scan used and cost, and how long the run took (see
+    # run_usage) -- None for a --graph-only run.
+    usage: Optional[Dict[str, Any]] = None
 
     @property
     def failed_nodes(self) -> Dict[str, str]:
@@ -31,6 +35,24 @@ class ScanResult:
     @property
     def complete(self) -> bool:
         return is_complete(self.failed_nodes, self.problems)
+
+
+def run_usage(token_usage: Dict[str, Any], seconds: float) -> Dict[str, Any]:
+    """What a scan's requests used and cost, as report.json records it.
+    cost_usd is what the priced requests cost: None when none had a price,
+    and a lower bound while requests_without_cost isn't 0."""
+    priced = token_usage['requests'] - token_usage['requests_without_cost']
+    return {
+        "model": token_usage['model'],
+        "requests": token_usage['requests'],
+        "requests_without_usage": token_usage['requests_without_usage'],
+        "prompt_tokens": token_usage['prompt_tokens'],
+        "completion_tokens": token_usage['completion_tokens'],
+        "total_tokens": token_usage['total_tokens'],
+        "cost_usd": round(token_usage['cost'], 6) if priced or not token_usage['requests'] else None,
+        "requests_without_cost": token_usage['requests_without_cost'],
+        "seconds": round(seconds, 1),
+    }
 
 
 def run_warm_up(
@@ -104,6 +126,7 @@ def run_scan(
     """
     log = log or (lambda msg: None)
     on_event = on_event or (lambda event, **kwargs: None)
+    started = time.monotonic()
 
     abs_repo = os.path.abspath(repo_path)
     worktree_path = None
@@ -173,6 +196,7 @@ def run_scan(
             if node.get('file'):
                 node['file'] = os.path.relpath(node['file'], analysis_root).replace(os.sep, '/')
 
+        usage = run_usage(token_usage, time.monotonic() - started) if token_usage else None
         json_path, html_path, sarif_path = generate_reports(
             graph_data, output_dir, vulnerabilities, tool_version=__version__,
             repo_name=os.path.basename(abs_repo),
@@ -184,6 +208,8 @@ def run_scan(
             seen=token_usage['seen'] if token_usage else None,
             changed_files=coverage['changed_files'],
             problems=coverage['problems'],
+            usage=usage,
+            usage_by_node=token_usage['by_node'] if token_usage else None,
         )
 
         return ScanResult(
@@ -196,6 +222,7 @@ def run_scan(
             sarif_path=sarif_path,
             changed_files=coverage['changed_files'],
             problems=coverage['problems'],
+            usage=usage,
         )
     finally:
         if worktree_path:

@@ -841,6 +841,38 @@ def _ask(timeout: float, **request: Any) -> Any:
             time.sleep(_RETRY_PAUSE * 2 ** attempt)
 
 
+def _number(value: Any) -> Optional[float]:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _response_cost(response: Any) -> Optional[float]:
+    """What one response cost, in US dollars, or None when that's unknown.
+    LiteLLM works it out: from what the provider says it billed, where it
+    says (OpenRouter does), or else from LiteLLM's own price list."""
+    hidden = getattr(response, '_hidden_params', None)
+    cost = _number(hidden.get('response_cost') if isinstance(hidden, dict) else getattr(hidden, 'response_cost', None))
+    if cost is not None:
+        return cost
+    try:
+        return _number(litellm.completion_cost(completion_response=response))
+    except Exception:  # a model LiteLLM has no price for
+        return None
+
+
+def _usage_of(response: Any) -> Optional[Dict[str, Any]]:
+    """A response's tokens and cost (None if unknown), or None when the
+    provider reported no usage at all."""
+    usage = getattr(response, 'usage', None)
+    if usage is None:
+        return None
+    return {
+        'prompt_tokens': getattr(usage, 'prompt_tokens', 0) or 0,
+        'completion_tokens': getattr(usage, 'completion_tokens', 0) or 0,
+        'total_tokens': getattr(usage, 'total_tokens', 0) or 0,
+        'cost': _response_cost(response),
+    }
+
+
 def _summarize_error(e: Exception) -> str:
     """A short, single-line, stable summary of an exception for the always-on
     CLI warning and its dedup key -- --verbose still logs the untrimmed
@@ -1198,6 +1230,9 @@ def scan_graph_for_vulnerabilities(
     LLM call made (cache hits don't count -- they made no call), plus
     requests/requests_without_usage so a caller can tell whether the token
     totals are complete or partial (e.g. some providers don't report it),
+    the model, cost (US dollars) and requests_without_cost the same way
+    (see _response_cost), by_node ({node id: its own requests' tokens and
+    cost}),
     and failed_nodes ({node id: error}) -- any entry at all means the scan
     is incomplete -- and assessed_nodes, the ids of every node that did get
     a valid answer (from the model or the cache), findings or not: the only
@@ -1536,13 +1571,7 @@ def scan_graph_for_vulnerabilities(
                 f" (finish_reason={finish_reason}) — likely exhausted max_tokens={max_tokens} "
                 f"on internal reasoning before writing an answer; try --max-tokens with a higher value"
             )
-            resp_usage = getattr(response, 'usage', None)
-            if resp_usage is not None:
-                usage = {
-                    'prompt_tokens': getattr(resp_usage, 'prompt_tokens', 0) or 0,
-                    'completion_tokens': getattr(resp_usage, 'completion_tokens', 0) or 0,
-                    'total_tokens': getattr(resp_usage, 'total_tokens', 0) or 0,
-                }
+            usage = _usage_of(response)
 
             if not content.strip():
                 error_message = f"model returned empty content{empty_note}"
@@ -1583,7 +1612,8 @@ def scan_graph_for_vulnerabilities(
             return [(mod_node['id'], prompt_hash, None, run.usage(), error_message)]
 
         try:
-            content, finish_reason = _dig(partial(_ask, timeout), model, prompt, tools, max_tokens, run, lookup_log, near=mod_node)
+            content, finish_reason = _dig(partial(_ask, timeout), model, prompt, tools, max_tokens, run, lookup_log,
+                                          near=mod_node, cost_of=_response_cost)
         except Exception as e:
             if debug_log:
                 debug_log(f"\n{'-'*80}\nERROR -- {node_label}\n{'-'*80}\n{e}\n")
@@ -1633,13 +1663,7 @@ def scan_graph_for_vulnerabilities(
                 f"on internal reasoning before writing an answer; try --max-tokens with a higher value, "
                 f"or a smaller --batch-size"
             )
-            resp_usage = getattr(response, 'usage', None)
-            if resp_usage is not None:
-                usage = {
-                    'prompt_tokens': getattr(resp_usage, 'prompt_tokens', 0) or 0,
-                    'completion_tokens': getattr(resp_usage, 'completion_tokens', 0) or 0,
-                    'total_tokens': getattr(resp_usage, 'total_tokens', 0) or 0,
-                }
+            usage = _usage_of(response)
 
             if not content.strip():
                 error_message = f"model returned empty content{empty_note}"
@@ -1686,6 +1710,14 @@ def scan_graph_for_vulnerabilities(
         # failed" can divide by the right M instead of the (much smaller)
         # call count.
         'requests': 0, 'requests_without_usage': 0, 'nodes_scanned': len(jobs),
+        # What the requests cost in US dollars, as far as anyone said: a
+        # request whose provider and LiteLLM gave no price is counted in
+        # 'requests_without_cost' instead.
+        'model': model, 'cost': 0.0, 'requests_without_cost': 0,
+        # {node id: {"requests", "prompt_tokens", "completion_tokens",
+        # "total_tokens", "cost"}} for each node asked about on its own --
+        # not one batched with others, whose request is theirs too.
+        'by_node': {},
         # Deduplicated {error message: count of nodes that hit it} -- surfaced
         # by the CLI *without* requiring --verbose, so a scan that silently
         # failed on every node (e.g. a missing API key) is never
@@ -1733,14 +1765,29 @@ def scan_graph_for_vulnerabilities(
                 # says how many.
                 usage = results[0][3] if results else None
                 if usage:
-                    token_usage['requests'] += usage.get('requests', 1)
+                    requests = usage.get('requests', 1)
+                    token_usage['requests'] += requests
                     token_usage['requests_without_usage'] += usage.get('requests_without_usage', 0)
                     token_usage['prompt_tokens'] += usage['prompt_tokens']
                     token_usage['completion_tokens'] += usage['completion_tokens']
                     token_usage['total_tokens'] += usage['total_tokens']
+                    # One request's cost, or None if it has no price; a
+                    # --dig conversation's, of the requests priced, and how
+                    # many weren't.
+                    cost = usage.get('cost')
+                    unpriced = usage.get('requests_without_cost', 0 if cost is not None else 1)
+                    token_usage['cost'] += cost or 0.0
+                    token_usage['requests_without_cost'] += unpriced
+                    if len(results) == 1 and requests:
+                        token_usage['by_node'][results[0][0]] = {
+                            'requests': requests, 'prompt_tokens': usage['prompt_tokens'],
+                            'completion_tokens': usage['completion_tokens'], 'total_tokens': usage['total_tokens'],
+                            'cost': None if unpriced else cost,
+                        }
                 else:
                     token_usage['requests'] += 1
                     token_usage['requests_without_usage'] += 1
+                    token_usage['requests_without_cost'] += 1
                 for node_id, prompt_hash, findings, _usage, error_message in results:
                     token_usage['lookups_made'] += len(lookups_by_node.get(node_id, [])) if dig else 0
                     if findings is None:
@@ -1841,8 +1888,9 @@ def write_notes(
     response cut off at max_tokens keeps the notes it finished, and the
     functions it didn't get to go again in a request of their own, as long
     as each such request still gets some written. Returns counts:
-    written, cached (already had one), failed, requests, total_tokens, and
-    errors ({message: number of functions it cost a note}).
+    written, cached (already had one), failed, requests, total_tokens,
+    cost (US dollars, of the requests priced) and requests_without_cost,
+    and errors ({message: number of functions it cost a note}).
 
     `on_event` gets "notes_started" (model, to_write, cached), then
     "notes_progress" (done, total: functions) at 0 before the first
@@ -1871,7 +1919,8 @@ def write_notes(
         elif key not in todo:
             todo[key] = (n, code)
 
-    stats = {"written": 0, "cached": cached, "failed": 0, "requests": 0, "total_tokens": 0, "errors": {}}
+    stats = {"written": 0, "cached": cached, "failed": 0, "requests": 0, "total_tokens": 0,
+             "cost": 0.0, "requests_without_cost": 0, "errors": {}}
     on_event("notes_started", model=model, to_write=len(todo), cached=cached)
     groups = _note_groups(list(todo.items()))
     cut_off_reason = (
@@ -1881,7 +1930,7 @@ def write_notes(
 
     def ask(batch):
         """One request for `batch`: (notes by label, parse error, whether the
-        response was cut off at max_tokens, tokens)."""
+        response was cut off at max_tokens, tokens, cost or None)."""
         prompt = notes_messages([(n['name'], code) for _key, (n, code) in batch])
         label = f"notes for {len(batch)} function(s): " + ", ".join(_display_name(n['name']) for _key, (n, _code) in batch)
         if debug_log:
@@ -1889,27 +1938,34 @@ def write_notes(
         response = _ask(timeout, model=model, messages=prompt, max_tokens=max_tokens)
         usage = getattr(response, 'usage', None)
         tokens = (getattr(usage, 'total_tokens', 0) or 0) if usage is not None else 0
+        cost = _response_cost(response)
         content = response.choices[0].message.content or ""
         finish_reason = getattr(response.choices[0], 'finish_reason', None)
         if debug_log:
             debug_log(f"\n{'-'*80}\nRESPONSE -- {label} (finish_reason={finish_reason})\n{'-'*80}\n{content}\n")
         if not content.strip():
-            return {}, "model returned empty content", finish_reason == "length", tokens
+            return {}, "model returned empty content", finish_reason == "length", tokens, cost
         parsed, error = _note_objects(content)
-        return parsed, error, finish_reason == "length", tokens
+        return parsed, error, finish_reason == "length", tokens, cost
 
     def run(group):
-        """Returns ([(key, note or None, error or None)], tokens, requests)."""
-        results, tokens, requests, batch = [], 0, 0, group
+        """Returns ([(key, note or None, error or None)], tokens, requests,
+        cost of those priced, requests without a price)."""
+        results, tokens, requests, cost, unpriced, batch = [], 0, 0, 0.0, 0, group
         while batch:
             requests += 1
             try:
-                parsed, error, cut_off, used = ask(batch)
+                parsed, error, cut_off, used, spent = ask(batch)
             except Exception as e:
                 safe_log(f"  error writing notes for {len(batch)} function(s): {e}")
                 results += [(key, None, _summarize_error(e)) for key, _ in batch]
+                unpriced += 1
                 break
             tokens += used
+            if spent is None:
+                unpriced += 1
+            else:
+                cost += spent
             left = []
             for i, (key, (n, code)) in enumerate(batch, 1):
                 note = validated_note(parsed.get(f"F{i}"))
@@ -1926,7 +1982,7 @@ def write_notes(
                 safe_log(f"  no note for {len(left)} function(s): {reason}")
                 results += [(key, None, reason) for key, _ in left]
             break
-        return results, tokens, requests
+        return results, tokens, requests, cost, unpriced
 
     try:
         if groups:
@@ -1936,9 +1992,11 @@ def write_notes(
                 futures = [pool.submit(run, group) for group in groups]
                 try:
                     for done, future in enumerate(as_completed(futures), 1):
-                        results, tokens, requests = future.result()
+                        results, tokens, requests, cost, unpriced = future.result()
                         stats["requests"] += requests
                         stats["total_tokens"] += tokens
+                        stats["cost"] += cost
+                        stats["requests_without_cost"] += unpriced
                         for key, note, error in results:
                             if note is None:
                                 stats["failed"] += 1

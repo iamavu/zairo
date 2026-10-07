@@ -1704,3 +1704,64 @@ def test_a_request_that_cant_pass_is_not_retried(monkeypatch):
     llm_scanner.scan_graph_for_vulnerabilities({"nodes": [_node("n1", "fn")], "edges": []}, "fake-model", cache_path=None)
 
     assert fake_litellm.completion.call_count == 1
+
+
+def _priced(monkeypatch, cost):
+    """A model that answers clean and reports its usage -- and its price,
+    unless `cost` is None and LiteLLM has none either."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    response = fake_litellm.completion.return_value
+    response.usage = MagicMock(prompt_tokens=1000, completion_tokens=200, total_tokens=1200)
+    response._hidden_params = {"response_cost": cost} if cost is not None else {}
+    fake_litellm.completion_cost.side_effect = Exception("This model isn't mapped yet")
+    return fake_litellm
+
+
+def test_a_scan_counts_what_each_request_cost(monkeypatch):
+    _priced(monkeypatch, 0.002)
+    graph = {"nodes": [_node("n1", "fn_one"), _node("n2", "fn_two")], "edges": []}
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(graph, "fake-model", cache_path=None)
+
+    assert (round(token_usage["cost"], 6), token_usage["requests_without_cost"], token_usage["model"]) == (0.004, 0, "fake-model")
+    assert token_usage["by_node"]["n1"] == {
+        "requests": 1, "prompt_tokens": 1000, "completion_tokens": 200, "total_tokens": 1200, "cost": 0.002,
+    }
+
+
+def test_a_request_without_a_price_is_counted_not_guessed(monkeypatch):
+    _priced(monkeypatch, None)
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(
+        {"nodes": [_node("n1", "fn_one")], "edges": []}, "fake-model", cache_path=None,
+    )
+
+    assert (token_usage["cost"], token_usage["requests_without_cost"]) == (0.0, 1)
+    assert token_usage["by_node"]["n1"]["cost"] is None
+
+
+def test_a_batched_request_is_no_one_symbols_own(monkeypatch):
+    """Two symbols in one request: its cost counts once, and belongs to
+    neither alone."""
+    _priced(monkeypatch, 0.002)
+    graph = {"nodes": [_node("n1", "fn_one"), _node("n2", "fn_two")], "edges": []}
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(graph, "fake-model", cache_path=None, batch_size=2)
+
+    assert (token_usage["requests"], token_usage["cost"], token_usage["by_node"]) == (1, 0.002, {})
+
+
+def test_warm_up_counts_what_its_requests_cost(monkeypatch, tmp_path):
+    fake_litellm = _fake_llm(monkeypatch)
+    answer = fake_litellm.completion.side_effect
+
+    def priced(**request):
+        response = answer(**request)
+        response._hidden_params = {"response_cost": 0.003}
+        return response
+
+    fake_litellm.completion.side_effect = priced
+
+    stats = llm_scanner.write_notes(_functions(tmp_path, 12), "cheap-model", str(tmp_path / "notes.json"))
+
+    assert (stats["requests"], round(stats["cost"], 6), stats["requests_without_cost"]) == (2, 0.006, 0)

@@ -251,6 +251,7 @@ def test_multi_repo_tokens_sums_usage_across_repos(make_git_repo, tmp_path: Path
         "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
         "requests": 1, "requests_without_usage": 0, "nodes_scanned": 1, "errors": {}, "failed_nodes": {},
         "assessed_nodes": [], "skipped_nodes": {}, "notes_available": 0, "notes_used": 0, "lookups": {}, "lookups_made": 0, "seen": {},
+        "model": "fake-model", "cost": 0.0125, "requests_without_cost": 0, "by_node": {},
     }
 
     with patch("zairo.scan.scan_graph_for_vulnerabilities", return_value=({}, fake_usage)):
@@ -265,6 +266,11 @@ def test_multi_repo_tokens_sums_usage_across_repos(make_git_repo, tmp_path: Path
     assert "40 completion" in result.output
     assert "240 total" in result.output
     assert "2 request(s)" in result.output
+    assert "Cost: $0.0250" in result.output
+    rollup = json.loads((tmp_path / "out" / "rollup.json").read_text(encoding="utf-8"))
+    assert rollup["usage"] == {"total_tokens": 240, "cost_usd": 0.025, "requests_without_cost": 0}
+    assert [r["usage"]["cost_usd"] for r in rollup["repos"]] == [0.0125, 0.0125]
+    assert "$0.0250" in (tmp_path / "out" / "rollup.html").read_text(encoding="utf-8")
 
 
 def test_head_relative_from_resolves_in_the_repo_not_the_to_worktree(git_repo: Path, tmp_path: Path):
@@ -342,6 +348,7 @@ def _scan_usage(failed_nodes: dict) -> dict:
         "requests_without_usage": 1, "nodes_scanned": len(failed_nodes) or 1,
         "errors": errors, "failed_nodes": failed_nodes, "assessed_nodes": [], "skipped_nodes": {},
         "notes_available": 0, "notes_used": 0, "lookups": {}, "lookups_made": 0, "seen": {},
+        "model": "fake-model", "cost": 0.0, "requests_without_cost": 1, "by_node": {},
     }
 
 
@@ -629,3 +636,12 @@ def test_warm_up_writes_notes_with_its_model_and_the_scan_reads_them(git_repo: P
     # Notes on test.py's vulnerable_exec, entry, mid and target; only entry's
     # is needed -- mid is shown in full, target is the change.
     assert "Used 1 of 4 note(s) from an earlier --warm-up" in " ".join(scan.output.split())
+
+
+def test_cost_says_how_much_is_known():
+    from zairo.cli import _cost_text
+
+    assert _cost_text(0.0125, 2, 0) == "$0.0125"
+    assert _cost_text(12.345, 3, 0) == "$12.35"
+    assert _cost_text(0.01, 2, 1) == "at least $0.0100 (1 request(s) had no price)"
+    assert _cost_text(0.0, 2, 2) == "unknown, since the model has no price"
