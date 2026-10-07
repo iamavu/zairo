@@ -584,6 +584,118 @@ def test_a_module_with_nothing_left_of_its_own_is_not_reviewed(monkeypatch, tmp_
     assert [f["title"] for f in vulnerabilities["m"]] == [llm_scanner.REVIEWER_BAIT_TITLE]
 
 
+def test_go_methods_keep_their_changes_to_themselves(monkeypatch, tmp_path):
+    """A Go method's kind is "method", not "function", and a type's "struct":
+    still definitions, so neither's change is taken for the file's own and
+    handed to every other changed method naming the same things."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    src = tmp_path / "sasl.go"
+    src.write_text(
+        "package auth\n\ntype SASLAuth struct {\n\tPlain []string\n}\n\n"
+        "func (s *SASLAuth) AuthPlain(username, password string) error {\n\treturn check(username, password)\n}\n\n"
+        "func (s *SASLAuth) CreateSASL(identity, username string) string {\n\treturn identity\n}\n"
+    )
+    auth = {"start": 8, "removed": ["\treturn check(username, password, accounts)"], "added": ["\treturn check(username, password)"]}
+    create = {"start": 12, "removed": ["\treturn filterIdentity(identity, username)"], "added": ["\treturn identity"]}
+    struct = {"start": 4, "removed": ["\tPlain []PlainAuth"], "added": ["\tPlain []string"]}
+
+    def node(id_, kind, start, end, hunks):
+        return {"id": id_, "name": id_, "kind": kind, "file": str(src), "start_line": start, "end_line": end,
+                "status": "modified", "diff_hunks": hunks}
+
+    vulnerabilities, token_usage = llm_scanner.scan_graph_for_vulnerabilities({"nodes": [
+        node("sasl.go", "module", 1, 14, [struct, auth, create]), node("SASLAuth", "struct", 3, 5, [struct]),
+        node("AuthPlain", "method", 7, 9, [auth]), node("CreateSASL", "method", 11, 13, [create]),
+    ], "edges": []}, "fake-model", cache_path=None)
+
+    assert sorted(_reviewed(fake_litellm)) == ["AuthPlain", "CreateSASL", "SASLAuth"]
+    assert not any("Elsewhere in this file" in p for p in _prompts(fake_litellm))
+    assert "every change is inside a function or class" in token_usage["skipped_nodes"]["sasl.go"]
+
+
+def _class_file(tmp_path, body_hunks, class_hunks=()):
+    """svc.py: Store, holding ALLOWED and DEBUG and two methods; read() changed."""
+    src = tmp_path / "svc.py"
+    src.write_text(
+        "import os\n\n\nclass Store:\n    ALLOWED = ('txt', 'md', 'py')\n    DEBUG = True\n\n"
+        "    def __init__(self, root):\n        self.root = root\n\n"
+        "    def read(self, name):\n        if name.rsplit('.', 1)[-1] in self.ALLOWED:\n"
+        "            return open(os.path.join(self.root, name)).read()\n"
+    )
+    hunks = list(class_hunks) + list(body_hunks)
+
+    def node(id_, kind, start, end, own, status="modified"):
+        return {"id": id_, "name": id_, "kind": kind, "file": str(src), "start_line": start, "end_line": end,
+                "status": status, "diff_hunks": own}
+
+    return {"nodes": [
+        node("svc.py", "module", 1, 14, hunks), node("Store", "class", 4, 13, hunks),
+        node("__init__", "method", 8, 9, [], status="unchanged"), node("read", "method", 11, 13, list(body_hunks)),
+    ], "edges": []}
+
+
+_READ_HUNK = {"start": 13, "removed": ["            return open(name).read()"],
+              "added": ["            return open(os.path.join(self.root, name)).read()"]}
+_ALLOWED_HUNK = {"start": 5, "removed": ["    ALLOWED = ('txt', 'md')"], "added": ["    ALLOWED = ('txt', 'md', 'py')"]}
+_DEBUG_HUNK = {"start": 6, "removed": ["    DEBUG = False"], "added": ["    DEBUG = True"]}
+
+
+def test_a_class_is_not_reviewed_again_for_changes_inside_its_methods(monkeypatch, tmp_path):
+    """read()'s change is read()'s own review: the class showed it again,
+    and could report its bug on the class too."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(
+        _class_file(tmp_path, [_READ_HUNK]), "fake-model", cache_path=None,
+    )
+
+    assert _reviewed(fake_litellm) == ["read"]
+    assert "every change is inside a function or class" in token_usage["skipped_nodes"]["Store"]
+
+
+def test_a_class_leaves_what_its_changed_methods_use_to_them(monkeypatch, tmp_path):
+    """Its own changes are reviewed like a module's: the allow-list read()
+    checks goes to read(); the flag nothing changed uses stays the class's,
+    with read() collapsed."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(
+        _class_file(tmp_path, [_READ_HUNK], [_ALLOWED_HUNK, _DEBUG_HUNK]), "fake-model", cache_path=None,
+    )
+
+    assert sorted(_reviewed(fake_litellm)) == ["Store", "read"]
+    prompts = {name: p for name, p in zip(_reviewed(fake_litellm), _prompts(fake_litellm))}
+    assert "Reviewed here -- report any problem in it, or that it causes in this code:\n@@ line 5 @@" in prompts["read"]
+    assert "DEBUG" not in prompts["read"]
+    assert "+    DEBUG = True" in prompts["Store"] and "+    ALLOWED" not in prompts["Store"]
+    assert "(lines 11-13: `read`, changed, so reviewed on its own; not shown here -- don't guess what it contains)" in prompts["Store"]
+    assert "they're left out of the diff above: line 5, with `read`." in prompts["Store"]
+    assert "every change is inside a function or class" in token_usage["skipped_nodes"]["svc.py"]
+
+
+def test_a_class_with_nothing_left_of_its_own_is_not_reviewed(monkeypatch, tmp_path):
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(
+        _class_file(tmp_path, [_READ_HUNK], [_ALLOWED_HUNK]), "fake-model", cache_path=None,
+    )
+
+    assert _reviewed(fake_litellm) == ["read"]
+    assert "reviewed with the functions or classes that use them" in token_usage["skipped_nodes"]["Store"]
+
+
+def test_a_class_and_a_method_on_the_same_line_collapse_as_one(tmp_path):
+    src = tmp_path / "app.py"
+    src.write_text("class A: pass\nx = 1\n")
+    code, shown = llm_scanner._collapse_nested_definitions(str(src), 1, 2, [
+        {"id": "m", "name": "m", "start_line": 1, "end_line": 1},
+        {"id": "A", "name": "A", "start_line": 1, "end_line": 1},
+        {"id": "B", "name": "B", "start_line": 1, "end_line": 2},
+    ])
+    assert "`B`" in code and "`A`" not in code and "`m`" not in code
+    assert shown == []
+
+
 def test_a_change_two_functions_use_is_reviewed_with_the_first(monkeypatch, tmp_path):
     """Both see the new limit; only the first reports a problem in it, or
     both would. And a word in a string isn't a use: h's message mentions

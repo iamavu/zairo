@@ -181,8 +181,8 @@ def _windowed_source(file_path: str, start_line: int, end_line: int, changed_lin
 
 
 def _outside_nested(hunks: List[Dict[str, Any]], nested: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """A module's own changes: the parts of its hunks outside any nested
-    definition. Like the code collapse below, this keeps a nested function's
+    """A module's or class's own changes: the parts of its hunks outside any
+    definition in it. Like the code collapse below, this keeps a nested function's
     changes in that function's own scan only -- otherwise they'd show up
     again, and be attributed again, under the enclosing module. Removed
     lines stay with the first surviving part of their hunk; a hunk wholly
@@ -283,13 +283,13 @@ def _names_used(lines: List[str]) -> Set[str]:
     return _identifiers(code)
 
 
-def _file_changes_used(file_hunks: List[Dict[str, Any]], code: str, hunks: List[Dict[str, Any]]) -> List[int]:
-    """Which of a file's changes outside every function and class (its
-    module's own hunks, by index) a changed definition in it uses: the ones
-    naming something its code -- as it is now, or the lines the change
-    removed from it -- uses. An import it calls, a constant it used to
-    check against. A change's own strings count, so a route decorator
-    naming "/version" goes with version().
+def _file_changes_used(holder_hunks: List[Dict[str, Any]], code: str, hunks: List[Dict[str, Any]]) -> List[int]:
+    """Which of a module's or class's own changes, outside every definition
+    in it (by index), a changed definition in it uses: the ones naming
+    something its code -- as it is now, or the lines the change removed
+    from it -- uses. An import it calls, a constant it used to check
+    against. A change's own strings count, so a route decorator naming
+    "/version" goes with version().
 
     One git hunk spanning a top-level change and the definition leaves its
     removed lines whole on both sides (see hunks_in_range): those aren't
@@ -297,21 +297,22 @@ def _file_changes_used(file_hunks: List[Dict[str, Any]], code: str, hunks: List[
     in_code = _names_used(code.splitlines())
     removed = [text for hunk in hunks for text in hunk["removed"]]
     return [
-        i for i, h in enumerate(file_hunks)
+        i for i, h in enumerate(holder_hunks)
         if _identifiers(h["removed"] + h["added"]) & (in_code | _names_used([t for t in removed if t not in h["removed"]]))
     ]
 
 
 def _file_changes_section(owned: List[Dict[str, Any]], shared: List[Tuple[Dict[str, Any], str]]) -> str:
-    """A changed definition's view of the changes outside it that it uses:
-    the ones it `owned` (the first changed definition in the file to use
-    one owns it) and reports any problem in, and the ones `shared` with
-    the definition that owns them, where it reports only what they do to
-    it -- or two functions using the same new constant would both report
-    the constant."""
+    """A changed definition's view of the changes outside it that it uses,
+    in the file or class around it: the ones it `owned` (the first changed
+    definition there to use one owns it) and reports any problem in, and
+    the ones `shared` with the definition that owns them, where it reports
+    only what they do to it -- or two functions using the same new constant
+    would both report the constant."""
     parts = [
-        "Elsewhere in this file, outside any function or class, the same change also did this, to things this "
-        'code uses or used to ("-" lines were removed, "+" lines added). The file\'s own review doesn\'t cover it.'
+        "Elsewhere in this file, outside any function or method, the same change also did this, to things this "
+        'code uses or used to ("-" lines were removed, "+" lines added). The review of the file or class it\'s in '
+        "leaves it out."
     ]
     if owned:
         parts.append("Reviewed here -- report any problem in it, or that it causes in this code:\n" + _hunks_text(owned))
@@ -324,13 +325,13 @@ def _file_changes_section(owned: List[Dict[str, Any]], shared: List[Tuple[Dict[s
 
 
 def _module_scope(reviewed_elsewhere: List[Tuple[Dict[str, Any], List[str]]]) -> str:
-    """Told to a module's review when some of its definitions changed too:
-    they're reviewed on their own, and so -- with them -- are the changes
-    here they use (`reviewed_elsewhere`: (hunk, the names of the definitions
-    that use it)), which it's not shown as changes. Named, since it can't
-    see which definition uses what: told only that such changes exist, the
-    model reported them anyway."""
-    text = "The functions and classes marked changed above are reviewed on their own."
+    """Told to a module's or class's review when some of the definitions in
+    it changed too: they're reviewed on their own, and so -- with them --
+    are the changes here they use (`reviewed_elsewhere`: (hunk, the names of
+    the definitions that use it)), which it's not shown as changes. Named,
+    since it can't see which definition uses what: told only that such
+    changes exist, the model reported them anyway."""
+    text = "Everything marked changed above is reviewed on its own."
     if reviewed_elsewhere:
         where = "; ".join(
             f"{_hunk_where(h)}, with {', '.join(f'`{inline(name)}`' for name in names)}"
@@ -343,6 +344,13 @@ def _module_scope(reviewed_elsewhere: List[Tuple[Dict[str, Any], List[str]]]) ->
     return text + " Report a problem here only if the rest of the code here causes it itself."
 
 
+def _is_definition(n: Dict[str, Any]) -> bool:
+    """Whether a symbol is defined somewhere in a file, as a function,
+    method, class, struct, interface... -- anything but the file itself or
+    an external call target, with its lines known."""
+    return n.get('kind') not in ('module', 'proxy') and n.get('start_line') is not None and n.get('end_line') is not None
+
+
 def _sibling_outline(mod_node: Dict[str, Any], same_file: List[Dict[str, Any]]) -> str:
     """For a module/file-level node, a windowed snippet alone loses all
     orientation — the model can't tell what else the file contains. List the
@@ -351,9 +359,7 @@ def _sibling_outline(mod_node: Dict[str, Any], same_file: List[Dict[str, Any]]) 
     ones: they aren't in the file anymore."""
     siblings = [
         n for n in same_file
-        if n['id'] != mod_node['id']
-        and n.get('kind') in ('function', 'class', 'method')
-        and n.get('status') != 'deleted'
+        if n['id'] != mod_node['id'] and _is_definition(n) and n.get('status') != 'deleted'
     ]
     if not siblings:
         return ""
@@ -365,9 +371,8 @@ def _sibling_outline(mod_node: Dict[str, Any], same_file: List[Dict[str, Any]]) 
 def _collapse_nested_definitions(
     file_path: str, start_line: int, end_line: int, nested: List[Dict[str, Any]], changed: Set[str] = frozenset(),
 ) -> Tuple[str, List[int]]:
-    """For a module/file-level node, replace the body of each nested
-    top-level function/class with a one-line placeholder instead of sending
-    it in full. A nested definition that changed (its id in `changed`) is
+    """For a module or class, replace the body of each definition in it
+    with a one-line placeholder instead of sending it in full. A nested definition that changed (its id in `changed`) is
     already covered by its own, more specific seed node — including its full
     body here too means the same vulnerable line gets independently
     re-flagged under the enclosing module as well: wasted cost, and a
@@ -382,11 +387,16 @@ def _collapse_nested_definitions(
     if not nested:
         return _numbered_blocks(file_path, [(start_line, end_line)])
 
+    # Outermost first where two start on the same line -- a class and its
+    # first method -- so the class's placeholder covers the method's.
     skip_ranges = sorted(
-        (max(start_line, n['start_line']), min(end_line, n['end_line']), n['name'], n['id'] in changed)
-        for n in nested
-        if n.get('start_line') is not None and n.get('end_line') is not None
-        and n['end_line'] >= start_line and n['start_line'] <= end_line
+        (
+            (max(start_line, n['start_line']), min(end_line, n['end_line']), n['name'], n['id'] in changed)
+            for n in nested
+            if n.get('start_line') is not None and n.get('end_line') is not None
+            and n['end_line'] >= start_line and n['start_line'] <= end_line
+        ),
+        key=lambda r: (r[0], -r[1], r[2]),
     )
 
     parts, shown = [], []
@@ -1214,51 +1224,59 @@ def scan_graph_for_vulnerabilities(
 
     # Build prompts up front (cheap, local) so trivial/cached nodes never
     # touch the network, and only real work goes into the thread pool.
-    def module_parts(mod_node: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """A module's nested top-level definitions, and its own changes: the
-        parts of its hunks outside every one of them. Its own scan doesn't
-        re-send the full bodies of those definitions -- a changed one is
-        covered by its own, more specific seed node, and including it here
-        too just duplicates cost and mis-attributes its findings to the
-        enclosing module instead of the actual function. Not a deleted
-        definition: its lines are where it used to be."""
-        start, end = mod_node['start_line'], mod_node['end_line']
-        nested = [
-            n for n in nodes_by_file.get(mod_node['file'], [])
-            if n['id'] != mod_node['id'] and n.get('status') != 'deleted'
-            and n.get('kind') in ('function', 'class')
-            and n.get('start_line') is not None and n.get('end_line') is not None
-            and n['start_line'] >= start and n['end_line'] <= end
+    def definitions_in(holder: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """The definitions inside a module or class -- methods in a class,
+        and in a module, everything in the file. Not a deleted one: its
+        lines are where it used to be. Nor, in a class, one with the class's
+        own lines, or each would leave its changes to the other; a file
+        that's one class holds that class."""
+        start, end = holder['start_line'], holder['end_line']
+        return [
+            n for n in nodes_by_file.get(holder['file'], [])
+            if n['id'] != holder['id'] and n.get('status') != 'deleted' and _is_definition(n)
+            and start <= n['start_line'] and n['end_line'] <= end
+            and ((n['start_line'], n['end_line']) != (start, end) or holder.get('kind') == 'module')
         ]
-        return nested, _outside_nested(mod_node.get('diff_hunks') or [], nested)
 
-    # Each file's changes outside every function and class, and which of
-    # them each changed definition there uses: an import switched to an
-    # unsafe call, a constant its check needed. Those are reviewed with the
-    # definitions that use them and left out of the module's own review --
-    # which can't see what uses them, so reported the same bug again from
-    # its side, even told not to. Not a comment-only change, which that
-    # review skips too.
-    changed_ids = {n['id'] for n in modified_nodes}
-    file_hunks: Dict[str, List[Dict[str, Any]]] = {}
+    # A changed module, or class with definitions in it, is reviewed for
+    # its own changes only: the parts of its diff outside every definition
+    # in it. Those definitions' bodies are collapsed in its code -- a
+    # changed one is covered by its own, more specific review, and showing
+    # it here too reviewed the same change twice and reported its bug on
+    # the class or file as well. Not a function or method, even one with
+    # functions inside: its body is one piece of code, reviewed whole.
+    holders: Dict[str, List[Dict[str, Any]]] = {}  # {changed module or class's id: the definitions in it}
+    own_hunks: Dict[str, List[Dict[str, Any]]] = {}  # {its id: the parts of its diff outside all of them}
     for n in modified_nodes:
-        if n.get('kind') == 'module' and n.get('start_line') is not None and n.get('end_line') is not None:
-            own = module_parts(n)[1]
-            if own and not _is_trivial_change(own):
-                file_hunks[n['file']] = own
-    uses: Dict[str, List[int]] = {}  # {changed definition's id: indexes into its file's hunks}
-    # {file: {hunk index: the definitions using it, as (start line, id, name), first one first -- its owner}}
+        if not n.get('file') or n.get('start_line') is None or n.get('end_line') is None or n.get('kind') in ('function', 'method'):
+            continue
+        inside = definitions_in(n)
+        if inside or n.get('kind') == 'module':
+            holders[n['id']] = inside
+            own_hunks[n['id']] = _outside_nested(n.get('diff_hunks') or [], inside)
+    held = {holder_id: {d['id'] for d in inside} for holder_id, inside in holders.items()}
+
+    # Those own changes, and which of them each changed definition inside
+    # uses: an import switched to an unsafe call, a constant its check
+    # needed. They're reviewed with the definitions that use them and left
+    # out of the module's or class's own review -- which can't see what uses
+    # them, so reported the same bug again from its side, even told not to.
+    # Not a comment-only change, which that review skips too.
+    changed_ids = {n['id'] for n in modified_nodes}
+    loose = {holder_id: own for holder_id, own in own_hunks.items() if own and not _is_trivial_change(own)}
+    uses: Dict[str, List[Tuple[str, int]]] = {}  # {changed definition's id: (holder id, index into its loose hunks)}
+    # {holder id: {hunk index: the definitions using it, as (start line, id, name), first one first -- its owner}}
     hunk_users: Dict[str, Dict[int, List[Tuple[int, str, str]]]] = {}
     for n in modified_nodes:
-        if n.get('kind') == 'module' or n.get('file') not in file_hunks or n.get('start_line') is None or n.get('end_line') is None:
+        if n['id'] in holders or not _is_definition(n):
             continue
-        used = _file_changes_used(
-            file_hunks[n['file']], get_source_code(n['file'], n['start_line'], n['end_line']), n.get('diff_hunks') or [],
-        )
-        if used:
-            uses[n['id']] = used
+        for holder_id, hunks in loose.items():
+            if n['id'] not in held[holder_id]:
+                continue
+            used = _file_changes_used(hunks, get_source_code(n['file'], n['start_line'], n['end_line']), n.get('diff_hunks') or [])
             for i in used:
-                hunk_users.setdefault(n['file'], {}).setdefault(i, []).append((n['start_line'], n['id'], n['name']))
+                uses.setdefault(n['id'], []).append((holder_id, i))
+                hunk_users.setdefault(holder_id, {}).setdefault(i, []).append((n['start_line'], n['id'], n['name']))
     for users in hunk_users.values():
         for found in users.values():
             found.sort()
@@ -1267,18 +1285,18 @@ def scan_graph_for_vulnerabilities(
     for mod_node in modified_nodes:
         hunks = mod_node.get('diff_hunks') or []
         start, end = mod_node.get('start_line'), mod_node.get('end_line')
-        is_module = mod_node.get('kind') == 'module' and start is not None and end is not None
+        is_holder = mod_node['id'] in holders  # a module, or a class with definitions in it
         # New in its entirety (see analyze_impact): a diff would only repeat
         # its code as "+" lines.
         fully_added = mod_node['status'] == 'added'
 
         nested, reviewed_elsewhere = [], []
-        if is_module:
-            nested, own_hunks = module_parts(mod_node)
-            if hunks and not own_hunks:
+        if is_holder:
+            nested = holders[mod_node['id']]
+            if hunks and not own_hunks[mod_node['id']]:
                 skip(mod_node, "every change is inside a function or class scanned on its own")
                 continue
-            hunks = own_hunks
+            hunks = own_hunks[mod_node['id']]
 
         # Added lines that address an AI reviewer are flagged whatever the
         # model makes of them (see untrusted.py) -- including ones in changes
@@ -1289,31 +1307,30 @@ def scan_graph_for_vulnerabilities(
             bait_lines[mod_node['id']] = bait
             log(f"  text aimed at the AI reviewer: {_display_name(mod_node['name'])}, line(s) {', '.join(map(str, sorted(bait)))}")
 
-        # The module's changes that a changed definition uses are reviewed
-        # with it (see hunk_users above).
-        if is_module and hunk_users.get(mod_node['file']):
-            users = hunk_users[mod_node['file']]
-            reviewed_elsewhere = [
-                (file_hunks[mod_node['file']][i], [name for _, _, name in found]) for i, found in users.items()
-            ]
-            hunks = [h for i, h in enumerate(file_hunks[mod_node['file']]) if i not in users]
+        # Its own changes that a changed definition in it uses are reviewed
+        # with that definition (see hunk_users above).
+        if is_holder and hunk_users.get(mod_node['id']):
+            users, mine = hunk_users[mod_node['id']], loose[mod_node['id']]
+            reviewed_elsewhere = [(mine[i], [name for _, _, name in found]) for i, found in users.items()]
+            hunks = [h for i, h in enumerate(mine) if i not in users]
             if not hunks or (not bait and _is_trivial_change(hunks)):
                 skip(mod_node, "its changes are reviewed with the functions or classes that use them, but for comments and blank lines")
                 continue
 
-        # Trivial-skip only applies to module-level edits (e.g. a version
-        # bump, a standalone doc comment). Skipping a function-kind node
-        # because its own diff happens to be comment-only would also skip
-        # scanning whatever pre-existing vulnerable code the rest of that
-        # (possibly still-unfixed) function contains -- and small functions
-        # cost nothing extra to scan in full anyway, so there's no real
-        # savings being traded away by not skipping them. Nor a comment
-        # aimed at the AI reviewer: that's what an attempt looks like.
-        if mod_node.get('kind') == 'module' and not bait and _is_trivial_change(hunks):
+        # Trivial-skip only applies to a module's or class's own edits (e.g.
+        # a version bump, a standalone doc comment): the definitions in it
+        # are reviewed on their own. Skipping a function because its own
+        # diff happens to be comment-only would also skip scanning whatever
+        # pre-existing vulnerable code the rest of that (possibly
+        # still-unfixed) function contains -- and small functions cost
+        # nothing extra to scan in full anyway, so there's no real savings
+        # being traded away by not skipping them. Nor a comment aimed at the
+        # AI reviewer: that's what an attempt looks like.
+        if is_holder and not bait and _is_trivial_change(hunks):
             skip(mod_node, "only comments or blank lines changed")
             continue
 
-        if is_module:
+        if is_holder:
             mod_code, shown_lines = _collapse_nested_definitions(mod_node['file'], start, end, nested, changed_ids)
         elif hunks and start is not None and end is not None:
             mod_code, shown_lines = _windowed_source(mod_node['file'], start, end, [ln for hunk in hunks for ln in hunk_lines(hunk)])
@@ -1344,10 +1361,10 @@ def scan_graph_for_vulnerabilities(
             mod_node, nodes, edges_by_node.get(mod_node['id'], []), note_of,
             toward_entrypoints={path[1] for path in reach_paths if len(path) > 1},
         )
-        # How much of it the model saw: of its own code -- a module's nested
-        # definitions aside, which are reviewed on their own -- and of the
-        # symbols around it.
-        if not is_module and start is not None and end is not None:
+        # How much of it the model saw: of its own code -- a module's or
+        # class's definitions aside, which are reviewed on their own -- and
+        # of the symbols around it.
+        if not is_holder and start is not None and end is not None:
             seen.update(lines=end - start + 1, lines_shown=len({ln for ln in shown_lines if start <= ln <= end}))
         seen_by_node[mod_node['id']] = seen
         reach_text = _reach_section(mod_node, nodes, reach_paths, any_entrypoints)
@@ -1357,15 +1374,15 @@ def scan_graph_for_vulnerabilities(
         diff_text = _diff_section(hunks, fully_added, mod_node.get('kind') or 'function')
         # Where this node's review stands on the rest of its file's change:
         # a changed definition is shown the changes outside it that it uses,
-        # and owns what they do to it; a module leaves those to it.
+        # and owns what they do to it; a module or class leaves those to it.
         file_text = ""
-        if is_module:
+        if is_holder:
             if any(n['id'] in changed_ids for n in nested):
                 file_text = _module_scope(reviewed_elsewhere)
         elif mod_node['id'] in uses:
-            here, users = file_hunks[mod_node['file']], hunk_users[mod_node['file']]
-            owned = [here[i] for i in uses[mod_node['id']] if users[i][0][1] == mod_node['id']]
-            shared = [(here[i], users[i][0][2]) for i in uses[mod_node['id']] if users[i][0][1] != mod_node['id']]
+            mine = uses[mod_node['id']]
+            owned = [loose[h][i] for h, i in mine if hunk_users[h][i][0][1] == mod_node['id']]
+            shared = [(loose[h][i], hunk_users[h][i][0][2]) for h, i in mine if hunk_users[h][i][0][1] != mod_node['id']]
             file_text = _file_changes_section(owned, shared)
             # A finding may cite a line of them: the model was shown it.
             shown_lines = shown_lines + [ln for h in owned + [h for h, _ in shared] if h["added"] for ln in hunk_lines(h)]
