@@ -206,6 +206,8 @@ def _outside_nested(hunks: List[Dict[str, Any]], nested: List[Dict[str, Any]]) -
                 runs.append({"start": ln, "removed": [], "added": [text]})
         if runs:
             runs[0]["removed"] = hunk["removed"]
+            if "old_start" in hunk:
+                runs[0]["old_start"] = hunk["old_start"]
         own.extend(runs)
     return own
 
@@ -342,6 +344,83 @@ def _module_scope(reviewed_elsewhere: List[Tuple[Dict[str, Any], List[str]]]) ->
             f"above: {where}."
         )
     return text + " Report a problem here only if the rest of the code here causes it itself."
+
+
+def _deleted_callees(
+    changed: List[Dict[str, Any]], nodes: Dict[str, Dict[str, Any]], edges: List[Dict[str, Any]],
+) -> Tuple[Dict[str, List[Tuple[int, int]]], Dict[str, List[Tuple[Dict[str, Any], List[str]]]]]:
+    """The functions (or classes...) the change deleted outright that
+    changed code used to call: what one checked or did is what its callers
+    lost, and the line removing the call can't show it. Its deleted lines
+    belong with them -- not with whichever neighbor the deletion's position
+    in the diff put them in, which reported the callers' bug from its side.
+    One nothing changed called stays where it is.
+
+    Returns ({file: the before-the-change line ranges of those deleted
+    definitions in it}, {caller's id: [(deleted node, its deleted lines)]}),
+    matching each hunk's removed lines by their before-the-change numbers."""
+    changed_ids = {n['id'] for n in changed}
+    callers: Dict[str, Set[str]] = {}
+    for e in edges:
+        target = nodes.get(e['target'])
+        if (e.get('kind') == 'calls' and e['source'] in changed_ids and target is not None
+                and target.get('status') == 'deleted' and _is_definition(target) and target.get('file')):
+            callers.setdefault(e['target'], set()).add(e['source'])
+
+    # Each changed file's removed lines, by their number before the change:
+    # one git hunk can sit in several nodes' diffs, its removed lines whole.
+    removed_by_file: Dict[str, Dict[int, str]] = {}
+    for n in changed:
+        for hunk in n.get('diff_hunks') or []:
+            if hunk.get('old_start') is not None:
+                for i, text in enumerate(hunk['removed']):
+                    removed_by_file.setdefault(n['file'], {})[hunk['old_start'] + i] = text
+
+    ranges: Dict[str, List[Tuple[int, int]]] = {}
+    by_caller: Dict[str, List[Tuple[Dict[str, Any], List[str]]]] = {}
+    for deleted_id, caller_ids in callers.items():
+        deleted = nodes[deleted_id]
+        removed = removed_by_file.get(deleted['file'], {})
+        lines = [removed[ln] for ln in range(deleted['start_line'], deleted['end_line'] + 1) if ln in removed]
+        if not lines:
+            continue
+        ranges.setdefault(deleted['file'], []).append((deleted['start_line'], deleted['end_line']))
+        for caller_id in caller_ids:
+            by_caller.setdefault(caller_id, []).append((deleted, lines))
+    return ranges, by_caller
+
+
+def _without_lines(hunks: List[Dict[str, Any]], ranges: List[Tuple[int, int]]) -> List[Dict[str, Any]]:
+    """`hunks` without the removed lines numbered, before the change, within
+    `ranges` -- dropping a hunk left with nothing."""
+    if not ranges:
+        return hunks
+    out = []
+    for hunk in hunks:
+        if hunk.get('old_start') is None or not hunk['removed']:
+            out.append(hunk)
+            continue
+        kept = [text for i, text in enumerate(hunk['removed'])
+                if not any(lo <= hunk['old_start'] + i <= hi for lo, hi in ranges)]
+        if len(kept) == len(hunk['removed']):
+            out.append(hunk)
+        elif kept or hunk['added']:
+            out.append({**hunk, 'removed': kept})
+    return out
+
+
+def _deleted_callees_section(deleted: List[Tuple[Dict[str, Any], List[str]]], here: str, repo_root: Optional[str]) -> str:
+    """Code the change deleted outright that this code called before it,
+    shown as removed lines: see _deleted_callees."""
+    parts = ['Deleted by this change, and called by this code before it ("-" lines were removed):']
+    for node, lines in sorted(deleted, key=lambda item: (item[0]['file'], item[0]['start_line'])):
+        where = ""
+        if node['file'] != here:
+            where = f" (in {inline(os.path.relpath(node['file'], repo_root) if repo_root else os.path.basename(node['file']))})"
+        shown = lines[:_MAX_DIFF_LINES]
+        cut = f"\n({len(lines) - len(shown)} more line(s) not shown)" if len(lines) > len(shown) else ""
+        parts.append(f"`{inline(node['name'])}`{where}:\n{block(chr(10).join('-' + text for text in shown))}{cut}")
+    return "\n".join(parts)
 
 
 def _is_definition(n: Dict[str, Any]) -> bool:
@@ -1222,6 +1301,14 @@ def scan_graph_for_vulnerabilities(
     modified_nodes = [n for n in graph_data['nodes'] if n['status'] in ['modified', 'added']]
     log(f"Scanning {len(modified_nodes)} modified/added node(s) with {model}")
 
+    # Each changed node's diff, but for the lines of code the change deleted
+    # outright that changed code called: those are shown to that code.
+    deleted_ranges, deleted_by_caller = _deleted_callees(modified_nodes, nodes, context['edges'])
+    diffs = {
+        n['id']: _without_lines(n.get('diff_hunks') or [], deleted_ranges.get(n.get('file'), []))
+        for n in modified_nodes
+    }
+
     # Build prompts up front (cheap, local) so trivial/cached nodes never
     # touch the network, and only real work goes into the thread pool.
     def definitions_in(holder: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1253,7 +1340,7 @@ def scan_graph_for_vulnerabilities(
         inside = definitions_in(n)
         if inside or n.get('kind') == 'module':
             holders[n['id']] = inside
-            own_hunks[n['id']] = _outside_nested(n.get('diff_hunks') or [], inside)
+            own_hunks[n['id']] = _outside_nested(diffs[n['id']], inside)
     held = {holder_id: {d['id'] for d in inside} for holder_id, inside in holders.items()}
 
     # Those own changes, and which of them each changed definition inside
@@ -1270,10 +1357,15 @@ def scan_graph_for_vulnerabilities(
     for n in modified_nodes:
         if n['id'] in holders or not _is_definition(n):
             continue
+        # What it used to use includes the code it called that the change
+        # deleted, shown to it: the import only that code needed, say.
+        used_to = diffs[n['id']] + [
+            {"start": 0, "removed": lines, "added": []} for _, lines in deleted_by_caller.get(n['id'], [])
+        ]
         for holder_id, hunks in loose.items():
             if n['id'] not in held[holder_id]:
                 continue
-            used = _file_changes_used(hunks, get_source_code(n['file'], n['start_line'], n['end_line']), n.get('diff_hunks') or [])
+            used = _file_changes_used(hunks, get_source_code(n['file'], n['start_line'], n['end_line']), used_to)
             for i in used:
                 uses.setdefault(n['id'], []).append((holder_id, i))
                 hunk_users.setdefault(holder_id, {}).setdefault(i, []).append((n['start_line'], n['id'], n['name']))
@@ -1283,7 +1375,10 @@ def scan_graph_for_vulnerabilities(
 
     jobs = []
     for mod_node in modified_nodes:
-        hunks = mod_node.get('diff_hunks') or []
+        hunks = diffs[mod_node['id']]
+        if mod_node.get('diff_hunks') and not hunks:
+            skip(mod_node, "its change only deleted code that's reviewed with the code that called it")
+            continue
         start, end = mod_node.get('start_line'), mod_node.get('end_line')
         is_holder = mod_node['id'] in holders  # a module, or a class with definitions in it
         # New in its entirety (see analyze_impact): a diff would only repeat
@@ -1386,6 +1481,9 @@ def scan_graph_for_vulnerabilities(
             file_text = _file_changes_section(owned, shared)
             # A finding may cite a line of them: the model was shown it.
             shown_lines = shown_lines + [ln for h in owned + [h for h, _ in shared] if h["added"] for ln in hunk_lines(h)]
+        if mod_node['id'] in deleted_by_caller:
+            deleted_text = _deleted_callees_section(deleted_by_caller[mod_node['id']], mod_node['file'], repo_root)
+            file_text = f"{file_text}\n{deleted_text}" if file_text else deleted_text
         section = _node_section(mod_node, mod_code, diff_text, neighbor_contexts, reach_text, notes_text, file_text)
 
         # Keyed on the full single-node prompt, not just the code inside it,

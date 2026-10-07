@@ -696,6 +696,91 @@ def test_a_class_and_a_method_on_the_same_line_collapse_as_one(tmp_path):
     assert shown == []
 
 
+def _deleted_check(tmp_path, called: bool):
+    """filter_identity() deleted, create() changed to stop calling it -- and
+    the deletion's position in the diff falls in auth_plain(), above it."""
+    src = tmp_path / "auth.py"
+    src.write_text(
+        "def auth_plain(user, password):\n    return check(user, password)\n\n\n"
+        "def create(identity, user, password):\n    auth_plain(user, password)\n    return identity\n"
+    )
+    deleted_lines = ["def filter_identity(accounts, identity):", "    if identity not in accounts:",
+                     "        raise PermissionError(identity)", "    return identity"]
+    deletion = {"start": 2, "old_start": 5, "removed": deleted_lines, "added": []}
+    in_create = {"start": 6, "old_start": 12,
+                 "removed": ["    accounts = auth_plain(user, password)", "    return filter_identity(accounts, identity)"],
+                 "added": ["    auth_plain(user, password)", "    return identity"]}
+
+    def node(id_, kind, start, end, hunks, status="modified"):
+        return {"id": id_, "name": id_, "kind": kind, "file": str(src), "start_line": start, "end_line": end,
+                "status": status, "diff_hunks": hunks}
+
+    edges = [{"source": "create", "target": "auth_plain", "kind": "calls", "confidence": "certain", "lines": [6]}]
+    if called:
+        edges.append({"source": "create", "target": "filter_identity", "kind": "calls", "confidence": "certain", "lines": []})
+    return {"nodes": [
+        node("auth.py", "module", 1, 8, [deletion, in_create]), node("auth_plain", "function", 1, 2, [deletion]),
+        node("create", "function", 5, 7, [in_create]), node("filter_identity", "function", 5, 8, [], status="deleted"),
+    ], "edges": edges}
+
+
+def test_a_deleted_function_is_shown_to_the_code_that_called_it(monkeypatch, tmp_path):
+    """create() lost the check, so create()'s review sees what it did; the
+    unrelated function its lines happened to sit in doesn't, and reported
+    the bug from there."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities(_deleted_check(tmp_path, called=True), "fake-model", cache_path=None)
+
+    assert _reviewed(fake_litellm) == ["create"]
+    [prompt] = _prompts(fake_litellm)
+    deleted = prompt.split('Deleted by this change, and called by this code before it ("-" lines were removed):')[1]
+    assert "`filter_identity`:\n" + _block(prompt, (
+        "-def filter_identity(accounts, identity):\n-    if identity not in accounts:\n"
+        "-        raise PermissionError(identity)\n-    return identity"
+    )) in deleted
+    assert "Deleted by this change" not in _inside_blocks(prompt)
+    assert "only deleted code that's reviewed with the code that called it" in token_usage["skipped_nodes"]["auth_plain"]
+
+
+def test_an_import_only_deleted_code_used_goes_with_it(monkeypatch, tmp_path):
+    """create() is shown the deleted check() -- and so the import only
+    check() used, which the file's review was left holding on its own."""
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    src = tmp_path / "app.py"
+    src.write_text("import os\n\n\ndef create(identity):\n    return identity\n")
+    import_hunk = {"start": 1, "old_start": 2, "removed": ["from errors import Denied"], "added": []}
+    deletion = {"start": 3, "old_start": 5, "removed": ["def check(identity):", "    raise Denied(identity)", "", ""], "added": []}
+    in_create = {"start": 5, "old_start": 10, "removed": ["    check(identity)", "    return identity"], "added": ["    return identity"]}
+
+    def node(id_, kind, start, end, hunks, status="modified"):
+        return {"id": id_, "name": id_, "kind": kind, "file": str(src), "start_line": start, "end_line": end,
+                "status": status, "diff_hunks": hunks}
+
+    _, token_usage = llm_scanner.scan_graph_for_vulnerabilities({"nodes": [
+        node("app.py", "module", 1, 6, [import_hunk, deletion, in_create]), node("create", "function", 4, 5, [in_create]),
+        node("check", "function", 5, 6, [], status="deleted"),
+    ], "edges": [{"source": "create", "target": "check", "kind": "calls", "confidence": "certain", "lines": []}]},
+        "fake-model", cache_path=None)
+
+    assert _reviewed(fake_litellm) == ["create"]
+    [prompt] = _prompts(fake_litellm)
+    assert "Reviewed here -- report any problem in it, or that it causes in this code:\n@@ removed after line 1 @@" in prompt
+    assert "-    raise Denied(identity)" in prompt
+    assert "reviewed with the functions or classes that use them" in token_usage["skipped_nodes"]["app.py"]
+
+
+def test_a_deleted_function_nothing_changed_called_stays_where_it_was(monkeypatch, tmp_path):
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+
+    llm_scanner.scan_graph_for_vulnerabilities(_deleted_check(tmp_path, called=False), "fake-model", cache_path=None)
+
+    assert sorted(_reviewed(fake_litellm)) == ["auth_plain", "create"]
+    prompts = dict(zip(_reviewed(fake_litellm), _prompts(fake_litellm)))
+    assert "-    if identity not in accounts:" in prompts["auth_plain"]
+    assert "Deleted by this change" not in prompts["create"]
+
+
 def test_a_change_two_functions_use_is_reviewed_with_the_first(monkeypatch, tmp_path):
     """Both see the new limit; only the first reports a problem in it, or
     both would. And a word in a string isn't a use: h's message mentions

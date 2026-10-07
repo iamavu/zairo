@@ -253,15 +253,11 @@ def hunks_in_range(hunks: List[Dict[str, Any]], start: int, end: int) -> List[Di
             within.append(hunk)
             continue
         first, last = lines[0], lines[-1]
-        within.append({
-            "start": first,
-            "removed": hunk["removed"],
-            "added": hunk["added"][first - hunk["start"]:last - hunk["start"] + 1],
-        })
+        within.append({**hunk, "start": first, "added": hunk["added"][first - hunk["start"]:last - hunk["start"] + 1]})
     return within
 
 
-_HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
 def get_diff_hunks(
@@ -286,6 +282,9 @@ def get_diff_hunks(
       start:   the to-side line number of its first added line -- or, for
                a pure deletion, the line the removed ones used to follow
                (0 at the top of the file), as git reports it;
+      old_start: the from-side line number of its first removed line
+               (line old_start + i), so what it removed can be matched to
+               code as it was before -- a function the change deleted;
       removed: the text of the lines it removed, in order;
       added:   the text of the lines it added, in order (line start + i).
 
@@ -350,10 +349,10 @@ def get_diff_hunks(
         elif line.startswith("@@ ") and current_file:
             match = _HUNK_HEADER_RE.match(line)
             if match:
-                removed_count, start, added_count = match.groups()
+                old_start, removed_count, start, added_count = match.groups()
                 removed_left = int(removed_count) if removed_count is not None else 1
                 added_left = int(added_count) if added_count is not None else 1
-                hunk = {"start": int(start), "removed": [], "added": []}
+                hunk = {"start": int(start), "old_start": int(old_start), "removed": [], "added": []}
                 hunks_by_file[current_file].append(hunk)
 
     if not (from_ref and to_ref):

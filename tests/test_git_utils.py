@@ -189,6 +189,7 @@ def test_hunks_keep_what_a_change_replaced(git_repo: Path):
 
     assert hunk == {
         "start": 3,
+        "old_start": 3,
         "removed": ["    return os.system(user_input)"],
         "added": ["    return os.popen(user_input).read()"],
     }
@@ -200,7 +201,7 @@ def test_pure_deletion_hunk_sits_after_the_line_it_followed(git_repo: Path):
 
     [hunk] = get_diff_hunks(str(git_repo))[str(test_py.resolve())]
 
-    assert hunk == {"start": 2, "removed": ["    return os.system(user_input)"], "added": []}
+    assert hunk == {"start": 2, "old_start": 3, "removed": ["    return os.system(user_input)"], "added": []}
     assert hunk_lines(hunk) == [2]
 
 
@@ -216,7 +217,7 @@ def test_lines_that_look_like_file_headers_stay_in_their_hunk(git_repo: Path):
 
     [hunk] = get_diff_hunks(str(git_repo))[str(query.resolve())]
 
-    assert hunk == {"start": 1, "removed": ["-- only admins may run this"], "added": ["++ counter"]}
+    assert hunk == {"start": 1, "old_start": 1, "removed": ["-- only admins may run this"], "added": ["++ counter"]}
 
 
 def test_hunks_in_range_cuts_added_lines_but_keeps_removed_ones():
