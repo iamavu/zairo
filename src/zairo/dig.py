@@ -129,7 +129,7 @@ def _words(name: str) -> List[str]:
     """The words in a name, lowercase: MatchVars, match_vars -> match, vars."""
     return [w.lower() for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name) if len(w) >= 3]
 
-GROUNDING = """Base every finding on code you've actually seen, shown above or looked up; don't guess at code you haven't seen -- look it up, or leave it out. Report findings in the modified code: a flaw in code you looked up counts only if this change makes it newly reachable, and then belongs on the modified line that reaches it. A finding's 'line' is always a line of the modified code in the user message."""
+GROUNDING = """Base every finding on code you've actually seen, shown above or looked up; don't guess at this repository's code you haven't seen -- look it up, or leave it out. What standard libraries, frameworks and well-known packages do is fair to rely on -- how they parse, deserialize, escape, authenticate or pass input along. Report findings in the modified code: a flaw in code you looked up counts only if this change makes it newly reachable, and then belongs on the modified line that reaches it. A finding's 'line' is always a line of the modified code in the user message."""
 
 
 class Lookups:

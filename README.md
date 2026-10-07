@@ -108,6 +108,8 @@ For each changed function, the model gets:
 
 A changed file, or a class with methods in it, is reviewed only for its own changes: the ones outside every function, method, class or other definition in it. Their bodies are collapsed to one line each, since a changed one has its own review. A file or class whose changes are all inside those definitions isn't reviewed on its own.
 
+The instructions tell the model to compare what the code did before the change with what it does now, for every input an attacker controls: whatever the old code checked, rejected, overwrote or normalized, an attacker can now supply. They say who the attacker is: whoever sends input to the running software, or has less privilege than the code assumes, not the operator configuring it. A finding has to say who triggers it and what they gain, so hardening ideas don't count. The model may rely on what standard libraries and frameworks do, but not guess at this repo's code it wasn't shown. It writes each finding's trigger and description before rating it, and marks it as introduced only when the code before the change didn't already allow the same thing.
+
 ### Warm-up notes
 
 `zairo . --warm-up` writes a short note on each function and method in the repo as it is on disk, and nothing else: no diff, no scan, no reports. Scan as a second command, with the same `--output`:
