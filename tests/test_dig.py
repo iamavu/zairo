@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from typer.testing import CliRunner
 
 import zairo.llm_scanner as llm_scanner
@@ -122,6 +123,92 @@ def test_an_ambiguous_name_lists_the_candidates_and_file_name_picks_one(tmp_path
     assert "No function or class named 'nope' in the code graph." in unknown
 
 
+def test_an_ambiguous_name_means_the_symbol_under_review_or_one_in_its_file(tmp_path):
+    """A model reviewing get_invoice and asking for "check" means app.py's,
+    not another file's -- and asking for its own name means itself."""
+    repo = _repo(tmp_path)
+    views_py = Path(repo["root"]) / "views.py"
+    views_py.write_text("def check(request):\n    return True\n")
+    view = dict(repo["view"], file=str(views_py))
+    lookups = _lookups(repo, nodes=repo["nodes"] + [view])
+    get_invoice = repo["nodes"][1]
+
+    same_file, _ = lookups.run("code", {"symbol": "check"}, near=get_invoice)
+    itself, _ = lookups.run("code", {"symbol": "check"}, near=view)
+
+    assert "check (function, app.py:1-2):" in same_file
+    assert "def check(request):" in itself
+
+
+def _with_package(repo: dict) -> Lookups:
+    """A Go-style symbol: Handler in modules/caddyhttp/headers/headers.go,
+    whose id names its package and file with dots."""
+    path = Path(repo["root"]) / "modules" / "caddyhttp" / "headers" / "headers.go"
+    path.parent.mkdir(parents=True)
+    path.write_text("package headers\n\ntype Handler struct {\n\tRequest *HeaderOps\n}\n")
+    handler = {"id": "modules.caddyhttp.headers.headers:Handler", "name": "Handler", "kind": "struct",
+               "file": str(path), "start_line": 3, "end_line": 5, "status": "unchanged"}
+    matcher = {"id": "modules.caddyhttp.vars:VarsMatcher", "name": "VarsMatcher", "kind": "struct",
+               "file": str(path), "start_line": 1, "end_line": 1, "status": "unchanged"}
+    return _lookups(repo, nodes=repo["nodes"] + [handler, matcher])
+
+
+def test_a_package_written_with_dots_or_slashes_narrows_a_name(tmp_path):
+    lookups = _with_package(_repo(tmp_path))
+
+    for symbol in ("modules.caddyhttp.headers:Handler", "modules/caddyhttp/headers:Handler", "headers.Handler"):
+        found, _ = lookups.run("code", {"symbol": symbol})
+        assert "type Handler struct {" in found, symbol
+
+
+def test_a_name_nothing_has_gets_the_closest_ones(tmp_path):
+    lookups = _with_package(_repo(tmp_path))
+
+    in_package, _ = lookups.run("note", {"symbol": "modules.caddyhttp.headers:Handlr"})
+    anywhere, _ = lookups.run("note", {"symbol": "MatchVars"})
+
+    assert "Nothing named 'Handlr' in 'modules.caddyhttp.headers'; what's there:" in in_package
+    assert "- modules.caddyhttp.headers.headers:Handler: Handler (struct" in in_package
+    assert "The closest names:\n- modules.caddyhttp.vars:VarsMatcher: VarsMatcher (struct" in anywhere
+    assert "code() opens a file it found at a line" in anywhere
+
+
+def test_code_opens_a_file_at_a_line(tmp_path):
+    """So a search hit can be read: by the path search shows, path:line, or
+    the path written with dots."""
+    repo = _repo(tmp_path)
+    deep = Path(repo["root"]) / "pkg" / "deep" / "thing.go"
+    deep.parent.mkdir(parents=True)
+    deep.write_text("".join(f"line {i}\n" for i in range(1, 301)))
+    lookups = _lookups(repo)
+
+    at_line, lookup = lookups.run("code", {"symbol": "pkg/deep/thing.go:260"})
+    from_line, _ = lookups.run("code", {"symbol": "pkg.deep.thing.go", "from_line": 290})
+    top, _ = lookups.run("code", {"symbol": "settings.py"})
+    search, _ = lookups.run("search", {"text": "TENANT_CHECKS"})
+
+    assert "pkg/deep/thing.go, lines 240-300 of 300:" in at_line and "(lines 1-239 not shown)" in at_line
+    assert "  260 | line 260" in at_line
+    assert lookup == {"tool": "code", "input": "pkg/deep/thing.go:260"}
+    assert "pkg/deep/thing.go, lines 290-300 of 300:" in from_line
+    assert "settings.py, lines 1-1 of 1:" in top and "    1 | TENANT_CHECKS = True" in top
+    assert "code() with a path and line, as in path:line, shows the code around one." in search
+
+
+def test_code_does_not_open_a_file_through_a_symbolic_link(tmp_path):
+    repo = _repo(tmp_path)
+    secret = tmp_path / "outside.txt"
+    secret.write_text("TOKEN=hunter2\n")
+    try:
+        (Path(repo["root"]) / "leak.txt").symlink_to(secret)
+    except OSError:
+        pytest.skip("can't create a symbolic link here")
+
+    result, _ = _lookups(repo).run("code", {"symbol": "leak.txt"})
+
+    assert "is a symbolic link, which lookups don't follow" in result and "hunter2" not in result
+
+
 def test_bad_arguments_and_unknown_tools_are_answered_not_raised(tmp_path):
     lookups = _lookups(_repo(tmp_path))
 
@@ -174,6 +261,7 @@ def test_dig_looks_things_up_then_answers(monkeypatch, tmp_path):
     assert first.kwargs["tools"] == TOOLS
     system = first.kwargs["messages"][0]
     assert system["role"] == "system" and f"at most {MAX_LOOKUPS} lookups" in system["content"]
+    assert "Try a function's note before its code." in system["content"]
     results = [m for m in second.kwargs["messages"] if isinstance(m, dict) and m["role"] == "tool"]
     assert [m["tool_call_id"] for m in results] == ["call_0", "call_1"]
     assert "Checks the invoice's tenant" in results[0]["content"] and "TENANT_CHECKS = True" in results[1]["content"]
@@ -185,6 +273,33 @@ def test_dig_looks_things_up_then_answers(monkeypatch, tmp_path):
     assert (token_usage["lookups_made"], token_usage["requests"], token_usage["requests_without_usage"]) == (2, 2, 1)
     assert token_usage["total_tokens"] == 110
     assert token_usage["notes_used"] == 1  # check's, through a lookup
+
+
+def test_dig_offers_notes_only_when_there_are_some(monkeypatch, tmp_path):
+    """Without --warm-up notes, note() could only say there's none: a lookup
+    wasted, and the instructions said to try it first."""
+    fake_litellm = _scripted(monkeypatch, [_ask(("code", {"symbol": "check"})), _answer(_FINDING)])
+
+    _, token_usage = _dig_scan(_repo(tmp_path), cache_path=None)
+
+    first = fake_litellm.completion.call_args_list[0]
+    assert [t["function"]["name"] for t in first.kwargs["tools"]] == ["code", "callers", "callees", "search"]
+    system = first.kwargs["messages"][0]["content"]
+    assert "lookups" in system and "Try a function's note" not in system
+    assert token_usage["lookups"]["app:get_invoice"] == [{"tool": "code", "input": "check"}]
+
+
+def test_dig_resolves_a_name_from_the_symbol_under_review(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    views_py = Path(repo["root"]) / "views.py"
+    views_py.write_text("def check(request):\n    return True\n")
+    repo["nodes"].append(dict(repo["view"], file=str(views_py)))
+    fake_litellm = _scripted(monkeypatch, [_ask(("code", {"symbol": "check"})), _answer(_FINDING)])
+
+    _dig_scan(repo, cache_path=None)
+
+    [result] = [m for m in fake_litellm.completion.call_args_list[1].kwargs["messages"] if isinstance(m, dict) and m["role"] == "tool"]
+    assert "check (function, app.py:1-2):" in result["content"]
 
 
 def test_dig_stops_a_model_that_keeps_asking_past_its_lookups(monkeypatch, tmp_path):

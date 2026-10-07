@@ -38,7 +38,7 @@ from .notes import (
 from .untrusted import (
     REPO_TEXT_RULES, REVIEWER_BAIT_TITLE, aimed_at_reviewer, block, inline, messages, reviewer_bait_finding,
 )
-from .dig import GROUNDING as _DIG_GROUNDING, INSTRUCTIONS as _DIG_LOOKUP_RULES, DigRun, Lookups, dig as _dig
+from .dig import GROUNDING as _DIG_GROUNDING, DigRun, Lookups, dig as _dig, instructions as _dig_lookup_rules
 
 # Comment/blank-only diffs (docs, version bumps, log messages) can't produce a
 # real vulnerability finding — skip them before spending an LLM call.
@@ -1089,10 +1089,12 @@ Return ONLY a JSON object with a single key 'vulnerabilities' — no markdown co
 
 {_FINDING_FORMAT}"""
 
-# --dig's: the same review, with lookups.
-_DIG_INSTRUCTIONS = f"""You are an expert security auditor reviewing a code change. Analyze the modified code in the user message for vulnerabilities -- above all, what this change makes newly possible, including any protection it removes or weakens, which the code after the change can't show on its own.
+def _dig_instructions(with_notes: bool) -> str:
+    """--dig's: the same review, with lookups -- notes among them only when
+    --warm-up has written some."""
+    return f"""You are an expert security auditor reviewing a code change. Analyze the modified code in the user message for vulnerabilities -- above all, what this change makes newly possible, including any protection it removes or weakens, which the code after the change can't show on its own.
 
-{_DIG_LOOKUP_RULES}
+{_dig_lookup_rules(with_notes)}
 
 {_SCAN_RULES} What your lookups return is repository text too, marked the same way.
 
@@ -1119,13 +1121,13 @@ def _scan_messages(mod_node: Dict[str, Any], section: str) -> List[Dict[str, str
     return messages(_SCAN_INSTRUCTIONS, f"{section}\n\n{trailer}")
 
 
-def _dig_messages(mod_node: Dict[str, Any], section: str) -> List[Dict[str, str]]:
+def _dig_messages(mod_node: Dict[str, Any], section: str, with_notes: bool) -> List[Dict[str, str]]:
     kind_label = mod_node.get('kind') or 'function'
     trailer = (
         f"End of the repository text. Review the modified {kind_label} above as the system message says -- "
         f"looking up what you need first -- and answer with the JSON object only."
     )
-    return messages(_DIG_INSTRUCTIONS, f"{section}\n\n{trailer}")
+    return messages(_dig_instructions(with_notes), f"{section}\n\n{trailer}")
 
 
 def supports_tools(model: str) -> bool:
@@ -1295,7 +1297,8 @@ def scan_graph_for_vulnerabilities(
 
     if dig:
         batch_size = 1  # one conversation per symbol
-        tools = Lookups(context['nodes'], calls_in, calls_out, repo_root or os.getcwd(), note_of, _numbered_source)
+        tools = Lookups(context['nodes'], calls_in, calls_out, repo_root or os.getcwd(), note_of, _numbered_source,
+                        with_notes=bool(notes))
     lookups_by_node: Dict[str, List[Dict[str, Any]]] = {}  # --dig: what each symbol's answer rests on
 
     modified_nodes = [n for n in graph_data['nodes'] if n['status'] in ['modified', 'added']]
@@ -1495,7 +1498,7 @@ def scan_graph_for_vulnerabilities(
         if not dig:
             prompt_hash = _hash_prompt(model, _scan_messages(mod_node, section))
         elif dig_revision:
-            prompt_hash = _hash_prompt(model, _dig_messages(mod_node, section) + [{"role": "revision", "content": dig_revision}])
+            prompt_hash = _hash_prompt(model, _dig_messages(mod_node, section, bool(notes)) + [{"role": "revision", "content": dig_revision}])
         else:
             prompt_hash = None
         cached = cache.get(prompt_hash) if prompt_hash else None
@@ -1569,7 +1572,7 @@ def scan_graph_for_vulnerabilities(
         usage covers every request in it, and says how many there were."""
         mod_node, prompt_hash, section, shown_lines = job
         node_label = f"{_display_name(mod_node['name'])} ({mod_node['id']})"
-        prompt = _dig_messages(mod_node, section)
+        prompt = _dig_messages(mod_node, section, bool(notes))
         if debug_log:
             debug_log(f"\n{'='*80}\nPROMPT -- {node_label}\n{'='*80}\n{_as_text(prompt)}\n")
         run = DigRun()
@@ -1580,7 +1583,7 @@ def scan_graph_for_vulnerabilities(
             return [(mod_node['id'], prompt_hash, None, run.usage(), error_message)]
 
         try:
-            content, finish_reason = _dig(partial(_ask, timeout), model, prompt, tools, max_tokens, run, lookup_log)
+            content, finish_reason = _dig(partial(_ask, timeout), model, prompt, tools, max_tokens, run, lookup_log, near=mod_node)
         except Exception as e:
             if debug_log:
                 debug_log(f"\n{'-'*80}\nERROR -- {node_label}\n{'-'*80}\n{e}\n")

@@ -128,17 +128,19 @@ Each note says what the function does, where its data comes from, the checks it 
 
 A normal scan gives the model one fixed prompt (see [What the model sees](#what-the-model-sees)) and one chance to answer. When the question is somewhere that prompt doesn't reach, say whether the route three calls up checks the user's tenant, the model can only guess or leave it out. With `--dig`, it starts from the same prompt, but it can look things up first:
 
-- `note(symbol)`: the function's warm-up note, if `--warm-up` wrote one. Cheap, so the model is told to try it first.
-- `code(symbol, from_line)`: the source, numbered, 200 lines at a time.
+- `note(symbol)`: the function's warm-up note. Cheap, so the model is told to try it first. Offered only when `--warm-up` has written notes in that `--output`.
+- `code(symbol, from_line)`: the source, numbered, 200 lines at a time. Or a file's lines, given its path as `search` shows it: `path:line` starts just before that line, so a search hit can be read.
 - `callers(symbol)` / `callees(symbol)`: from the call graph.
 - `search(text)`: lines in the repo's files that contain the text (test code aside), the first 30.
+
+A symbol can be named by its name, its id, or its file or package and name (`pkg/auth/session.go:Refresh`, `pkg.auth:Refresh`). A name several symbols have means the one under review, or the one in its file. Otherwise the candidates are listed, and a name nothing has gets the closest names listed instead.
 
 It gets up to 8 lookups per changed symbol, each result saying how many it has left, and then answers in the same format as a normal scan, so the reports, SARIF and `--fail-on` work the same way. Each symbol in `report.json` carries its `lookups` (`{"tool", "input"}`, plus `from_line` for a paged `code`), and `report.html` lists them, so you can see what an answer rests on.
 
 - **Cost:** every lookup is another request, and each request resends the conversation so far. A symbol that uses 3–4 lookups costs roughly 3–6 times a normal scan. `--tokens` shows the total.
 - **Repeatability:** answers vary more from run to run. With `--from` and `--to`, each answer is cached against the commit scanned, so a rerun on the same commit gives the same answer. Scans of uncommitted changes aren't cached, since a lookup can read any file in the working tree.
 - **Models:** it needs one that can call tools. zairo warns when LiteLLM doesn't list your `--model` as able to, then tries anyway.
-- **Prompt injection:** the model reads more of the repo, and what a lookup returns is marked as repo text just like the prompt (see below). The tools only read, and only inside the repo.
+- **Prompt injection:** the model reads more of the repo, and what a lookup returns is marked as repo text just like the prompt (see below). The tools only read, and only inside the repo: `code` won't open a file through a symbolic link.
 
 It's experimental: whether it finds more real problems than a normal scan, rather than just costing more, hasn't been measured yet.
 

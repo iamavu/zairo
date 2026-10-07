@@ -8,6 +8,7 @@ JSON as a normal scan. A lookup's result is repo text, so it comes back
 in tagged blocks like the prompt's (see untrusted.py)."""
 import json
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -37,9 +38,12 @@ TOOLS = [
     }},
     {"type": "function", "function": {
         "name": "code",
-        "description": f"A function's or class's source, numbered, up to {_CODE_LINES} lines from from_line (default: its first line).",
+        "description": (
+            f"A function's or class's source, numbered, up to {_CODE_LINES} lines from from_line (default: its first "
+            "line). Or a file's: give its path as search() shows it, with from_line or as path:line to start near a line."
+        ),
         "parameters": {"type": "object", "properties": {
-            "symbol": _SYMBOL,
+            "symbol": dict(_SYMBOL, description=_SYMBOL["description"] + " Or a file's path."),
             "from_line": {"type": "integer", "description": "The file line to start from, for a long one."},
         }, "required": ["symbol"]},
     }},
@@ -60,7 +64,47 @@ TOOLS = [
     }},
 ]
 
-INSTRUCTIONS = f"""Before you answer, you can look things up with the tools you have -- at most {MAX_LOOKUPS} lookups for this review, and each result says how many you have left. Use them to settle what the code shown can't: whether a check happens before the changed code is reached, what a function it calls really does with its input, where a value or setting comes from. Try a function's note before its code. Don't look up what you don't need, and answer as soon as you can."""
+def tools(with_notes: bool) -> List[Dict[str, Any]]:
+    """The tools a conversation is offered: note() only when --warm-up has
+    written notes -- or the model spends lookups finding out there are none."""
+    return [t for t in TOOLS if with_notes or t["function"]["name"] != "note"]
+
+
+def instructions(with_notes: bool) -> str:
+    """What the model is told about its lookups -- to try a note first only
+    when there are notes."""
+    notes = " Try a function's note before its code." if with_notes else ""
+    return (
+        f"Before you answer, you can look things up with the tools you have -- at most {MAX_LOOKUPS} lookups for this "
+        "review, and each result says how many you have left. Use them to settle what the code shown can't: whether a "
+        "check happens before the changed code is reached, what a function it calls really does with its input, where a "
+        f"value or setting comes from.{notes} Don't look up what you don't need, and answer as soon as you can."
+    )
+
+
+# A file extension Trailmark parses, left off a path a model wrote as a
+# package or module ("pkg/auth/session.go" or "pkg.auth.session").
+_CODE_EXTENSION = re.compile(
+    r"\.(?:py|pyi|js|jsx|mjs|cjs|ts|tsx|go|rs|java|kt|kts|rb|php|c|h|cc|cpp|cxx|hpp|hh|hxx|cs|swift|scala|dart|sol|"
+    r"m|mm|hs|erl|lua|sql|move|cairo|circom|tact|fc|func|sw|rego|proto|thrift|graphql|gql)$",
+    re.I,
+)
+_SUGGESTED = 15  # names listed when a lookup names nothing
+_AROUND = 20  # lines shown before the line a file is opened at
+
+
+def _dotted(path: str) -> str:
+    """A path or package written with slashes or dots, as dots."""
+    return _CODE_EXTENSION.sub("", path.strip()).replace("\\", ".").replace("/", ".").strip(".")
+
+
+def _named(n: Dict[str, Any], name: str) -> bool:
+    return n['name'] == name or n['id'].endswith(("." + name, ":" + name))
+
+
+def _words(name: str) -> List[str]:
+    """The words in a name, lowercase: MatchVars, match_vars -> match, vars."""
+    return [w.lower() for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name) if len(w) >= 3]
 
 GROUNDING = """Base every finding on code you've actually seen, shown above or looked up; don't guess at code you haven't seen -- look it up, or leave it out. Report findings in the modified code: a flaw in code you looked up counts only if this change makes it newly reachable, and then belongs on the modified line that reaches it. A finding's 'line' is always a line of the modified code in the user message."""
 
@@ -72,8 +116,9 @@ class Lookups:
     def __init__(
         self, nodes: List[Dict[str, Any]], calls_in: Dict[str, List[str]], calls_out: Dict[str, List[str]],
         root: str, note_of: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]],
-        numbered: Callable[[str, int, int], Tuple[List[str], List[int]]],
+        numbered: Callable[[str, int, int], Tuple[List[str], List[int]]], with_notes: bool = True,
     ):
+        self.tools = tools(with_notes)
         self._by_id = {n['id']: n for n in nodes}
         # Deleted symbols' lines are where they used to be; proxies have no source.
         self._live = [n for n in nodes if n.get('file') and n.get('kind') != 'proxy' and n.get('status') != 'deleted']
@@ -85,9 +130,11 @@ class Lookups:
         self._files: Optional[List[str]] = None
         self._files_lock = threading.Lock()
 
-    def run(self, name: str, arguments: Any) -> Tuple[str, Dict[str, Any]]:
+    def run(self, name: str, arguments: Any, near: Optional[Dict[str, Any]] = None) -> Tuple[str, Dict[str, Any]]:
         """A tool call's result, sealed, and the lookup as the reports record
-        it: {"tool", "input"[, "from_line"]}."""
+        it: {"tool", "input"[, "from_line"]}. `near` is the symbol under
+        review: a name several symbols have means that one, or one in its
+        file, first."""
         try:
             args = json.loads(arguments) if isinstance(arguments, str) else dict(arguments or {})
             if not isinstance(args, dict):
@@ -96,16 +143,16 @@ class Lookups:
             return seal(f"Couldn't read the arguments ({e}). Pass a JSON object."), {"tool": str(name), "input": str(arguments)[:200]}
         lookup = {"tool": str(name), "input": str(args.get("symbol", args.get("text", "")))[:200]}
         if name == "note":
-            text = self._note(args.get("symbol", ""))
+            text = self._note(args.get("symbol", ""), near)
         elif name == "code":
             from_line = args.get("from_line")
             if isinstance(from_line, (int, float)) and not isinstance(from_line, bool):
                 lookup["from_line"] = int(from_line)
-            text = self._code(args.get("symbol", ""), lookup.get("from_line"))
+            text = self._code(args.get("symbol", ""), lookup.get("from_line"), near)
         elif name == "callers":
-            text = self._related(args.get("symbol", ""), self._calls_in, "is called by")
+            text = self._related(args.get("symbol", ""), self._calls_in, "is called by", near)
         elif name == "callees":
-            text = self._related(args.get("symbol", ""), self._calls_out, "calls")
+            text = self._related(args.get("symbol", ""), self._calls_out, "calls", near)
         elif name == "search":
             text = self._search(args.get("text", ""))
         else:
@@ -121,34 +168,81 @@ class Lookups:
     def _label(self, n: Dict[str, Any]) -> str:
         return f"{inline(n['name'])} ({n.get('kind')}, {inline(self._rel(n['file']))}:{n.get('start_line')}-{n.get('end_line')})"
 
-    def _resolve(self, symbol: Any) -> Tuple[Optional[Dict[str, Any]], str]:
+    def _resolve(self, symbol: Any, near: Optional[Dict[str, Any]] = None) -> Tuple[Optional[Dict[str, Any]], str]:
         """The one symbol `symbol` names -- or None, and what to do instead.
         A leading "file:" is dropped: models have written the file-and-name
-        form as "file:<path>:<name>"."""
+        form as "file:<path>:<name>". The place before a name -- a file, or
+        a package or module, with slashes or dots, as in
+        pkg/auth/session.go:Refresh or pkg.auth:Refresh -- narrows it down.
+        A name several symbols have means the one under review (`near`), or
+        the only one in its file; one nothing has gets the closest listed."""
         symbol = str(symbol).strip().removeprefix("file:")
         if symbol in self._live_ids:
             return self._by_id[symbol], ""
 
-        def named(n: Dict[str, Any], name: str) -> bool:
-            return n['name'] == name or n['id'].endswith(("." + name, ":" + name))
-
-        matches = [n for n in self._live if named(n, symbol)]
-        path, _, name = symbol.rpartition(":")
-        if not matches and path:
-            matches = [n for n in self._live if named(n, name) and self._rel(n['file']).endswith(path)]
+        matches = [n for n in self._live if _named(n, symbol)]
+        place, name = "", symbol  # where it says to look, if anywhere, and for what
+        if not matches:
+            for separator in (":", "."):
+                head, _, tail = symbol.rpartition(separator)
+                if not (head and tail):
+                    continue
+                found = [n for n in self._live if _named(n, tail) and self._within(n, head)]
+                if found or not place:
+                    place, name = head, tail
+                if found:
+                    matches = found
+                    break
+        if len(matches) > 1 and near is not None:
+            if near['id'] in {n['id'] for n in matches}:
+                return self._by_id[near['id']], ""
+            here = [n for n in matches if n['file'] == near.get('file')]
+            if len(here) == 1:
+                return here[0], ""
+            matches.sort(key=lambda n: n['file'] != near.get('file'))  # its file's first
         if len(matches) == 1:
             return matches[0], ""
         if not matches:
-            return None, (
-                f"No function or class named {inline(symbol)!r} in the code graph. "
-                f"search() finds text anywhere in the repository."
-            )
+            return None, self._not_found(symbol, place, name)
         listed = "\n".join(f"- {inline(n['id'], limit=None)}: {self._label(n)}" for n in matches[:_LISTED])
         more = f"\n- ... and {len(matches) - _LISTED} more" if len(matches) > _LISTED else ""
         return None, f"{len(matches)} symbols match {inline(symbol)!r}. Ask again with one of their ids:\n{listed}{more}"
 
-    def _note(self, symbol: Any) -> str:
-        n, problem = self._resolve(symbol)
+    def _within(self, n: Dict[str, Any], place: str) -> bool:
+        """Whether `n` is in `place`: its file, or a package or module around
+        it, however it's written (see _dotted)."""
+        want = _dotted(place)
+        if not want:
+            return False
+        module = n['id'].rpartition(":")[0]
+        return any(have and f".{want}." in f".{have}." for have in (module, _dotted(self._rel(n['file']))))
+
+    def _not_found(self, symbol: str, place: str, name: str) -> str:
+        """What a lookup of a name nothing has gets: what's in the place it
+        named, or failing that, the names that share a word with it."""
+        words = _words(name)
+
+        def shared(n: Dict[str, Any]) -> int:
+            # A method by its type's name too: VarsMatcher.Match, not Match.
+            label = (n['id'].split(":", 1)[1] if ":" in n['id'] else n['name']).lower()
+            return sum(word in label for word in words)
+
+        there = [n for n in self._live if place and self._within(n, place)]
+        if there:
+            heading = f" Nothing named {inline(name)!r} in {inline(place)!r}; what's there:"
+        else:
+            there = [n for n in self._live if shared(n)]
+            heading = " The closest names:"
+        there.sort(key=lambda n: (-shared(n), n['id']))
+        text = f"No function or class named {inline(symbol)!r} in the code graph."
+        if there:
+            text += heading + "\n" + "\n".join(f"- {inline(n['id'], limit=None)}: {self._label(n)}" for n in there[:_SUGGESTED])
+            if len(there) > _SUGGESTED:
+                text += f"\n- ... and {len(there) - _SUGGESTED} more"
+        return text + "\nsearch() finds text anywhere in the repository, and code() opens a file it found at a line."
+
+    def _note(self, symbol: Any, near: Optional[Dict[str, Any]] = None) -> str:
+        n, problem = self._resolve(symbol, near)
         if n is None:
             return problem
         note = self._note_of(n)
@@ -156,10 +250,11 @@ class Lookups:
             return f"No warm-up note on {self._label(n)}. code() shows its source."
         return f"Note on {self._label(n)}, machine-written from its code:\n{block(format_note(note))}"
 
-    def _code(self, symbol: Any, from_line: Optional[int]) -> str:
-        n, problem = self._resolve(symbol)
+    def _code(self, symbol: Any, from_line: Optional[int], near: Optional[Dict[str, Any]] = None) -> str:
+        n, problem = self._resolve(symbol, near)
         if n is None:
-            return problem
+            found = self._file(symbol)
+            return self._file_code(*found, from_line) if found else problem
         start, end = n['start_line'], n['end_line']
         lo = min(max(start, from_line), end) if from_line is not None else start
         hi = min(end, lo + _CODE_LINES - 1)
@@ -174,8 +269,55 @@ class Lookups:
             parts.append(f"(lines {hi + 1}-{end} not shown: code() with from_line={hi + 1} shows more)")
         return "\n".join(parts)
 
-    def _related(self, symbol: Any, edges: Dict[str, List[str]], relation: str) -> str:
-        n, problem = self._resolve(symbol)
+    def _file(self, text: Any) -> Optional[Tuple[str, Optional[int]]]:
+        """The file `text` names -- one search() can find in, as it shows the
+        path, or written with dots for slashes -- and the line it names, as
+        in path:line, if any."""
+        text = str(text).strip().removeprefix("file:").removeprefix("./")
+        line = None
+        match = re.fullmatch(r"(.+?):(\d+)", text)
+        if match:
+            text, line = match.group(1), int(match.group(2))
+        files = self._tracked()
+        if text in files:
+            return text, line
+        extension = os.path.splitext(text)[1]
+        if not extension:
+            return None
+        want = _dotted(text)
+        found = [f for f in files if os.path.splitext(f)[1] == extension and f".{_dotted(f)}".endswith(f".{want}")]
+        return (found[0], line) if len(found) == 1 else None
+
+    def _file_code(self, rel: str, line: Optional[int], from_line: Optional[int]) -> str:
+        """A file's lines, numbered, up to _CODE_LINES of them: from
+        from_line, or a little before `line`, or its top. Not through a
+        symbolic link, which can point outside the repository."""
+        path = os.path.join(self._root, rel)
+        try:
+            if os.path.islink(path):
+                return f"{inline(rel)} is a symbolic link, which lookups don't follow."
+            if os.path.getsize(path) > _SEARCH_MAX_FILE_BYTES:
+                return f"{inline(rel)} is too big to show."
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return f"{inline(rel)} couldn't be read."
+        if not lines:
+            return f"{inline(rel)} is empty."
+        total = len(lines)
+        lo = from_line if from_line is not None else (line - _AROUND if line is not None else 1)
+        lo = min(max(1, lo), total)
+        hi = min(total, lo + _CODE_LINES - 1)
+        parts = [f"{inline(rel)}, lines {lo}-{hi} of {total}:"]
+        if lo > 1:
+            parts.append(f"(lines 1-{lo - 1} not shown)")
+        parts.append(block("\n".join(f"{n:>{_GUTTER}} | {text}" for n, text in zip(range(lo, hi + 1), lines[lo - 1:hi]))))
+        if hi < total:
+            parts.append(f"(lines {hi + 1}-{total} not shown: code() with from_line={hi + 1} shows more)")
+        return "\n".join(parts)
+
+    def _related(self, symbol: Any, edges: Dict[str, List[str]], relation: str, near: Optional[Dict[str, Any]] = None) -> str:
+        n, problem = self._resolve(symbol, near)
         if n is None:
             return problem
         rows = []
@@ -232,7 +374,10 @@ class Lookups:
         if not found:
             return f"No line in the repository contains {inline(text)!r}."
         heading = f"Lines containing {inline(text)!r}" + (f" (the first {_SEARCH_MATCHES})" if cut else "") + ":"
-        return heading + "".join(f"\nIn {inline(rel)}:\n{block(chr(10).join(rows))}" for rel, rows in found.items())
+        return (
+            heading + "".join(f"\nIn {inline(rel)}:\n{block(chr(10).join(rows))}" for rel, rows in found.items())
+            + "\ncode() with a path and line, as in path:line, shows the code around one."
+        )
 
 
 @dataclass
@@ -256,16 +401,17 @@ class DigRun:
 
 def dig(
     completion: Callable[..., Any], model: str, messages: List[Dict[str, Any]], lookups: Lookups, max_tokens: int,
-    run: DigRun, log: Callable[[str], None] = lambda text: None,
+    run: DigRun, log: Callable[[str], None] = lambda text: None, near: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, str]:
     """Runs one symbol's conversation until the model answers. Returns its
     answer and finish reason -- "lookups_exhausted" if it kept asking for
     lookups after it had used them all. Raises what `completion` raises.
-    `log` gets each lookup and its result, for --debug."""
+    `log` gets each lookup and its result, for --debug; `near` is the
+    symbol under review (see Lookups.run)."""
     conversation = list(messages)
     turns_past_budget = 0
     while True:
-        response = completion(model=model, messages=conversation, tools=TOOLS, max_tokens=max_tokens)
+        response = completion(model=model, messages=conversation, tools=lookups.tools, max_tokens=max_tokens)
         run.requests += 1
         usage = getattr(response, 'usage', None)
         if usage is None:
@@ -288,7 +434,7 @@ def dig(
         for call in calls:
             name = call.function.name
             if len(run.lookups) < MAX_LOOKUPS:
-                result, lookup = lookups.run(name, call.function.arguments)
+                result, lookup = lookups.run(name, call.function.arguments, near)
                 run.lookups.append(lookup)
                 left = MAX_LOOKUPS - len(run.lookups)
                 if left:
