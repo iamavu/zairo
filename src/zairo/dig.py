@@ -102,6 +102,29 @@ def _named(n: Dict[str, Any], name: str) -> bool:
     return n['name'] == name or n['id'].endswith(("." + name, ":" + name))
 
 
+# A word that declares something in one of the languages Trailmark parses.
+_DECLARES = re.compile(
+    r"\b(?:type|func|function|class|def|interface|struct|enum|trait|impl|fn|const|var|let|val|object|record|"
+    r"typedef|define|module|namespace|contract|library)\b"
+)
+
+
+def _defined_at(lines: List[str], name: str) -> Optional[int]:
+    """The number of the line that defines `name`: the first naming it as a
+    whole word after a declaring word, or failing that, the first naming it
+    at all."""
+    word = re.compile(rf"(?<![\w$]){re.escape(name)}(?![\w$])")
+    first = None
+    for number, text in enumerate(lines, 1):
+        found = word.search(text)
+        if not found:
+            continue
+        if _DECLARES.search(text[:found.start()]):
+            return number
+        first = first or number
+    return first
+
+
 def _words(name: str) -> List[str]:
     """The words in a name, lowercase: MatchVars, match_vars -> match, vars."""
     return [w.lower() for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name) if len(w) >= 3]
@@ -254,7 +277,7 @@ class Lookups:
         n, problem = self._resolve(symbol, near)
         if n is None:
             found = self._file(symbol)
-            return self._file_code(*found, from_line) if found else problem
+            return self._file_code(*found, from_line=from_line) if found else problem
         start, end = n['start_line'], n['end_line']
         lo = min(max(start, from_line), end) if from_line is not None else start
         hi = min(end, lo + _CODE_LINES - 1)
@@ -269,29 +292,38 @@ class Lookups:
             parts.append(f"(lines {hi + 1}-{end} not shown: code() with from_line={hi + 1} shows more)")
         return "\n".join(parts)
 
-    def _file(self, text: Any) -> Optional[Tuple[str, Optional[int]]]:
+    def _file(self, text: Any) -> Optional[Tuple[str, Optional[int], str]]:
         """The file `text` names -- one search() can find in, as it shows the
-        path, or written with dots for slashes -- and the line it names, as
-        in path:line, if any."""
+        path, or written with dots for slashes -- and what follows a ":"
+        after it: a line (path:line), or a name the code graph has no symbol
+        for (path:Name -- a type alias, a constant, a map type)."""
         text = str(text).strip().removeprefix("file:").removeprefix("./")
-        line = None
-        match = re.fullmatch(r"(.+?):(\d+)", text)
-        if match:
-            text, line = match.group(1), int(match.group(2))
+        tries = [(text, None, "")]
+        head, colon, tail = text.rpartition(":")
+        if colon and head and tail:
+            tries.insert(0, (head, int(tail), "") if tail.isdigit() else (head, None, tail))
+        for path, line, name in tries:
+            rel = self._tracked_file(path)
+            if rel:
+                return rel, line, name
+        return None
+
+    def _tracked_file(self, path: str) -> Optional[str]:
         files = self._tracked()
-        if text in files:
-            return text, line
-        extension = os.path.splitext(text)[1]
+        if path in files:
+            return path
+        extension = os.path.splitext(path)[1]
         if not extension:
             return None
-        want = _dotted(text)
+        want = _dotted(path)
         found = [f for f in files if os.path.splitext(f)[1] == extension and f".{_dotted(f)}".endswith(f".{want}")]
-        return (found[0], line) if len(found) == 1 else None
+        return found[0] if len(found) == 1 else None
 
-    def _file_code(self, rel: str, line: Optional[int], from_line: Optional[int]) -> str:
+    def _file_code(self, rel: str, line: Optional[int], name: str, from_line: Optional[int]) -> str:
         """A file's lines, numbered, up to _CODE_LINES of them: from
-        from_line, or a little before `line`, or its top. Not through a
-        symbolic link, which can point outside the repository."""
+        from_line, or a little before `line`, or before where `name` is
+        defined (or else first appears), or its top. Not through a symbolic
+        link, which can point outside the repository."""
         path = os.path.join(self._root, rel)
         try:
             if os.path.islink(path):
@@ -304,11 +336,16 @@ class Lookups:
             return f"{inline(rel)} couldn't be read."
         if not lines:
             return f"{inline(rel)} is empty."
+        missing = ""
+        if name and line is None:
+            line = _defined_at(lines, name)
+            if line is None:
+                missing = f"({inline(name)!r} doesn't appear in it.)"
         total = len(lines)
         lo = from_line if from_line is not None else (line - _AROUND if line is not None else 1)
         lo = min(max(1, lo), total)
         hi = min(total, lo + _CODE_LINES - 1)
-        parts = [f"{inline(rel)}, lines {lo}-{hi} of {total}:"]
+        parts = [f"{inline(rel)}, lines {lo}-{hi} of {total}:"] + ([missing] if missing else [])
         if lo > 1:
             parts.append(f"(lines 1-{lo - 1} not shown)")
         parts.append(block("\n".join(f"{n:>{_GUTTER}} | {text}" for n, text in zip(range(lo, hi + 1), lines[lo - 1:hi]))))

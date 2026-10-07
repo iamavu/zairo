@@ -129,7 +129,7 @@ Each note says what the function does, where its data comes from, the checks it 
 A normal scan gives the model one fixed prompt (see [What the model sees](#what-the-model-sees)) and one chance to answer. When the question is somewhere that prompt doesn't reach, say whether the route three calls up checks the user's tenant, the model can only guess or leave it out. With `--dig`, it starts from the same prompt, but it can look things up first:
 
 - `note(symbol)`: the function's warm-up note. Cheap, so the model is told to try it first. Offered only when `--warm-up` has written notes in that `--output`.
-- `code(symbol, from_line)`: the source, numbered, 200 lines at a time. Or a file's lines, given its path as `search` shows it: `path:line` starts just before that line, so a search hit can be read.
+- `code(symbol, from_line)`: the source, numbered, 200 lines at a time. Or a file's lines, given its path as `search` shows it: `path:line` starts just before that line, so a search hit can be read, and `path:Name` just before where `Name` is defined, for a name the call graph has no symbol for (a constant, a type alias).
 - `callers(symbol)` / `callees(symbol)`: from the call graph.
 - `search(text)`: lines in the repo's files that contain the text (test code aside), the first 30.
 

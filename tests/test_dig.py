@@ -195,6 +195,27 @@ def test_code_opens_a_file_at_a_line(tmp_path):
     assert "code() with a path and line, as in path:line, shows the code around one." in search
 
 
+def test_code_opens_a_file_where_a_name_the_graph_lacks_is_defined(tmp_path):
+    """A map type, a constant, an alias: not in the code graph, but the
+    model asking for vars.go:VarsMatcher wants the file there."""
+    repo = _repo(tmp_path)
+    vars_go = Path(repo["root"]) / "pkg" / "vars.go"
+    vars_go.parent.mkdir(parents=True)
+    vars_go.write_text(
+        "package vars\n\n// VarsMatcher matches vars.\n" + "\n" * 50
+        + "type VarsMatcher map[string][]string\n\nfunc (m VarsMatcher) Match() bool { return true }\n"
+    )
+    lookups = _lookups(repo)
+
+    defined, _ = lookups.run("code", {"symbol": "pkg/vars.go:VarsMatcher"})
+    asked_from, _ = lookups.run("code", {"symbol": "pkg/vars.go:VarsMatcher", "from_line": 1})
+    absent, _ = lookups.run("code", {"symbol": "pkg/vars.go:Nothing"})
+
+    assert "pkg/vars.go, lines 34-56 of 56:" in defined and "   54 | type VarsMatcher map[string][]string" in defined
+    assert "pkg/vars.go, lines 1-56 of 56:" in asked_from
+    assert "pkg/vars.go, lines 1-56 of 56:\n('Nothing' doesn't appear in it.)" in absent
+
+
 def test_code_does_not_open_a_file_through_a_symbolic_link(tmp_path):
     repo = _repo(tmp_path)
     secret = tmp_path / "outside.txt"
