@@ -417,3 +417,14 @@ def test_dig_counts_every_request_in_a_conversation(monkeypatch, tmp_path):
     assert (round(token_usage["cost"], 6), token_usage["requests_without_cost"]) == (0.003, 0)
     spent = token_usage["by_node"]["app:get_invoice"]
     assert (spent["requests"], spent["total_tokens"], round(spent["cost"], 6)) == (2, 110, 0.003)
+
+
+def test_dig_logs_the_reasoning_behind_each_request(monkeypatch, tmp_path):
+    asked = _ask(("search", {"text": "TENANT_CHECKS"}))
+    asked.choices[0].message.reasoning_content = "Need to see where TENANT_CHECKS is set."
+    _scripted(monkeypatch, [asked, _answer(_FINDING)])
+    logged = []
+
+    _dig_scan(_repo(tmp_path), cache_path=None, debug_log=logged.append)
+
+    assert "request 1, REASONING:\nNeed to see where TENANT_CHECKS is set." in "".join(logged)

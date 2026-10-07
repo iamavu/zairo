@@ -13,7 +13,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ._util import is_test_file
+from ._util import is_test_file, reasoning_of
 from .git_utils import list_files
 from .notes import format_note
 from .untrusted import block, inline, seal
@@ -467,6 +467,9 @@ def dig(
             run.requests_without_cost += 1
         else:
             run.cost += cost
+        reasoning = reasoning_of(response)
+        if reasoning:
+            log(f"request {run.requests}, {reasoning}")
         choice = response.choices[0]
         message = choice.message
         calls = getattr(message, 'tool_calls', None) or []

@@ -41,6 +41,26 @@ def is_complete(failed_nodes: Optional[Dict[str, str]], problems: Optional[List[
     return not failed_nodes and not any(p["level"] == "error" for p in problems or [])
 
 
+def reasoning_of(response: Any) -> str:
+    """What a model response says of its reasoning, for debug.log: the
+    reasoning itself, when the provider sends it (LiteLLM puts it in the
+    message's reasoning_content), and how many tokens went into it, which
+    providers that keep it hidden report too. Empty when there's neither --
+    only what came back, never asked for: --debug mustn't change a scan."""
+    try:
+        text = getattr(response.choices[0].message, 'reasoning_content', None)
+    except (AttributeError, IndexError, TypeError):
+        text = None
+    text = text.strip() if isinstance(text, str) else ""
+    details = getattr(getattr(response, 'usage', None), 'completion_tokens_details', None)
+    tokens = getattr(details, 'reasoning_tokens', None)
+    tokens = tokens if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens > 0 else None
+    if not text and tokens is None:
+        return ""
+    heading = f"REASONING ({tokens:,} tokens)" if tokens is not None else "REASONING"
+    return f"{heading}:\n{text}" if text else f"{heading}: not sent by the provider"
+
+
 def display_name(name: Any, limit: int = 60) -> str:
     """Collapses a node name to one short line for log display. Some graph
     nodes (e.g. Trailmark misparsing a chained expression like

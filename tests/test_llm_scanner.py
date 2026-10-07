@@ -1765,3 +1765,44 @@ def test_warm_up_counts_what_its_requests_cost(monkeypatch, tmp_path):
     stats = llm_scanner.write_notes(_functions(tmp_path, 12), "cheap-model", str(tmp_path / "notes.json"))
 
     assert (stats["requests"], round(stats["cost"], 6), stats["requests_without_cost"]) == (2, 0.006, 0)
+
+
+def _reasoning_response(monkeypatch, reasoning, reasoning_tokens):
+    fake_litellm = _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+    response = fake_litellm.completion.return_value
+    response.choices[0].message.reasoning_content = reasoning
+    response.usage = MagicMock(prompt_tokens=10, completion_tokens=50, total_tokens=60)
+    response.usage.completion_tokens_details.reasoning_tokens = reasoning_tokens
+    return fake_litellm
+
+
+def _debug_log_of_a_scan() -> str:
+    logged = []
+    llm_scanner.scan_graph_for_vulnerabilities(
+        {"nodes": [_node("n1", "fn_one")], "edges": []}, "fake-model", cache_path=None, debug_log=logged.append,
+    )
+    return "".join(logged)
+
+
+def test_debug_log_shows_the_models_reasoning_when_it_sends_some(monkeypatch):
+    _reasoning_response(monkeypatch, "The removed check guarded tenant access.", 42)
+
+    assert (
+        'REASONING (42 tokens):\nThe removed check guarded tenant access.\n\nANSWER:\n{"vulnerabilities": []}'
+        in _debug_log_of_a_scan()
+    )
+
+
+def test_debug_log_says_when_the_reasoning_was_kept_hidden(monkeypatch):
+    """Some providers report only how much the model reasoned."""
+    _reasoning_response(monkeypatch, None, 1234)
+
+    assert "REASONING (1,234 tokens): not sent by the provider\n\nANSWER:\n" in _debug_log_of_a_scan()
+
+
+def test_debug_log_of_a_model_that_doesnt_reason_is_just_its_answer(monkeypatch):
+    _mock_litellm_response(monkeypatch, '{"vulnerabilities": []}')
+
+    log = _debug_log_of_a_scan()
+
+    assert "REASONING" not in log and "ANSWER:" not in log and '{"vulnerabilities": []}' in log

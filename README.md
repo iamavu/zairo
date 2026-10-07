@@ -66,7 +66,7 @@ zairo backend frontend infra --from main --fail-on high -o zairo_multi_out
 - `--output`, `-o` *(`zairo_out`)*: where the reports go. Multi-repo mode: each repo gets its own `<output>/<repo-slug>/`, plus a combined `rollup.*` here too.
 - `--fail-on` *(none)*: exit with status 1 if the change introduces a finding at or above this severity (`low`/`medium`/`high`/`critical`), meaning one marked `introduced_by_change: true`. Findings that were already there are still reported, just not gated on. An incomplete run exits with status 3 whether or not this is set. Errors if combined with `--graph-only` (nothing to gate on). Multi-repo mode: checked across all repos combined. See [CI / PR gating](#ci--pr-gating).
 - `--verbose`, `-v` *(off)*: print what's happening step by step (git commands, worktree setup, per-symbol scan progress).
-- `--debug`, `-vv` *(off)*: everything `--verbose` prints, plus the exact prompt sent to the LLM and its raw response for every symbol -- written to `<output>/debug.log` (per-repo in multi-repo mode), since it's too much to print to the console.
+- `--debug`, `-vv` *(off)*: everything `--verbose` prints, plus the exact prompt sent to the LLM and its raw response for every symbol -- written to `<output>/debug.log` (per-repo in multi-repo mode), since it's too much to print to the console. When the model reasons before it answers, the log shows that too, above the answer: its reasoning where the provider sends it (Anthropic, Gemini and open reasoning models do, while OpenAI's keep theirs hidden), and how many tokens it spent on it either way. zairo only logs what comes back and never asks for more, so a `-vv` run is the same scan as one without.
 
 **Multi-repo mode only**
 

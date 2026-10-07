@@ -29,7 +29,7 @@ def _ensure_litellm():
         litellm = _litellm
     return litellm
 
-from ._util import display_name as _display_name, normalize_confidence, normalize_cwe, normalize_severity
+from ._util import display_name as _display_name, normalize_confidence, normalize_cwe, normalize_severity, reasoning_of
 from .git_utils import hunk_lines
 from .notes import (
     NOTE_MAX_LINES, format_note, is_notable, is_partial, load_notes, note_key, notes_messages, save_notes,
@@ -907,6 +907,13 @@ def _hash_prompt(model: str, prompt: List[Dict[str, str]]) -> str:
     return h.hexdigest()
 
 
+def _with_reasoning(response: Any, content: str) -> str:
+    """A response as debug.log shows it: the model's reasoning, where
+    there's any to show (see reasoning_of), then its answer."""
+    reasoning = reasoning_of(response)
+    return f"{reasoning}\n\nANSWER:\n{content}" if reasoning else content
+
+
 def _as_text(prompt: List[Dict[str, str]]) -> str:
     """A prompt's messages as one text, for --debug."""
     return "\n\n".join(f"[{message['role']}]\n{message['content']}" for message in prompt)
@@ -1600,7 +1607,7 @@ def scan_graph_for_vulnerabilities(
             content = choice.message.content or ""
             finish_reason = getattr(choice, 'finish_reason', 'unknown')
             if debug_log:
-                debug_log(f"\n{'-'*80}\nRESPONSE -- {node_label} (finish_reason={finish_reason})\n{'-'*80}\n{content}\n")
+                debug_log(f"\n{'-'*80}\nRESPONSE -- {node_label} (finish_reason={finish_reason})\n{'-'*80}\n{_with_reasoning(response, content)}\n")
             empty_note = (
                 f" (finish_reason={finish_reason}) — likely exhausted max_tokens={max_tokens} "
                 f"on internal reasoning before writing an answer; try --max-tokens with a higher value"
@@ -1691,7 +1698,7 @@ def scan_graph_for_vulnerabilities(
             content = choice.message.content or ""
             finish_reason = getattr(choice, 'finish_reason', 'unknown')
             if debug_log:
-                debug_log(f"\n{'-'*80}\nRESPONSE -- {batch_label} (finish_reason={finish_reason})\n{'-'*80}\n{content}\n")
+                debug_log(f"\n{'-'*80}\nRESPONSE -- {batch_label} (finish_reason={finish_reason})\n{'-'*80}\n{_with_reasoning(response, content)}\n")
             empty_note = (
                 f" (finish_reason={finish_reason}) — likely exhausted max_tokens={max_tokens} "
                 f"on internal reasoning before writing an answer; try --max-tokens with a higher value, "
@@ -1976,7 +1983,7 @@ def write_notes(
         content = response.choices[0].message.content or ""
         finish_reason = getattr(response.choices[0], 'finish_reason', None)
         if debug_log:
-            debug_log(f"\n{'-'*80}\nRESPONSE -- {label} (finish_reason={finish_reason})\n{'-'*80}\n{content}\n")
+            debug_log(f"\n{'-'*80}\nRESPONSE -- {label} (finish_reason={finish_reason})\n{'-'*80}\n{_with_reasoning(response, content)}\n")
         if not content.strip():
             return {}, "model returned empty content", finish_reason == "length", tokens, cost
         parsed, error = _note_objects(content)
